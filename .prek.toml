@@ -1,0 +1,38 @@
+[prek]
+parallel = true
+
+[[hooks]]
+name = "format-check"
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+stage = "pre-commit"
+
+[[hooks]]
+name = "clippy"
+command = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+stage = "pre-commit"
+
+[[hooks]]
+name = "test"
+command = "cargo"
+args = ["test", "--workspace"]
+stage = "pre-commit"
+
+[[hooks]]
+name = "doc"
+command = "cargo"
+args = ["doc", "--no-deps", "--workspace"]
+stage = "pre-commit"
+
+[[hooks]]
+name = "audit"
+command = "cargo"
+args = ["audit"]
+stage = "pre-push"
+
+[[hooks]]
+name = "deny"
+command = "cargo"
+args = ["deny", "check"]
+stage = "pre-push"

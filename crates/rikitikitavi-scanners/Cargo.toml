@@ -1,0 +1,26 @@
+[package]
+name = "rikitikitavi-scanners"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+bluetooth = []
+
+[dependencies]
+rikitikitavi-core = { path = "../rikitikitavi-core" }
+rikitikitavi-models = { path = "../rikitikitavi-models" }
+rikitikitavi-network = { path = "../rikitikitavi-network" }
+
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+ipnetwork.workspace = true
+
+[lints]
+workspace = true

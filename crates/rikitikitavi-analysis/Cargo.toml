@@ -1,0 +1,17 @@
+[package]
+name = "rikitikitavi-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rikitikitavi-core = { path = "../rikitikitavi-core" }
+rikitikitavi-models = { path = "../rikitikitavi-models" }
+
+serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

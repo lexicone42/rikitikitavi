@@ -1,0 +1,39 @@
+[package]
+name = "rikitikitavi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rikitikitavi"
+path = "src/main.rs"
+
+[features]
+default = ["tui", "unifi"]
+tui = ["dep:rikitikitavi-tui", "dep:ratatui", "dep:crossterm"]
+unifi = ["dep:rikitikitavi-unifi"]
+minimal = []
+
+[dependencies]
+rikitikitavi-core = { path = "../rikitikitavi-core" }
+rikitikitavi-scanners = { path = "../rikitikitavi-scanners" }
+rikitikitavi-network = { path = "../rikitikitavi-network" }
+rikitikitavi-models = { path = "../rikitikitavi-models" }
+rikitikitavi-analysis = { path = "../rikitikitavi-analysis" }
+rikitikitavi-export = { path = "../rikitikitavi-export" }
+rikitikitavi-tui = { path = "../rikitikitavi-tui", optional = true }
+rikitikitavi-unifi = { path = "../rikitikitavi-unifi", optional = true }
+
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+[lints]
+workspace = true

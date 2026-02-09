@@ -1,0 +1,18 @@
+[package]
+name = "rikitikitavi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ipnetwork.workspace = true
+
+[lints]
+workspace = true

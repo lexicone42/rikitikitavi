@@ -1,0 +1,20 @@
+[package]
+name = "rikitikitavi-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rikitikitavi-core = { path = "../rikitikitavi-core" }
+rikitikitavi-models = { path = "../rikitikitavi-models" }
+rikitikitavi-scanners = { path = "../rikitikitavi-scanners" }
+
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
