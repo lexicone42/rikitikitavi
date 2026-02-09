@@ -27,3 +27,6 @@ tarpaulin-report.html
 
 # Cross-compilation cache
 /.cross/
+
+# Serena (Claude Code MCP plugin)
+/.serena/
