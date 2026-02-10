@@ -11,10 +11,14 @@ pub fn poll_event(timeout: Duration) -> Result<Option<Event>> {
     }
 }
 
-/// Extract a key event if the event is a key press.
+/// Extract a key event if the event is a key press or repeat.
+///
+/// Accepts both `Press` and `Repeat` events so that held arrow keys
+/// auto-scroll. Filters `Release` events to avoid double-handling on
+/// terminals with kitty keyboard protocol support.
 pub fn as_key_press(event: &Event) -> Option<&KeyEvent> {
     if let Event::Key(key) = event {
-        if key.kind == crossterm::event::KeyEventKind::Press {
+        if key.kind != crossterm::event::KeyEventKind::Release {
             return Some(key);
         }
     }

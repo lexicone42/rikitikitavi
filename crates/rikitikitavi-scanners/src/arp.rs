@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use crate::Scanner;
@@ -22,12 +22,14 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
     let mut anomalies = Vec::new();
 
     // ── Check for duplicate IPs (multiple MACs for same IP) ─────────
-    let mut ip_to_macs: HashMap<IpAddr, Vec<&str>> = HashMap::new();
+    // Deduplicate MACs per IP first — on macOS, arp -a often shows the
+    // same IP+MAC pair on multiple interfaces (en0, en1, awdl0).
+    let mut ip_to_macs: HashMap<IpAddr, HashSet<&str>> = HashMap::new();
     for entry in entries {
         ip_to_macs
             .entry(entry.ip)
             .or_default()
-            .push(&entry.mac);
+            .insert(&entry.mac);
     }
 
     for (ip, macs) in &ip_to_macs {
@@ -42,13 +44,14 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
     }
 
     // ── Check for duplicate MACs (one MAC claiming multiple IPs) ────
-    let mut mac_to_ips: HashMap<&str, Vec<IpAddr>> = HashMap::new();
+    // Deduplicate IPs per MAC — same reasoning as above.
+    let mut mac_to_ips: HashMap<&str, HashSet<IpAddr>> = HashMap::new();
     for entry in entries {
         // Skip broadcast and multicast MACs
         if is_broadcast_mac(&entry.mac) || is_multicast_mac(&entry.mac) {
             continue;
         }
-        mac_to_ips.entry(&entry.mac).or_default().push(entry.ip);
+        mac_to_ips.entry(&entry.mac).or_default().insert(entry.ip);
     }
 
     for (mac, ips) in &mac_to_ips {
@@ -56,7 +59,7 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
             // A single MAC with many IPs is suspicious (normal for router: 1-3 IPs)
             anomalies.push(ArpAnomaly::DuplicateMac {
                 mac: (*mac).to_owned(),
-                ips: ips.clone(),
+                ips: ips.iter().copied().collect(),
             });
         }
     }
@@ -347,6 +350,40 @@ mod tests {
         let anomalies = detect_arp_anomalies(&entries, Some("192.168.1.1".parse().unwrap()));
         let finding = anomaly_to_finding(&anomalies[0]);
         assert_eq!(finding.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_same_ip_same_mac_multi_interface_not_spoofing() {
+        // macOS arp -a shows the same IP+MAC on multiple interfaces (en0, en1).
+        // This must NOT trigger a DuplicateIp anomaly.
+        let entries = vec![
+            entry("192.168.1.1", "aa:bb:cc:dd:ee:01"), // en0
+            entry("192.168.1.1", "aa:bb:cc:dd:ee:01"), // en1 (same MAC!)
+        ];
+        let anomalies = detect_arp_anomalies(&entries, None);
+        let dup_ip_count = anomalies
+            .iter()
+            .filter(|a| matches!(a, ArpAnomaly::DuplicateIp { .. }))
+            .count();
+        assert_eq!(dup_ip_count, 0, "identical MACs should not trigger spoofing");
+    }
+
+    #[test]
+    fn test_same_mac_same_ip_multi_interface_not_suspicious() {
+        // Same IP appearing multiple times with same MAC should not inflate
+        // the mac_to_ips count.
+        let entries = vec![
+            entry("192.168.1.10", "aa:bb:cc:dd:ee:01"),
+            entry("192.168.1.10", "aa:bb:cc:dd:ee:01"), // duplicate
+            entry("192.168.1.11", "aa:bb:cc:dd:ee:01"),
+            entry("192.168.1.11", "aa:bb:cc:dd:ee:01"), // duplicate
+        ];
+        let anomalies = detect_arp_anomalies(&entries, None);
+        let dup_mac_count = anomalies
+            .iter()
+            .filter(|a| matches!(a, ArpAnomaly::DuplicateMac { .. }))
+            .count();
+        assert_eq!(dup_mac_count, 0, "2 unique IPs should not trigger DuplicateMac");
     }
 
     #[test]

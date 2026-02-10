@@ -138,8 +138,10 @@ impl App {
                     self.selected_device = None;
                 }
             }
-            KeyCode::Up => self.move_selection(-1),
-            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Left | KeyCode::BackTab => self.prev_screen(),
+            KeyCode::Right | KeyCode::Tab => self.next_screen(),
             _ => {}
         }
         false
@@ -200,6 +202,28 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Cycle to the next screen tab (Left arrow / Shift+Tab).
+    fn prev_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Dashboard => Screen::AttackPaths,
+            Screen::NetworkMap => Screen::Dashboard,
+            Screen::Findings => Screen::NetworkMap,
+            Screen::AttackPaths => Screen::Findings,
+            Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
+        };
+    }
+
+    /// Cycle to the next screen tab (Right arrow / Tab).
+    fn next_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Dashboard => Screen::NetworkMap,
+            Screen::NetworkMap => Screen::Findings,
+            Screen::Findings => Screen::AttackPaths,
+            Screen::AttackPaths => Screen::Dashboard,
+            Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
+        };
     }
 
     fn enter_detail(&mut self) {
@@ -357,6 +381,46 @@ mod tests {
         app.screen = Screen::DeviceDetail;
         app.handle_key(KeyCode::Esc);
         assert_eq!(app.screen, Screen::Dashboard);
+    }
+
+    #[test]
+    fn test_arrow_tab_navigation() {
+        let mut app = test_app();
+        assert_eq!(app.screen, Screen::Dashboard);
+
+        app.handle_key(KeyCode::Right);
+        assert_eq!(app.screen, Screen::NetworkMap);
+
+        app.handle_key(KeyCode::Right);
+        assert_eq!(app.screen, Screen::Findings);
+
+        app.handle_key(KeyCode::Left);
+        assert_eq!(app.screen, Screen::NetworkMap);
+
+        // Tab wraps around
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.screen, Screen::Findings);
+
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.screen, Screen::AttackPaths);
+
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.screen, Screen::Dashboard);
+
+        // BackTab goes backwards
+        app.handle_key(KeyCode::BackTab);
+        assert_eq!(app.screen, Screen::AttackPaths);
+    }
+
+    #[test]
+    fn test_vim_keys_selection() {
+        let mut app = test_app();
+        app.screen = Screen::Findings;
+        // j/k should work like Down/Up
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.selected_finding_index, 0); // no results, stays at 0
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.selected_finding_index, 0);
     }
 
     #[test]
