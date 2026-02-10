@@ -118,8 +118,26 @@ impl Finding {
     }
 }
 
+impl PartialEq for Finding {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.scanner == other.scanner
+            && self.title == other.title
+            && self.description == other.description
+            && self.severity == other.severity
+            && self.affected_ip == other.affected_ip
+            && self.affected_mac == other.affected_mac
+            && self.affected_hostname == other.affected_hostname
+            && self.affected_port == other.affected_port
+            && self.affected_service == other.affected_service
+            && self.cwe_id == other.cwe_id
+            && self.cve_ids == other.cve_ids
+            && self.references == other.references
+    }
+}
+
 /// Remediation guidance for a finding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remediation {
     /// Human-readable remediation steps.
     pub description: String,
@@ -127,4 +145,71 @@ pub struct Remediation {
     pub steps: Vec<String>,
     /// Estimated effort (e.g., "5 minutes", "requires hardware change").
     pub effort: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_severity() -> impl Strategy<Value = Severity> {
+        prop_oneof![
+            Just(Severity::Info),
+            Just(Severity::Low),
+            Just(Severity::Medium),
+            Just(Severity::High),
+            Just(Severity::Critical),
+        ]
+    }
+
+    fn arb_ip() -> impl Strategy<Value = IpAddr> {
+        prop_oneof![
+            (0_u32..=u32::MAX).prop_map(|n| IpAddr::V4(std::net::Ipv4Addr::from(n))),
+        ]
+    }
+
+    fn arb_finding() -> impl Strategy<Value = Finding> {
+        (
+            "[a-z]{1,10}",
+            "[a-zA-Z0-9 ]{1,30}",
+            "[a-zA-Z0-9 ]{1,60}",
+            arb_severity(),
+            proptest::option::of(arb_ip()),
+            proptest::option::of(0_u16..=u16::MAX),
+            proptest::option::of("[A-Z]{3,4}-[0-9]{1,5}"),
+        )
+            .prop_map(
+                |(scanner, title, desc, sev, ip, port, cwe)| {
+                    let mut f = Finding::new(&scanner, &title, &desc, sev);
+                    if let Some(ip) = ip {
+                        f = f.with_ip(ip);
+                    }
+                    if let Some(port) = port {
+                        f = f.with_port(port);
+                    }
+                    if let Some(cwe) = cwe {
+                        f = f.with_cwe(cwe);
+                    }
+                    f
+                },
+            )
+    }
+
+    proptest! {
+        /// JSON roundtrip: serialize then deserialize a Finding produces equivalent data.
+        #[test]
+        fn prop_finding_json_roundtrip(finding in arb_finding()) {
+            let json = serde_json::to_string(&finding).expect("serialize");
+            let recovered: Finding = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(finding, recovered);
+        }
+
+        /// Every Finding has a non-empty scanner and title.
+        #[test]
+        fn prop_finding_builder_invariants(finding in arb_finding()) {
+            assert!(!finding.scanner.is_empty());
+            assert!(!finding.title.is_empty());
+            assert!(!finding.description.is_empty());
+        }
+    }
 }

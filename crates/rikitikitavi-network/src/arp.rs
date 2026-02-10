@@ -265,4 +265,41 @@ myhost.local (10.0.0.50) at de:ad:be:ef:00:02 on en1 [ethernet]
         assert_eq!(host_entry.unwrap().mac, "de:ad:be:ef:00:02");
         assert_eq!(host_entry.unwrap().interface, "en1");
     }
+
+    // ─── Property-based tests ─────────────────────────────────────────
+
+    proptest::proptest! {
+        /// Linux ARP parser never panics on arbitrary input.
+        #[test]
+        fn prop_linux_arp_no_panic(input in proptest::prelude::any::<String>()) {
+            let _ = parse_linux_arp_cache(&input);
+        }
+
+        /// macOS ARP parser never panics on arbitrary input.
+        #[test]
+        fn prop_macos_arp_no_panic(input in proptest::prelude::any::<String>()) {
+            let _ = parse_macos_arp(&input);
+        }
+
+        /// All entries returned by the Linux parser have valid IPs and non-empty MACs.
+        #[test]
+        fn prop_linux_arp_valid_entries(input in proptest::prelude::any::<String>()) {
+            let entries = parse_linux_arp_cache(&input);
+            for entry in &entries {
+                assert!(!entry.mac.is_empty());
+                assert_ne!(entry.mac, "00:00:00:00:00:00");
+                assert!(!entry.interface.is_empty());
+            }
+        }
+
+        /// All entries returned by the macOS parser have non-empty MACs.
+        #[test]
+        fn prop_macos_arp_valid_entries(input in proptest::prelude::any::<String>()) {
+            let entries = parse_macos_arp(&input);
+            for entry in &entries {
+                assert!(!entry.mac.is_empty());
+                assert!(!entry.interface.is_empty());
+            }
+        }
+    }
 }

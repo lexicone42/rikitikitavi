@@ -598,4 +598,49 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
             Some(IpAddr::V4(Ipv4Addr::new(255, 255, 0, 0)))
         );
     }
+
+    // ─── Property-based tests ─────────────────────────────────────────
+
+    proptest::proptest! {
+        /// /proc/net/route parser never panics on arbitrary input.
+        #[test]
+        fn prop_parse_proc_route_no_panic(input in proptest::prelude::any::<String>()) {
+            let _ = parse_proc_route(&input);
+        }
+
+        /// hex IP parser never panics (may return Err on invalid input).
+        #[test]
+        fn prop_parse_hex_ip_no_panic(input in "[0-9a-fA-F]{0,16}") {
+            let _ = parse_hex_ip(&input);
+        }
+
+        /// macOS ifconfig parser never panics on arbitrary input.
+        #[test]
+        fn prop_parse_macos_ifconfig_no_panic(input in proptest::prelude::any::<String>()) {
+            let _ = parse_macos_ifconfig_all(&input);
+        }
+
+        /// macOS hex netmask parser never panics.
+        #[test]
+        fn prop_parse_macos_hex_netmask_no_panic(input in proptest::prelude::any::<String>()) {
+            let _ = parse_macos_hex_netmask(&input);
+        }
+
+        /// mask_to_prefix always returns a value in [0, 32].
+        #[test]
+        fn prop_mask_to_prefix_bounded(octets in proptest::array::uniform4(0_u8..=255)) {
+            let mask = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+            let prefix = mask_to_prefix(mask);
+            assert!(prefix <= 32, "prefix {prefix} > 32 for mask {mask}");
+        }
+
+        /// Interfaces parsed from macOS ifconfig always have non-empty names.
+        #[test]
+        fn prop_macos_ifconfig_names_nonempty(input in proptest::prelude::any::<String>()) {
+            let ifaces = parse_macos_ifconfig_all(&input);
+            for iface in &ifaces {
+                assert!(!iface.name.is_empty(), "interface with empty name");
+            }
+        }
+    }
 }

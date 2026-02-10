@@ -399,6 +399,7 @@ impl Scanner for UniFiScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::strategy::Strategy;
 
     fn test_wlan(security: &str, wpa_mode: Option<&str>, pmf: Option<&str>) -> WlanConfig {
         WlanConfig {
@@ -508,5 +509,97 @@ mod tests {
         let findings = audit_firewall_rules(&[rule]);
         // Specific drop rule should produce no findings
         assert!(findings.is_empty());
+    }
+
+    // ─── Property-based tests ─────────────────────────────────────────
+
+    fn arb_wlan() -> impl proptest::strategy::Strategy<Value = WlanConfig> {
+        (
+            ".*",                                     // id
+            ".*",                                     // name
+            ".*",                                     // security
+            proptest::option::of(".*"),               // wpa_mode
+            proptest::option::of(".*"),               // pmf_mode
+            proptest::prelude::any::<bool>(),         // is_guest
+            proptest::prelude::any::<bool>(),         // enabled
+        )
+            .prop_map(|(id, name, security, wpa_mode, pmf_mode, is_guest, enabled)| {
+                WlanConfig {
+                    id,
+                    name,
+                    security,
+                    wpa_mode,
+                    pmf_mode,
+                    is_guest,
+                    enabled,
+                }
+            })
+    }
+
+    fn arb_firewall_rule() -> impl proptest::strategy::Strategy<Value = FirewallRule> {
+        (
+            ".*",                                // id
+            proptest::option::of(".*"),          // name
+            ".*",                                // action
+            proptest::option::of(".*"),          // src
+            proptest::option::of(".*"),          // dst
+            proptest::prelude::any::<bool>(),    // enabled
+        )
+            .prop_map(|(id, name, action, src, dst, enabled)| {
+                FirewallRule {
+                    id,
+                    name,
+                    action,
+                    src,
+                    dst,
+                    enabled,
+                }
+            })
+    }
+
+    proptest::proptest! {
+        /// audit_wlan never panics on arbitrary WLAN configs.
+        #[test]
+        fn prop_audit_wlan_no_panic(wlan in arb_wlan()) {
+            let _ = audit_wlan(&wlan);
+        }
+
+        /// audit_wlan returns only valid Severity levels in findings.
+        #[test]
+        fn prop_audit_wlan_valid_findings(wlan in arb_wlan()) {
+            let findings = audit_wlan(&wlan);
+            for f in &findings {
+                assert!(!f.scanner.is_empty());
+                assert!(!f.title.is_empty());
+                // Severity must be one of the defined variants — this is enforced by
+                // the type system, but we verify the scanner field is always "unifi".
+                assert_eq!(f.scanner, "unifi");
+            }
+        }
+
+        /// Disabled WLANs produce at most one Info finding.
+        #[test]
+        fn prop_disabled_wlan_info_only(wlan in arb_wlan()) {
+            if !wlan.enabled {
+                let findings = audit_wlan(&wlan);
+                assert!(findings.len() <= 1, "disabled WLAN produced {} findings", findings.len());
+                for f in &findings {
+                    assert_eq!(f.severity, Severity::Info);
+                }
+            }
+        }
+
+        /// audit_firewall_rules never panics on arbitrary rules.
+        #[test]
+        fn prop_audit_firewall_no_panic(rules in proptest::collection::vec(arb_firewall_rule(), 0..10)) {
+            let _ = audit_firewall_rules(&rules);
+        }
+
+        /// Empty rule set always produces exactly one finding.
+        #[test]
+        fn prop_empty_firewall_one_finding(_unused in proptest::prelude::any::<u8>()) {
+            let findings = audit_firewall_rules(&[]);
+            assert_eq!(findings.len(), 1);
+        }
     }
 }
