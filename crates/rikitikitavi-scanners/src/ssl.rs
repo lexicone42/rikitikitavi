@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use std::net::IpAddr;
 
 use crate::Scanner;
@@ -32,7 +32,16 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-326"),
+            .with_cwe("CWE-326")
+            .with_remediation(Remediation {
+                description: "Disable TLS 1.0 and enforce TLS 1.2+.".to_owned(),
+                steps: vec![
+                    "Apache: Set 'SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1' in ssl.conf.".to_owned(),
+                    "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;' in server block.".to_owned(),
+                    "Test with: openssl s_client -connect <ip>:<port> -tls1".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
@@ -49,7 +58,16 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-326"),
+            .with_cwe("CWE-326")
+            .with_remediation(Remediation {
+                description: "Disable TLS 1.1 and enforce TLS 1.2+.".to_owned(),
+                steps: vec![
+                    "Apache: Set 'SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1' in ssl.conf.".to_owned(),
+                    "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;' in server block.".to_owned(),
+                    "Test with: openssl s_client -connect <ip>:<port> -tls1_1".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
@@ -64,7 +82,16 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-326"),
+            .with_cwe("CWE-326")
+            .with_remediation(Remediation {
+                description: "Disable SSL 2.0/3.0 immediately.".to_owned(),
+                steps: vec![
+                    "Apache: Set 'SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1'.".to_owned(),
+                    "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;'.".to_owned(),
+                    "For embedded devices, check for firmware updates that remove SSLv3.".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
@@ -87,7 +114,16 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service("TLS")
-        .with_cwe("CWE-295");
+        .with_cwe("CWE-295")
+        .with_remediation(Remediation {
+            description: "Renew the expired TLS certificate.".to_owned(),
+            steps: vec![
+                "Generate a new certificate or renew via your CA (e.g. Let's Encrypt).".to_owned(),
+                "Install the new certificate and restart the service.".to_owned(),
+                "Set up automatic renewal to prevent future expiry.".to_owned(),
+            ],
+            effort: Some("15 minutes".to_owned()),
+        });
     }
 
     if issue_lower.contains("self-signed") || issue_lower.contains("self signed") {
@@ -102,7 +138,16 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service("TLS")
-        .with_cwe("CWE-295");
+        .with_cwe("CWE-295")
+        .with_remediation(Remediation {
+            description: "Replace self-signed certificate with a CA-signed one.".to_owned(),
+            steps: vec![
+                "Use Let's Encrypt (free) or an internal CA for trusted certificates.".to_owned(),
+                "For LAN-only devices, consider a local CA with mkcert or step-ca.".to_owned(),
+                "Install the CA root certificate on client devices for trust.".to_owned(),
+            ],
+            effort: Some("15 minutes".to_owned()),
+        });
     }
 
     if issue_lower.contains("weak key") || issue_lower.contains("1024") {
@@ -116,7 +161,16 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service("TLS")
-        .with_cwe("CWE-326");
+        .with_cwe("CWE-326")
+        .with_remediation(Remediation {
+            description: "Regenerate the certificate with a stronger key.".to_owned(),
+            steps: vec![
+                "Generate a new 2048-bit (or preferably 4096-bit) RSA key, or a 256-bit ECC key.".to_owned(),
+                "Create a new CSR and obtain a replacement certificate.".to_owned(),
+                "Install the new cert and key, then restart the service.".to_owned(),
+            ],
+            effort: Some("15 minutes".to_owned()),
+        });
     }
 
     if issue_lower.contains("hostname mismatch") || issue_lower.contains("name mismatch") {

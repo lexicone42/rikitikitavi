@@ -30,6 +30,71 @@ fn is_behind_nat(gateway: Option<IpAddr>, public_ip: IpAddr) -> bool {
     gateway != Some(public_ip)
 }
 
+/// Read the first few bytes from a TCP connection to get a banner fingerprint.
+/// Returns `None` if the connection or read fails.
+async fn grab_banner(ip: IpAddr, port: u16) -> Option<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = SocketAddr::new(ip, port);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // For HTTP ports, send a minimal request to elicit a response
+    if matches!(port, 80 | 443 | 8080) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.write_all(b"HEAD / HTTP/1.0\r\nHost: check\r\n\r\n"),
+        )
+        .await;
+    }
+
+    let mut buf = vec![0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    if n == 0 {
+        return None;
+    }
+    buf.truncate(n);
+    Some(buf)
+}
+
+/// Detect hairpin NAT by comparing banners from the public IP and an internal
+/// device on the same port. If any internal device returns an identical banner,
+/// the public IP connection is likely hairpin NAT, not true external exposure.
+async fn is_hairpin_nat(
+    public_ip: IpAddr,
+    port: u16,
+    internal_devices: &[IpAddr],
+) -> bool {
+    // Grab banner from public IP
+    let public_banner = match grab_banner(public_ip, port).await {
+        Some(b) if !b.is_empty() => b,
+        _ => return false,
+    };
+
+    // Check if any internal device has the same banner on this port
+    for &internal_ip in internal_devices {
+        if let Some(internal_banner) = grab_banner(internal_ip, port).await {
+            if !internal_banner.is_empty() && internal_banner == public_banner {
+                tracing::info!(
+                    %internal_ip,
+                    %public_ip,
+                    port,
+                    "hairpin NAT detected: internal and public banners match"
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Map a port to a human-friendly service name for exposure reports.
 const fn exposure_service_name(port: u16) -> &'static str {
     match port {
@@ -43,6 +108,7 @@ const fn exposure_service_name(port: u16) -> &'static str {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl Scanner for ExposureScanner {
     fn id(&self) -> &'static str {
         "exposure"
@@ -124,38 +190,81 @@ impl Scanner for ExposureScanner {
             );
         }
 
+        // Collect internal IPs with open ports for hairpin NAT detection
+        let internal_ips_with_ports: Vec<(IpAddr, Vec<u16>)> = ctx
+            .discovered_devices
+            .iter()
+            .filter(|d| !d.open_ports.is_empty())
+            .map(|d| {
+                let ports: Vec<u16> = d.open_ports.iter().map(|p| p.port).collect();
+                (d.ip, ports)
+            })
+            .collect();
+
         // Check for port forwarding by connecting to our own public IP
         tracing::info!("checking for port forwarding on public IP {public_ip}");
         for &port in EXPOSURE_PORTS {
             if check_port_forwarded(public_ip, port).await {
                 let service = exposure_service_name(port);
-                findings.push(
-                    Finding::new(
-                        "exposure",
-                        &format!("Port {port} ({service}) is forwarded to the internet"),
-                        &format!(
-                            "Port {port} ({service}) on your public IP {public_ip} is reachable \
-                             from within the network, which strongly suggests it is port-forwarded \
-                             to an internal host. This exposes the service to the entire internet."
-                        ),
-                        Severity::High,
-                    )
-                    .with_ip(public_ip)
-                    .with_port(port)
-                    .with_service(service)
-                    .with_cwe("CWE-284")
-                    .with_remediation(Remediation {
-                        description: format!(
-                            "Review whether {service} on port {port} needs to be internet-accessible."
-                        ),
-                        steps: vec![
-                            "Check your router's port forwarding settings.".to_owned(),
-                            format!("Remove the port forward for port {port} if not needed."),
-                            "If needed, restrict access via firewall rules or VPN.".to_owned(),
-                        ],
-                        effort: Some("5 minutes".to_owned()),
-                    }),
-                );
+
+                // Hairpin NAT detection: check if an internal device responds
+                // identically on the same port
+                let candidates: Vec<IpAddr> = internal_ips_with_ports
+                    .iter()
+                    .filter(|(_, ports)| ports.contains(&port))
+                    .map(|(ip, _)| *ip)
+                    .collect();
+
+                if behind_nat && !candidates.is_empty()
+                    && is_hairpin_nat(public_ip, port, &candidates).await
+                {
+                    // Hairpin NAT detected — downgrade to Info
+                    findings.push(
+                        Finding::new(
+                            "exposure",
+                            &format!("Hairpin NAT on port {port} ({service}) — not externally exposed"),
+                            &format!(
+                                "Port {port} ({service}) is reachable on public IP {public_ip} from \
+                                 within the network, but banner comparison with internal devices shows \
+                                 this is hairpin NAT (NAT loopback), not true external exposure. The \
+                                 router is reflecting internal traffic back."
+                            ),
+                            Severity::Info,
+                        )
+                        .with_ip(public_ip)
+                        .with_port(port)
+                        .with_service(service),
+                    );
+                } else {
+                    // Genuine port forwarding
+                    findings.push(
+                        Finding::new(
+                            "exposure",
+                            &format!("Port {port} ({service}) is forwarded to the internet"),
+                            &format!(
+                                "Port {port} ({service}) on your public IP {public_ip} is reachable \
+                                 from within the network, which strongly suggests it is port-forwarded \
+                                 to an internal host. This exposes the service to the entire internet."
+                            ),
+                            Severity::High,
+                        )
+                        .with_ip(public_ip)
+                        .with_port(port)
+                        .with_service(service)
+                        .with_cwe("CWE-284")
+                        .with_remediation(Remediation {
+                            description: format!(
+                                "Review whether {service} on port {port} needs to be internet-accessible."
+                            ),
+                            steps: vec![
+                                "Check your router's port forwarding settings.".to_owned(),
+                                format!("Remove the port forward for port {port} if not needed."),
+                                "If needed, restrict access via firewall rules or VPN.".to_owned(),
+                            ],
+                            effort: Some("5 minutes".to_owned()),
+                        }),
+                    );
+                }
             }
         }
 

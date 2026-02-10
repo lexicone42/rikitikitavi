@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -52,6 +52,7 @@ async fn probe_gateway(ip: Ipv4Addr) -> bool {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl Scanner for IsolationScanner {
     fn id(&self) -> &'static str {
         "isolation"
@@ -102,7 +103,7 @@ impl Scanner for IsolationScanner {
                     subnet_list.join(", ")
                 ),
                 Severity::Low,
-            ).with_cwe("CWE-1008"));
+            ).with_cwe("CWE-653"));
         } else if subnets.len() == 1 {
             findings.push(Finding::new(
                 "isolation",
@@ -149,7 +150,16 @@ impl Scanner for IsolationScanner {
                     ),
                     Severity::Medium,
                 )
-                .with_cwe("CWE-1008"),
+                .with_cwe("CWE-653")
+                .with_remediation(Remediation {
+                    description: "Implement firewall rules between VLANs.".to_owned(),
+                    steps: vec![
+                        "Review your router/firewall's inter-VLAN routing rules.".to_owned(),
+                        "Create ACLs to restrict traffic between network segments.".to_owned(),
+                        "Only allow necessary traffic (e.g. DNS, DHCP) between VLANs.".to_owned(),
+                    ],
+                    effort: Some("30 minutes".to_owned()),
+                }),
             );
         }
 
@@ -167,7 +177,16 @@ impl Scanner for IsolationScanner {
                     ),
                     Severity::Medium,
                 )
-                .with_cwe("CWE-1008"),
+                .with_cwe("CWE-653")
+                .with_remediation(Remediation {
+                    description: "Segment the network using VLANs.".to_owned(),
+                    steps: vec![
+                        "Create separate VLANs for IoT devices, guests, and trusted devices.".to_owned(),
+                        "Configure your managed switch and router to support VLANs (802.1Q).".to_owned(),
+                        "Apply firewall rules between VLANs to limit lateral movement.".to_owned(),
+                    ],
+                    effort: Some("1 hour".to_owned()),
+                }),
             );
         }
 

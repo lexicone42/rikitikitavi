@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -79,6 +79,7 @@ async fn grab_http_server(ip: IpAddr, port: u16) -> Option<String> {
 }
 
 /// Classify a banner finding based on the service and version info.
+#[allow(clippy::too_many_lines)]
 fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     let banner_lower = banner.to_lowercase();
 
@@ -100,7 +101,16 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_ip(ip)
             .with_port(port)
             .with_service("Redis")
-            .with_cwe("CWE-306"),
+            .with_cwe("CWE-306")
+            .with_remediation(Remediation {
+                description: "Enable Redis authentication and restrict network access.".to_owned(),
+                steps: vec![
+                    "Edit redis.conf and set 'requirepass <strong-password>'.".to_owned(),
+                    "Bind Redis to 127.0.0.1 if only local access is needed.".to_owned(),
+                    "Use firewall rules to restrict port 6379 access.".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
@@ -119,7 +129,16 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_ip(ip)
             .with_port(port)
             .with_service("MySQL")
-            .with_cwe("CWE-284"),
+            .with_cwe("CWE-284")
+            .with_remediation(Remediation {
+                description: "Restrict MySQL network access.".to_owned(),
+                steps: vec![
+                    "Edit my.cnf and set 'bind-address = 127.0.0.1' to bind to localhost only.".to_owned(),
+                    "Remove any 'skip-networking' comments and ensure it is not exposed.".to_owned(),
+                    "Use firewall rules to block external access to port 3306.".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
@@ -135,32 +154,107 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_ip(ip)
             .with_port(port)
             .with_service("PostgreSQL")
-            .with_cwe("CWE-284"),
+            .with_cwe("CWE-284")
+            .with_remediation(Remediation {
+                description: "Restrict PostgreSQL network access.".to_owned(),
+                steps: vec![
+                    "Edit postgresql.conf and set \"listen_addresses = 'localhost'\".".to_owned(),
+                    "Review pg_hba.conf to restrict which hosts can connect.".to_owned(),
+                    "Use firewall rules to block external access to port 5432.".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            }),
         );
     }
 
     // SSH version disclosure
     if port == 22 && banner_lower.contains("ssh") {
-        let severity = if banner_lower.contains("openssh")
-            && extract_ssh_major_version(banner).is_some_and(|v| v < 8)
-        {
-            Severity::Medium
+        // Detect Dropbear SSH (common on embedded/IoT devices)
+        if banner_lower.contains("dropbear") {
+            return Some(
+                Finding::new(
+                    "services",
+                    &format!("Dropbear SSH on {ip}:{port} (embedded/IoT)"),
+                    &format!(
+                        "Dropbear SSH detected at {ip}:{port}. Dropbear is commonly used on \
+                         embedded and IoT devices which may have default credentials or \
+                         limited security update support. Banner: {banner}"
+                    ),
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("SSH")
+                .with_cwe("CWE-798")
+                .with_remediation(Remediation {
+                    description: "Secure the embedded SSH service.".to_owned(),
+                    steps: vec![
+                        "Change default credentials on the device immediately.".to_owned(),
+                        "Check the vendor for firmware updates with patched Dropbear.".to_owned(),
+                        "Restrict SSH access to this device via firewall rules.".to_owned(),
+                        "Consider disabling SSH if remote access is not needed.".to_owned(),
+                    ],
+                    effort: Some("10 minutes".to_owned()),
+                }),
+            );
+        }
+
+        let severity = if banner_lower.contains("openssh") {
+            match extract_ssh_major_version(banner) {
+                Some(v) if v < 7 => Severity::High,
+                Some(v) if v < 8 => Severity::Medium,
+                _ => Severity::Low,
+            }
         } else {
             Severity::Low
         };
 
-        let title = if severity == Severity::Medium {
-            format!("Outdated SSH version on {ip}:{port}")
-        } else {
-            format!("SSH version disclosure on {ip}:{port}")
+        let title = match severity {
+            Severity::High => format!("EOL OpenSSH version on {ip}:{port}"),
+            Severity::Medium => format!("Outdated SSH version on {ip}:{port}"),
+            _ => format!("SSH version disclosure on {ip}:{port}"),
         };
 
-        return Some(
-            Finding::new("services", &title, &format!("SSH banner: {banner}"), severity)
-                .with_ip(ip)
-                .with_port(port)
-                .with_service("SSH"),
-        );
+        let description = match severity {
+            Severity::High => format!(
+                "OpenSSH < 7.0 detected at {ip}:{port}. This version is end-of-life and \
+                 vulnerable to CVE-2018-15473 (user enumeration) and other known issues. \
+                 Banner: {banner}"
+            ),
+            _ => format!("SSH banner: {banner}"),
+        };
+
+        let mut finding = Finding::new("services", &title, &description, severity)
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("SSH");
+
+        if severity == Severity::High {
+            finding = finding
+                .with_cwe("CWE-200")
+                .with_references(vec!["https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_owned()])
+                .with_remediation(Remediation {
+                    description: "Upgrade to a supported OpenSSH version immediately.".to_owned(),
+                    steps: vec![
+                        "Update OpenSSH via your package manager (apt, yum, etc.).".to_owned(),
+                        "For EOL operating systems, plan a full OS upgrade.".to_owned(),
+                        "After upgrading, regenerate host keys if they use DSA.".to_owned(),
+                    ],
+                    effort: Some("15 minutes".to_owned()),
+                });
+        } else if severity == Severity::Medium {
+            finding = finding.with_remediation(Remediation {
+                description: "Upgrade SSH to a current supported version.".to_owned(),
+                steps: vec![
+                    "Update the SSH server package via your system's package manager.".to_owned(),
+                    "For embedded devices, check for firmware updates from the vendor.".to_owned(),
+                    "After upgrading, restart the SSH service and verify the new version.".to_owned(),
+                ],
+                effort: Some("10 minutes".to_owned()),
+            });
+        }
+
+        return Some(finding);
     }
 
     // FTP banner

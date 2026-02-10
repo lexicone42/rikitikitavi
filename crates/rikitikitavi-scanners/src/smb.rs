@@ -124,6 +124,157 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
     SmbVersion::Unknown
 }
 
+/// Build an `SMBv2` NEGOTIATE request.
+fn build_smb2_negotiate() -> Vec<u8> {
+    // SMBv2 header (64 bytes) + Negotiate request (36 bytes + dialect list)
+    let mut smb2_header = vec![
+        0xFE, b'S', b'M', b'B', // Protocol ID: \xFESMB
+        0x40, 0x00, // Structure Size: 64
+        0x00, 0x00, // Credit Charge: 0
+        0x00, 0x00, 0x00, 0x00, // Status: SUCCESS
+        0x00, 0x00, // Command: NEGOTIATE (0x0000)
+        0x00, 0x00, // Credit Request: 1
+        0x00, 0x00, 0x00, 0x00, // Flags
+        0x00, 0x00, 0x00, 0x00, // Next Command
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Message ID
+        0x00, 0x00, 0x00, 0x00, // Reserved
+        0x00, 0x00, 0x00, 0x00, // Tree ID
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Session ID
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Signature (first half)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Signature (second half)
+    ];
+
+    // Negotiate request body
+    let negotiate_body = vec![
+        0x24, 0x00, // StructureSize: 36
+        0x02, 0x00, // DialectCount: 2
+        0x01, 0x00, // SecurityMode: signing enabled
+        0x00, 0x00, // Reserved
+        0x00, 0x00, 0x00, 0x00, // Capabilities
+        // ClientGuid (16 bytes of zeros)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, // ClientStartTime (or NegotiateContextOffset for 3.1.1)
+        // Dialects
+        0x02, 0x02, // SMB 2.0.2
+        0x10, 0x02, // SMB 2.1
+    ];
+
+    smb2_header.extend_from_slice(&negotiate_body);
+
+    // NetBIOS session header
+    #[allow(clippy::cast_possible_truncation)]
+    let smb_len = smb2_header.len() as u32;
+    let mut packet = Vec::with_capacity(4 + smb2_header.len());
+    packet.push(0x00);
+    packet.push(((smb_len >> 16) & 0xFF) as u8);
+    packet.push(((smb_len >> 8) & 0xFF) as u8);
+    packet.push((smb_len & 0xFF) as u8);
+    packet.extend_from_slice(&smb2_header);
+
+    packet
+}
+
+/// Build a minimal `SMBv2` `SESSION_SETUP` request with empty credentials (null session).
+fn build_smb2_session_setup_anonymous() -> Vec<u8> {
+    let mut smb2_header = vec![
+        0xFE, b'S', b'M', b'B', // Protocol ID
+        0x40, 0x00, // Structure Size: 64
+        0x00, 0x00, // Credit Charge
+        0x00, 0x00, 0x00, 0x00, // Status
+        0x01, 0x00, // Command: SESSION_SETUP (0x0001)
+        0x01, 0x00, // Credit Request: 1
+        0x00, 0x00, 0x00, 0x00, // Flags
+        0x00, 0x00, 0x00, 0x00, // Next Command
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Message ID: 1
+        0x00, 0x00, 0x00, 0x00, // Reserved
+        0x00, 0x00, 0x00, 0x00, // Tree ID
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Session ID
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Signature
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    // Session Setup request body with empty security buffer (anonymous)
+    let session_body = vec![
+        0x19, 0x00, // StructureSize: 25
+        0x00,       // Flags: 0
+        0x01,       // SecurityMode: signing enabled
+        0x00, 0x00, 0x00, 0x00, // Capabilities
+        0x00, 0x00, 0x00, 0x00, // Channel
+        0x58, 0x00, // SecurityBufferOffset: 88 (64 header + 24 body so far)
+        0x00, 0x00, // SecurityBufferLength: 0 (empty = anonymous)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // PreviousSessionId
+    ];
+
+    smb2_header.extend_from_slice(&session_body);
+
+    // NetBIOS session header
+    #[allow(clippy::cast_possible_truncation)]
+    let smb_len = smb2_header.len() as u32;
+    let mut packet = Vec::with_capacity(4 + smb2_header.len());
+    packet.push(0x00);
+    packet.push(((smb_len >> 16) & 0xFF) as u8);
+    packet.push(((smb_len >> 8) & 0xFF) as u8);
+    packet.push((smb_len & 0xFF) as u8);
+    packet.extend_from_slice(&smb2_header);
+
+    packet
+}
+
+/// Status codes from SMB2 responses.
+const STATUS_SUCCESS: u32 = 0x0000_0000;
+
+/// Attempt an anonymous `SMBv2` session setup (null session).
+/// Returns `Some(true)` if anonymous access was granted, `Some(false)` if denied,
+/// or `None` if we couldn't connect or parse the response.
+async fn check_null_session(ip: IpAddr, port: u16) -> Option<bool> {
+    let addr = SocketAddr::new(ip, port);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Step 1: Send SMBv2 NEGOTIATE
+    let negotiate = build_smb2_negotiate();
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(&negotiate))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Verify we got an SMBv2 response
+    if n < 12 || buf[4] != 0xFE || &buf[5..8] != b"SMB" {
+        return None;
+    }
+
+    // Step 2: Send SESSION_SETUP with empty credentials
+    let session_setup = build_smb2_session_setup_anonymous();
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(&session_setup))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut resp = vec![0u8; 512];
+    let n2 = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut resp))
+        .await
+        .ok()?
+        .ok()?;
+
+    if n2 < 16 || resp[4] != 0xFE || &resp[5..8] != b"SMB" {
+        return None;
+    }
+
+    // Extract NT Status from bytes 12-15 (little-endian)
+    let nt_status = u32::from_le_bytes([resp[12], resp[13], resp[14], resp[15]]);
+
+    Some(nt_status == STATUS_SUCCESS)
+}
+
 /// Check `NetBIOS` Session Service on port 139.
 async fn check_netbios(ip: IpAddr) -> bool {
     let addr = SocketAddr::new(ip, 139);
@@ -250,6 +401,39 @@ impl Scanner for SmbScanner {
                             .with_service("SMB"),
                         );
                     }
+                }
+            }
+
+            // Check for anonymous/null session access
+            if let Some(anonymous_allowed) = check_null_session(ip, 445).await {
+                if anonymous_allowed {
+                    findings.push(
+                        Finding::new(
+                            "smb",
+                            &format!("SMB null session allowed on {ip}:445"),
+                            &format!(
+                                "Host {ip} accepts anonymous SMBv2 session setup (null session). \
+                                 This allows unauthenticated users to enumerate shares, users, \
+                                 and other sensitive information."
+                            ),
+                            Severity::High,
+                        )
+                        .with_ip(ip)
+                        .with_port(445)
+                        .with_service("SMB")
+                        .with_cwe("CWE-287")
+                        .with_remediation(Remediation {
+                            description: "Disable anonymous/null SMB sessions.".to_owned(),
+                            steps: vec![
+                                "Windows: Set 'RestrictAnonymous = 1' in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa."
+                                    .to_owned(),
+                                "Windows: Disable 'Network access: Let Everyone permissions apply to anonymous users'."
+                                    .to_owned(),
+                                "Linux/Samba: Set 'restrict anonymous = 2' in smb.conf.".to_owned(),
+                            ],
+                            effort: Some("10 minutes".to_owned()),
+                        }),
+                    );
                 }
             }
 

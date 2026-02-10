@@ -4,6 +4,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use rikitikitavi_models::Finding;
+
 use crate::app::App;
 use crate::theme::Palette;
 
@@ -178,35 +180,50 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         severity_bar_line("  CRITICAL ", critical, max_count, bar_width, palette.critical),
         severity_bar_line("  HIGH     ", high, max_count, bar_width, palette.high),
         severity_bar_line("  MEDIUM   ", medium, max_count, bar_width, palette.medium),
-        severity_bar_line("  LOW      ", low, max_count, bar_width, palette.low),
-        severity_bar_line("  INFO     ", info, max_count, bar_width, palette.info),
+        Line::from(Span::styled(
+            format!("  Low/Info: {low} + {info}"),
+            Style::default().fg(palette.border),
+        )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Devices: ", Style::default().fg(palette.fg)),
-            Span::styled(
-                format!("{}", app.devices().len()),
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("   Findings: ", Style::default().fg(palette.fg)),
-            Span::styled(
-                format!("{total}"),
-                Style::default()
-                    .fg(if critical > 0 {
-                        palette.critical
-                    } else if high > 0 {
-                        palette.high
-                    } else {
-                        palette.low
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
     ];
 
+    // Action required callout
+    if critical + high > 0 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  Action Required: {} findings", critical + high),
+                Style::default()
+                    .fg(palette.critical)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("  Devices: ", Style::default().fg(palette.fg)),
+        Span::styled(
+            format!("{}", app.devices().len()),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   Findings: ", Style::default().fg(palette.fg)),
+        Span::styled(
+            format!("{total}"),
+            Style::default()
+                .fg(if critical > 0 {
+                    palette.critical
+                } else if high > 0 {
+                    palette.high
+                } else {
+                    palette.low
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
     // Risk grade
-    let grade = risk_grade(critical, high, medium);
+    let grade = map_risk_grade(critical, high, medium, palette);
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  Risk Grade: ", Style::default().fg(palette.fg)),
@@ -281,24 +298,26 @@ fn severity_bar_line(
     ])
 }
 
-const fn risk_grade(critical: usize, high: usize, medium: usize) -> (&'static str, ratatui::style::Color) {
-    if critical > 0 {
-        ("F  ⚠ CRITICAL ISSUES", ratatui::style::Color::Red)
-    } else if high > 2 {
-        ("D  Needs Attention", ratatui::style::Color::Rgb(250, 179, 135))
-    } else if high > 0 {
-        ("C  Fair", ratatui::style::Color::Yellow)
-    } else if medium > 3 {
-        ("B  Good", ratatui::style::Color::Rgb(166, 227, 161))
-    } else {
-        ("A  Excellent", ratatui::style::Color::Green)
-    }
+fn map_risk_grade(critical: usize, high: usize, medium: usize, palette: &Palette) -> (&'static str, ratatui::style::Color) {
+    let (label, color_hint) = rikitikitavi_analysis::risk_grade(critical, high, medium);
+    let color = match color_hint {
+        "critical" => palette.critical,
+        "high" => palette.high,
+        "medium" => palette.medium,
+        "low" => palette.low,
+        _ => palette.info,
+    };
+    (label, color)
 }
 
 fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let findings = app.findings();
 
-    let recent: Vec<Line> = if findings.is_empty() {
+    // Sort by severity descending so Critical/High appear first
+    let mut sorted_findings: Vec<&Finding> = findings.iter().collect();
+    sorted_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+
+    let recent: Vec<Line> = if sorted_findings.is_empty() {
         vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -314,7 +333,7 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
             )),
         ]
     } else {
-        findings
+        sorted_findings
             .iter()
             .take(12)
             .map(|f| {

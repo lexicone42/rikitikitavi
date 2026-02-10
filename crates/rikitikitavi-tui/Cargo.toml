@@ -10,6 +10,7 @@ rikitikitavi-core = { path = "../rikitikitavi-core" }
 rikitikitavi-models = { path = "../rikitikitavi-models" }
 rikitikitavi-scanners = { path = "../rikitikitavi-scanners" }
 rikitikitavi-export = { path = "../rikitikitavi-export" }
+rikitikitavi-analysis = { path = "../rikitikitavi-analysis" }
 
 ratatui.workspace = true
 crossterm.workspace = true

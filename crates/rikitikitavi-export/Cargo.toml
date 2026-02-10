@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rikitikitavi-core = { path = "../rikitikitavi-core" }
 rikitikitavi-models = { path = "../rikitikitavi-models" }
+rikitikitavi-analysis = { path = "../rikitikitavi-analysis" }
 
 serde.workspace = true
 serde_json.workspace = true

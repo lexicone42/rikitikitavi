@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -50,7 +50,16 @@ pub fn classify_missing_headers(
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_cwe("CWE-319"),
+            .with_cwe("CWE-319")
+            .with_remediation(Remediation {
+                description: "Enable HSTS to force HTTPS connections.".to_owned(),
+                steps: vec![
+                    "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' header.".to_owned(),
+                    "For Apache: Header always set Strict-Transport-Security in VirtualHost.".to_owned(),
+                    "For nginx: add_header Strict-Transport-Security in server block.".to_owned(),
+                ],
+                effort: Some("5 minutes".to_owned()),
+            }),
         );
     }
 
@@ -310,7 +319,16 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_ip(ip)
                     .with_port(port)
                     .with_service("HTTP")
-                    .with_cwe("CWE-548"),
+                    .with_cwe("CWE-548")
+                    .with_remediation(Remediation {
+                        description: "Disable directory listing on the web server.".to_owned(),
+                        steps: vec![
+                            "Apache: Remove 'Options Indexes' or add 'Options -Indexes' in the config.".to_owned(),
+                            "nginx: Ensure 'autoindex on;' is not set in location blocks.".to_owned(),
+                            "Alternatively, add an index.html to each directory.".to_owned(),
+                        ],
+                        effort: Some("5 minutes".to_owned()),
+                    }),
                 );
             }
         }
@@ -340,7 +358,16 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                         .with_ip(ip)
                         .with_port(port)
                         .with_service("HTTP")
-                        .with_cwe("CWE-306"),
+                        .with_cwe("CWE-306")
+                        .with_remediation(Remediation {
+                            description: "Restrict access to administrative interfaces.".to_owned(),
+                            steps: vec![
+                                "Add authentication to all admin paths (HTTP Basic Auth or application-level login).".to_owned(),
+                                "Restrict admin access by source IP using firewall rules or web server config.".to_owned(),
+                                "Move admin interfaces to a non-standard port or path.".to_owned(),
+                            ],
+                            effort: Some("15 minutes".to_owned()),
+                        }),
                     );
                 }
             }

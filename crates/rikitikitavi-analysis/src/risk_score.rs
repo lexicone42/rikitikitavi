@@ -26,6 +26,31 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
     score.min(100.0)
 }
 
+/// Compute a letter grade and label from severity counts.
+///
+/// Returns `(grade_with_label, color_hint)` where `color_hint` is a CSS-friendly
+/// color name that both the TUI and HTML report can map to their palette.
+///
+/// Grade scale:
+/// - **F**: Any critical findings
+/// - **D**: More than 2 high findings
+/// - **C**: Any high findings
+/// - **B**: More than 3 medium findings
+/// - **A**: Otherwise
+pub const fn risk_grade(critical: usize, high: usize, medium: usize) -> (&'static str, &'static str) {
+    if critical > 0 {
+        ("F  CRITICAL ISSUES", "critical")
+    } else if high > 2 {
+        ("D  Needs Attention", "high")
+    } else if high > 0 {
+        ("C  Fair", "medium")
+    } else if medium > 3 {
+        ("B  Good", "low")
+    } else {
+        ("A  Excellent", "info")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +74,35 @@ mod tests {
             .collect();
         let score = calculate_risk_score(&findings);
         assert!((score - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_risk_grade_critical_is_f() {
+        let (label, color) = risk_grade(1, 0, 0);
+        assert!(label.starts_with('F'));
+        assert_eq!(color, "critical");
+    }
+
+    #[test]
+    fn test_risk_grade_clean_is_a() {
+        let (label, color) = risk_grade(0, 0, 0);
+        assert!(label.starts_with('A'));
+        assert_eq!(color, "info");
+    }
+
+    #[test]
+    fn test_risk_grade_high_is_d_or_c() {
+        let (label_d, _) = risk_grade(0, 3, 0);
+        assert!(label_d.starts_with('D'));
+        let (label_c, _) = risk_grade(0, 1, 0);
+        assert!(label_c.starts_with('C'));
+    }
+
+    #[test]
+    fn test_risk_grade_medium_only_is_b() {
+        let (label, color) = risk_grade(0, 0, 5);
+        assert!(label.starts_with('B'));
+        assert_eq!(color, "low");
     }
 
     // ─── Property-based tests ─────────────────────────────────────────

@@ -1,4 +1,5 @@
 use ratatui::layout::Rect;
+use rikitikitavi_core::Severity;
 use rikitikitavi_models::{Device, Finding, ScanResults};
 
 /// Which screen the TUI is currently showing.
@@ -52,6 +53,16 @@ pub enum Theme {
     Accessible,
 }
 
+/// Controls which severity levels are shown in the findings list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeverityFilter {
+    /// Show only Critical, High, and Medium findings (default).
+    #[default]
+    ActionableOnly,
+    /// Show all findings including Low and Info.
+    All,
+}
+
 /// Central application state for the TUI.
 pub struct App {
     pub screen: Screen,
@@ -67,6 +78,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// Clickable regions from the last render — used by `handle_mouse`.
     pub hit_regions: HitRegions,
+    /// Severity filter for findings display.
+    pub severity_filter: SeverityFilter,
 }
 
 impl App {
@@ -84,6 +97,7 @@ impl App {
             should_quit: false,
             status_message: None,
             hit_regions: HitRegions::default(),
+            severity_filter: SeverityFilter::default(),
         }
     }
 
@@ -103,6 +117,14 @@ impl App {
                 "Scanning...".clone_into(&mut self.scan_status);
                 self.status_message = Some("Re-scan triggered".to_owned());
                 return true;
+            }
+            KeyCode::Char('l') => {
+                self.severity_filter = match self.severity_filter {
+                    SeverityFilter::ActionableOnly => SeverityFilter::All,
+                    SeverityFilter::All => SeverityFilter::ActionableOnly,
+                };
+                // Reset selection when filter changes
+                self.selected_finding_index = 0;
             }
             KeyCode::Char('e') => {
                 self.export_results();
@@ -150,10 +172,7 @@ impl App {
 
                         match self.screen {
                             Screen::Findings => {
-                                let max = self
-                                    .results
-                                    .as_ref()
-                                    .map_or(0, |r| r.findings.len().saturating_sub(1));
+                                let max = self.filtered_findings().len().saturating_sub(1);
                                 self.selected_finding_index = idx.min(max);
                             }
                             Screen::Dashboard | Screen::NetworkMap => {
@@ -215,10 +234,7 @@ impl App {
     fn move_selection(&mut self, delta: i32) {
         match self.screen {
             Screen::Findings => {
-                let max = self
-                    .results
-                    .as_ref()
-                    .map_or(0, |r| r.findings.len().saturating_sub(1));
+                let max = self.filtered_findings().len().saturating_sub(1);
                 if delta < 0 {
                     self.selected_finding_index = self
                         .selected_finding_index
@@ -249,6 +265,22 @@ impl App {
     /// Get current findings (convenience accessor).
     pub fn findings(&self) -> &[Finding] {
         self.results.as_ref().map_or(&[], |r| r.findings.as_slice())
+    }
+
+    /// Get findings filtered and sorted by severity (Critical first).
+    /// In `ActionableOnly` mode, excludes Low and Info findings.
+    pub fn filtered_findings(&self) -> Vec<&Finding> {
+        let mut filtered: Vec<&Finding> = self.findings().iter()
+            .filter(|f| match self.severity_filter {
+                SeverityFilter::ActionableOnly => {
+                    matches!(f.severity, Severity::Critical | Severity::High | Severity::Medium)
+                }
+                SeverityFilter::All => true,
+            })
+            .collect();
+        // Sort by severity descending (Critical first since Ord is Info < ... < Critical)
+        filtered.sort_by(|a, b| b.severity.cmp(&a.severity));
+        filtered
     }
 
     /// Get current devices (convenience accessor).
@@ -325,5 +357,57 @@ mod tests {
         app.screen = Screen::DeviceDetail;
         app.handle_key(KeyCode::Esc);
         assert_eq!(app.screen, Screen::Dashboard);
+    }
+
+    #[test]
+    fn test_severity_filter_default() {
+        let app = test_app();
+        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
+    }
+
+    #[test]
+    fn test_severity_filter_toggle() {
+        let mut app = test_app();
+        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.severity_filter, SeverityFilter::All);
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
+    }
+
+    #[test]
+    fn test_filtered_findings_excludes_low_info() {
+        use rikitikitavi_core::Severity;
+        use rikitikitavi_models::Finding;
+
+        let mut app = test_app();
+        app.results = Some(ScanResults {
+            findings: vec![
+                Finding::new("test", "Critical", "desc", Severity::Critical),
+                Finding::new("test", "High", "desc", Severity::High),
+                Finding::new("test", "Medium", "desc", Severity::Medium),
+                Finding::new("test", "Low", "desc", Severity::Low),
+                Finding::new("test", "Info", "desc", Severity::Info),
+            ],
+            devices: Vec::new(),
+            attack_paths: Vec::new(),
+            risk_score: 50.0,
+            scan_duration_secs: 0,
+        });
+
+        // Default filter: ActionableOnly
+        let filtered = app.filtered_findings();
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0].severity, Severity::Critical);
+        assert_eq!(filtered[1].severity, Severity::High);
+        assert_eq!(filtered[2].severity, Severity::Medium);
+
+        // Toggle to All
+        app.severity_filter = SeverityFilter::All;
+        let all = app.filtered_findings();
+        assert_eq!(all.len(), 5);
+        // Should still be sorted by severity descending
+        assert_eq!(all[0].severity, Severity::Critical);
+        assert_eq!(all[4].severity, Severity::Info);
     }
 }

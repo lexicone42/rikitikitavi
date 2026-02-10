@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, SeverityFilter};
 use crate::theme::Palette;
 
 #[allow(clippy::too_many_lines)]
@@ -15,15 +15,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(10),   // Table
-            Constraint::Length(10), // Detail pane
+            Constraint::Length(12), // Detail pane (slightly taller for remediation)
             Constraint::Length(3),  // Footer
         ])
         .split(frame.area());
 
-    let findings = app.findings();
+    let filtered = app.filtered_findings();
+    let filtered_count = filtered.len();
+
+    // Build title based on filter mode
+    let title_text = match app.severity_filter {
+        SeverityFilter::ActionableOnly => {
+            format!(" Findings ({filtered_count} Critical/High/Medium) ")
+        }
+        SeverityFilter::All => {
+            format!(" Findings ({filtered_count} All) ")
+        }
+    };
 
     // Findings table with colored severity badges
-    let rows: Vec<Row> = findings
+    let rows: Vec<Row> = filtered
         .iter()
         .enumerate()
         .map(|(i, f)| {
@@ -83,7 +94,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .block(
         Block::default()
             .title(Span::styled(
-                format!(" Findings ({}) ", findings.len()),
+                title_text,
                 Style::default()
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
@@ -96,7 +107,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     frame.render_widget(table, table_area);
 
     // Detail pane for selected finding
-    let detail_text = findings.get(app.selected_finding_index).map_or_else(
+    let detail_text = filtered.get(app.selected_finding_index).map_or_else(
         || {
             vec![
                 Line::from(""),
@@ -135,7 +146,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ];
 
             if let Some(cwe) = &f.cwe_id {
-                lines.push(Line::from(""));
                 lines.push(Line::from(vec![
                     Span::styled("  CWE: ", Style::default().fg(palette.border)),
                     Span::styled(
@@ -152,6 +162,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     Span::styled("  Device: ", Style::default().fg(palette.border)),
                     Span::styled(ip.to_string(), Style::default().fg(palette.fg)),
                 ]));
+            }
+
+            // Show remediation if present
+            if let Some(remediation) = &f.remediation {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  Fix: {}", remediation.description),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                if let Some(effort) = &remediation.effort {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Effort: {effort}"),
+                        Style::default().fg(palette.border),
+                    )));
+                }
             }
 
             lines
@@ -172,7 +199,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(detail, chunks[1]);
 
-    // Footer
+    // Footer with filter toggle hint
+    let filter_hint = match app.severity_filter {
+        SeverityFilter::ActionableOnly => "[L]ow/Info: hidden",
+        SeverityFilter::All => "[L]ow/Info: shown",
+    };
+
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
             " [Findings] ",
@@ -184,6 +216,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Span::raw("  "),
         Span::styled("[Up/Down]", Style::default().fg(palette.accent)),
         Span::styled(" Select  ", Style::default().fg(palette.fg)),
+        Span::styled(filter_hint, Style::default().fg(palette.border)),
+        Span::styled("  ", Style::default()),
         Span::styled("[E]", Style::default().fg(palette.accent)),
         Span::styled("xport  ", Style::default().fg(palette.fg)),
         Span::styled("[D]", Style::default().fg(palette.accent)),
