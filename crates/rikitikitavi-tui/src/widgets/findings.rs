@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::theme::Palette;
 
 #[allow(clippy::too_many_lines)]
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let palette = Palette::from_theme(app.config.theme);
 
     let chunks = Layout::default()
@@ -92,7 +92,8 @@ pub fn render(frame: &mut Frame, app: &App) {
             .border_style(Style::default().fg(palette.border))
             .border_type(ratatui::widgets::BorderType::Rounded),
     );
-    frame.render_widget(table, chunks[0]);
+    let table_area = chunks[0];
+    frame.render_widget(table, table_area);
 
     // Detail pane for selected finding
     let detail_text = findings.get(app.selected_finding_index).map_or_else(
@@ -197,4 +198,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             .border_type(ratatui::widgets::BorderType::Rounded),
     );
     frame.render_widget(footer, chunks[2]);
+
+    // Record the table as a clickable list area (after borrows are dropped)
+    // Border (1) + header row (1) = 2 rows before data
+    app.hit_regions.list_area = Some(table_area);
+    app.hit_regions.list_header_offset = 2;
 }

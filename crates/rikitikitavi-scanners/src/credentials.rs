@@ -117,6 +117,53 @@ async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     Some(false) // Not a 200 = some form of auth or redirect
 }
 
+/// Check FTP credentials on a target and push findings.
+async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
+    if let Some(code) = check_anonymous_ftp(ip).await {
+        if code == 230 {
+            findings.push(
+                Finding::new(
+                    "credentials",
+                    &format!("Anonymous FTP login accepted on {ip}"),
+                    &format!(
+                        "FTP server at {ip}:21 accepts anonymous login. Anyone on the \
+                         network can read (and possibly write) files."
+                    ),
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(21)
+                .with_service("FTP")
+                .with_cwe("CWE-287")
+                .with_remediation(Remediation {
+                    description: "Disable anonymous FTP access.".to_owned(),
+                    steps: vec![
+                        "Open the FTP server configuration.".to_owned(),
+                        "Disable anonymous login.".to_owned(),
+                        "Require named user accounts with strong passwords.".to_owned(),
+                        "Consider switching to SFTP instead.".to_owned(),
+                    ],
+                    effort: Some("5 minutes".to_owned()),
+                }),
+            );
+        } else if code == 530 {
+            findings.push(
+                Finding::new(
+                    "credentials",
+                    &format!("FTP rejects anonymous login on {ip}"),
+                    &format!(
+                        "FTP at {ip}:21 correctly rejects anonymous login (code 530)."
+                    ),
+                    Severity::Info,
+                )
+                .with_ip(ip)
+                .with_port(21)
+                .with_service("FTP"),
+            );
+        }
+    }
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Scanner for CredentialScanner {
@@ -140,6 +187,121 @@ impl Scanner for CredentialScanner {
         tracing::info!("running credential hygiene scan");
         let mut findings = Vec::new();
 
+        // ── Adaptive mode: use Phase 1 discovered devices ───────────
+        if !ctx.discovered_devices.is_empty() {
+            tracing::info!(
+                device_count = ctx.discovered_devices.len(),
+                "adaptive credential scan using discovered devices"
+            );
+
+            for device in &ctx.discovered_devices {
+                let ip = device.ip;
+                let has_port = |p: u16| device.open_ports.iter().any(|op| op.port == p);
+
+                // FTP: only check if port 21 is actually open
+                if has_port(21) {
+                    check_ftp_credentials(ip, &mut findings).await;
+                }
+
+                // Telnet: flag if open (cleartext protocol)
+                if has_port(23) {
+                    findings.push(
+                        Finding::new(
+                            "credentials",
+                            &format!("Telnet service with potential default credentials on {ip}"),
+                            &format!(
+                                "Telnet on {ip}:23 transmits credentials in cleartext. \
+                                 Many devices ship with default telnet passwords. \
+                                 Disable telnet and use SSH instead."
+                            ),
+                            Severity::High,
+                        )
+                        .with_ip(ip)
+                        .with_port(23)
+                        .with_service("Telnet")
+                        .with_cwe("CWE-319"),
+                    );
+                }
+
+                // SMB: flag if port 445 is open
+                if has_port(445) {
+                    findings.push(
+                        Finding::new(
+                            "credentials",
+                            &format!("SMB/CIFS exposed on {ip}:445"),
+                            &format!(
+                                "SMB file sharing is open on {ip}:445. Verify that guest access \
+                                 is disabled and shares require authentication. SMB is a frequent \
+                                 target for lateral movement attacks."
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(ip)
+                        .with_port(445)
+                        .with_service("SMB")
+                        .with_cwe("CWE-287"),
+                    );
+                }
+
+                // RDP: flag if port 3389 is open
+                if has_port(3389) {
+                    findings.push(
+                        Finding::new(
+                            "credentials",
+                            &format!("RDP exposed on {ip}:3389"),
+                            &format!(
+                                "Remote Desktop Protocol on {ip}:3389 is accessible. \
+                                 Ensure Network Level Authentication (NLA) is enabled \
+                                 and brute-force protection is in place."
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(ip)
+                        .with_port(3389)
+                        .with_service("RDP")
+                        .with_cwe("CWE-287"),
+                    );
+                }
+
+                // HTTP admin panels: check on any HTTP port (not just gateway)
+                let http_ports: Vec<u16> = device
+                    .open_ports
+                    .iter()
+                    .filter(|p| matches!(p.port, 80 | 443 | 8080 | 8443 | 8888 | 3000 | 9090))
+                    .map(|p| p.port)
+                    .collect();
+
+                for port in http_ports {
+                    if check_http_no_auth(ip, port).await == Some(true) {
+                        let label = if ctx.gateway == Some(ip) {
+                            "Router admin panel"
+                        } else {
+                            "Web admin panel"
+                        };
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!("{label} without auth on {ip}:{port}"),
+                                &format!(
+                                    "The admin interface at {ip}:{port} returned HTTP 200 \
+                                     without requiring authentication."
+                                ),
+                                Severity::Medium,
+                            )
+                            .with_ip(ip)
+                            .with_port(port)
+                            .with_service("HTTP")
+                            .with_cwe("CWE-306"),
+                        );
+                    }
+                }
+            }
+
+            tracing::info!(findings_count = findings.len(), "adaptive credential scan complete");
+            return Ok(findings);
+        }
+
+        // ── Fallback: classic mode using ARP cache ──────────────────
         let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
             ScanError::ScannerFailed {
                 scanner: "credentials".to_owned(),
@@ -159,81 +321,31 @@ impl Scanner for CredentialScanner {
         );
 
         for &ip in &targets {
-            // Check anonymous FTP
-            if let Some(code) = check_anonymous_ftp(ip).await {
-                if code == 230 {
-                    findings.push(
-                        Finding::new(
-                            "credentials",
-                            &format!("Anonymous FTP login accepted on {ip}"),
-                            &format!(
-                                "FTP server at {ip}:21 accepts anonymous login. Anyone on the \
-                                 network can read (and possibly write) files."
-                            ),
-                            Severity::High,
-                        )
-                        .with_ip(ip)
-                        .with_port(21)
-                        .with_service("FTP")
-                        .with_cwe("CWE-287")
-                        .with_remediation(Remediation {
-                            description: "Disable anonymous FTP access.".to_owned(),
-                            steps: vec![
-                                "Open the FTP server configuration.".to_owned(),
-                                "Disable anonymous login.".to_owned(),
-                                "Require named user accounts with strong passwords.".to_owned(),
-                                "Consider switching to SFTP instead.".to_owned(),
-                            ],
-                            effort: Some("5 minutes".to_owned()),
-                        }),
-                    );
-                } else if code == 530 {
-                    findings.push(
-                        Finding::new(
-                            "credentials",
-                            &format!("FTP rejects anonymous login on {ip}"),
-                            &format!(
-                                "FTP at {ip}:21 correctly rejects anonymous login (code 530)."
-                            ),
-                            Severity::Info,
-                        )
-                        .with_ip(ip)
-                        .with_port(21)
-                        .with_service("FTP"),
-                    );
-                }
-            }
+            check_ftp_credentials(ip, &mut findings).await;
 
-            // Check HTTP admin interfaces on gateway
             if ctx.gateway == Some(ip) {
                 for &port in &[80, 443, 8080, 8443] {
-                    if let Some(no_auth) = check_http_no_auth(ip, port).await {
-                        if no_auth {
-                            findings.push(
-                                Finding::new(
-                                    "credentials",
-                                    &format!("Router admin panel without auth on {ip}:{port}"),
-                                    &format!(
-                                        "The router admin panel at {ip}:{port} returned HTTP 200 \
-                                         without requiring authentication. This may allow anyone on \
-                                         the network to change router settings."
-                                    ),
-                                    Severity::Medium,
-                                )
-                                .with_ip(ip)
-                                .with_port(port)
-                                .with_service("HTTP")
-                                .with_cwe("CWE-306"),
-                            );
-                        }
+                    if check_http_no_auth(ip, port).await == Some(true) {
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!("Router admin panel without auth on {ip}:{port}"),
+                                &format!(
+                                    "The router admin panel at {ip}:{port} returned HTTP 200 \
+                                     without requiring authentication."
+                                ),
+                                Severity::Medium,
+                            )
+                            .with_ip(ip)
+                            .with_port(port)
+                            .with_service("HTTP")
+                            .with_cwe("CWE-306"),
+                        );
                     }
                 }
             }
-        }
 
-        // SMB exposure advisory — check if any host has port 445 open
-        // This is advisory since we don't attempt SMB authentication
-        for &ip in &targets {
+            // SMB check
             let addr = SocketAddr::new(ip, 445);
             if tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
                 .await
@@ -245,8 +357,7 @@ impl Scanner for CredentialScanner {
                         &format!("SMB/CIFS exposed on {ip}:445"),
                         &format!(
                             "SMB file sharing is open on {ip}:445. Verify that guest access is \
-                             disabled and shares require authentication. SMB is a frequent \
-                             target for lateral movement attacks."
+                             disabled and shares require authentication."
                         ),
                         Severity::Medium,
                     )

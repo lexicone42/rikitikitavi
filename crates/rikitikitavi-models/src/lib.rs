@@ -28,6 +28,11 @@ pub struct ScanContext {
     pub network_mode: NetworkMode,
     /// Full scan configuration.
     pub config: ScanConfig,
+    /// Devices discovered during Phase 1 (network/port/device scanning).
+    /// Phase 2 scanners use this to adapt their checks based on what was
+    /// actually found on the network (open ports, device types, etc.).
+    #[serde(default)]
+    pub discovered_devices: Vec<Device>,
 }
 
 /// Aggregated results from a complete scan run.

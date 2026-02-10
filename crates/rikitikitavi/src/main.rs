@@ -69,6 +69,7 @@ async fn cmd_scan(
         perspective,
         network_mode: rikitikitavi_core::NetworkMode::Auto,
         config: scan_config,
+        discovered_devices: Vec::new(),
     };
 
     // Perform network discovery to populate context
@@ -76,6 +77,7 @@ async fn cmd_scan(
         println!("Discovering network...");
     }
     let devices = runner::discover_network(&mut ctx);
+    ctx.discovered_devices = devices;
 
     if !args.quiet {
         if let Some(gw) = ctx.gateway {
@@ -84,7 +86,7 @@ async fn cmd_scan(
         if let Some(net) = &ctx.target_network {
             println!("  Network:  {net}");
         }
-        println!("  Devices:  {}", devices.len());
+        println!("  Devices:  {}", ctx.discovered_devices.len());
         println!();
     }
 
@@ -98,8 +100,7 @@ async fn cmd_scan(
         return Ok(());
     }
 
-    let mut results = runner::run_scan(&ctx).await?;
-    results.devices = devices;
+    let results = runner::run_scan(&mut ctx).await?;
 
     if let Some(output) = args.output {
         match args.format {
@@ -121,6 +122,7 @@ async fn cmd_scan(
 }
 
 #[cfg(feature = "tui")]
+#[allow(clippy::too_many_lines)]
 async fn cmd_tui(
     args: cli::TuiArgs,
     app_config: &rikitikitavi_models::config::AppConfig,
@@ -159,17 +161,18 @@ async fn cmd_tui(
         perspective,
         network_mode: rikitikitavi_core::NetworkMode::Auto,
         config: scan_config.clone(),
+        discovered_devices: Vec::new(),
     };
 
     app.scanning = true;
     "Initial network discovery...".clone_into(&mut app.scan_status);
 
     let devices = runner::discover_network(&mut ctx);
+    ctx.discovered_devices = devices;
     "Running scanners...".clone_into(&mut app.scan_status);
 
-    match runner::run_scan(&ctx).await {
-        Ok(mut results) => {
-            results.devices = devices;
+    match runner::run_scan(&mut ctx).await {
+        Ok(results) => {
             app.results = Some(results);
             app.status_message = Some("Initial scan complete".to_owned());
         }
@@ -183,7 +186,11 @@ async fn cmd_tui(
     // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen)?;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -202,32 +209,38 @@ async fn cmd_tui(
             app.status_message = Some("Re-scan complete".to_owned());
         }
 
-        terminal.draw(|frame| rikitikitavi_tui::ui::draw(frame, &app))?;
+        terminal.draw(|frame| rikitikitavi_tui::ui::draw(frame, &mut app))?;
 
         if let Some(event) =
             rikitikitavi_tui::events::poll_event(std::time::Duration::from_millis(100))?
         {
-            if let Some(key) = rikitikitavi_tui::events::as_key_press(&event) {
-                let rescan_requested = app.handle_key(key.code);
-                if rescan_requested {
-                    // Spawn background re-scan
-                    let tx = scan_tx.clone();
-                    let rescan_config = scan_config.clone();
-                    tokio::spawn(async move {
-                        let mut rescan_ctx = rikitikitavi_models::ScanContext {
-                            target_network: None,
-                            gateway: None,
-                            perspective,
-                            network_mode: rikitikitavi_core::NetworkMode::Auto,
-                            config: rescan_config,
-                        };
-                        let devices = runner::discover_network(&mut rescan_ctx);
-                        if let Ok(mut results) = runner::run_scan(&rescan_ctx).await {
-                            results.devices = devices;
-                            let _ = tx.send(results).await;
-                        }
-                    });
-                }
+            let rescan_requested =
+                if let Some(key) = rikitikitavi_tui::events::as_key_press(&event) {
+                    app.handle_key(key.code)
+                } else if let Some(mouse) = rikitikitavi_tui::events::as_mouse_event(&event) {
+                    app.handle_mouse(*mouse)
+                } else {
+                    false
+                };
+            if rescan_requested {
+                // Spawn background re-scan
+                let tx = scan_tx.clone();
+                let rescan_config = scan_config.clone();
+                tokio::spawn(async move {
+                    let mut rescan_ctx = rikitikitavi_models::ScanContext {
+                        target_network: None,
+                        gateway: None,
+                        perspective,
+                        network_mode: rikitikitavi_core::NetworkMode::Auto,
+                        config: rescan_config,
+                        discovered_devices: Vec::new(),
+                    };
+                    let devices = runner::discover_network(&mut rescan_ctx);
+                    rescan_ctx.discovered_devices = devices;
+                    if let Ok(results) = runner::run_scan(&mut rescan_ctx).await {
+                        let _ = tx.send(results).await;
+                    }
+                });
             }
         }
 
@@ -238,7 +251,11 @@ async fn cmd_tui(
 
     // Restore terminal
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), terminal::LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     Ok(())

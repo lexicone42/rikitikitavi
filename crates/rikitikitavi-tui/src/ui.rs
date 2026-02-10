@@ -1,10 +1,13 @@
 use ratatui::Frame;
 
-use crate::app::{App, Screen};
+use crate::app::{App, HitRegions, Screen};
 use crate::widgets;
 
 /// Main render function — dispatches to the appropriate screen widget.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Reset hit regions for this frame
+    app.hit_regions = HitRegions::default();
+
     match app.screen {
         Screen::Dashboard => widgets::dashboard::render(frame, app),
         Screen::NetworkMap => widgets::network_map::render(frame, app),

@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::theme::Palette;
 
 #[allow(clippy::too_many_lines)]
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let palette = Palette::from_theme(app.config.theme);
 
     let chunks = Layout::default()

@@ -28,7 +28,7 @@ const MONGOOSE_ART: &[&str] = &[
 const BLOCKS: &[char] = &[' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
 #[allow(clippy::too_many_lines)]
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let palette = Palette::from_theme(app.config.theme);
 
     let chunks = Layout::default()
@@ -62,6 +62,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // ── Footer ──────────────────────────────────────────────────────────
     render_footer(frame, chunks[4], &palette, app);
+
+    // Record recent findings area as clickable list
+    app.hit_regions.list_area = Some(chunks[2]);
+    // 1 row for top border, no header row
+    app.hit_regions.list_header_offset = 1;
 }
 
 fn render_header(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
@@ -359,7 +364,9 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
     frame.render_widget(recent_findings, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
+fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App) {
+    use crate::app::Screen;
+
     let screen_indicator = match app.screen {
         crate::app::Screen::Dashboard => "Dashboard",
         crate::app::Screen::NetworkMap => "Network Map",
@@ -368,9 +375,14 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
         crate::app::Screen::DeviceDetail => "Device Detail",
     };
 
+    // Build the screen indicator text to compute its width
+    let indicator_text = format!(" [{screen_indicator}] ");
+    #[allow(clippy::cast_possible_truncation)]
+    let indicator_width = indicator_text.len() as u16;
+
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
-            format!(" [{screen_indicator}] "),
+            indicator_text,
             Style::default()
                 .fg(palette.bg)
                 .bg(palette.accent)
@@ -399,6 +411,25 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
             .border_type(ratatui::widgets::BorderType::Rounded),
     );
     frame.render_widget(footer, area);
+
+    // Record clickable tab regions in the footer.
+    // The footer content starts at area.x + 1 (border) + indicator_width + 2 (spacing).
+    let content_y = area.y + 1; // row inside the border
+    let mut x = area.x + 1 + indicator_width + 2;
+    let tabs: &[(&str, Screen)] = &[
+        ("[D]ash", Screen::Dashboard),
+        ("[N]etwork", Screen::NetworkMap),
+        ("[F]indings", Screen::Findings),
+        ("[A]ttacks", Screen::AttackPaths),
+    ];
+    for &(label, screen) in tabs {
+        #[allow(clippy::cast_possible_truncation)]
+        let w = label.len() as u16 + 2; // label + trailing spaces
+        app.hit_regions
+            .footer_tabs
+            .push((Rect::new(x, content_y, w, 1), screen));
+        x += w;
+    }
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use rikitikitavi_models::{Device, Finding, ScanResults};
 
 /// Which screen the TUI is currently showing.
@@ -9,6 +10,18 @@ pub enum Screen {
     Findings,
     AttackPaths,
     DeviceDetail,
+}
+
+/// Clickable regions recorded during the last render pass.
+/// Used by the mouse handler to map click coordinates to actions.
+#[derive(Debug, Default)]
+pub struct HitRegions {
+    /// Footer tab buttons: (area, screen to switch to).
+    pub footer_tabs: Vec<(Rect, Screen)>,
+    /// The main scrollable list/table area (for row selection).
+    pub list_area: Option<Rect>,
+    /// Number of header rows before the first data row in the list.
+    pub list_header_offset: u16,
 }
 
 /// TUI launch configuration.
@@ -52,10 +65,12 @@ pub struct App {
     pub scan_status: String,
     pub should_quit: bool,
     pub status_message: Option<String>,
+    /// Clickable regions from the last render — used by `handle_mouse`.
+    pub hit_regions: HitRegions,
 }
 
 impl App {
-    pub const fn new(config: TuiConfig) -> Self {
+    pub fn new(config: TuiConfig) -> Self {
         Self {
             screen: Screen::Dashboard,
             config,
@@ -68,6 +83,7 @@ impl App {
             scan_status: String::new(),
             should_quit: false,
             status_message: None,
+            hit_regions: HitRegions::default(),
         }
     }
 
@@ -102,6 +118,66 @@ impl App {
             }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
+            _ => {}
+        }
+        false
+    }
+
+    /// Handle mouse input and update state.
+    /// Returns true if a re-scan was requested (e.g. clicking a "Scan" button).
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let col = event.column;
+                let row = event.row;
+
+                // Check footer tab clicks
+                for &(area, screen) in &self.hit_regions.footer_tabs {
+                    if area.contains((col, row).into()) {
+                        self.screen = screen;
+                        return false;
+                    }
+                }
+
+                // Check list area clicks (select row)
+                if let Some(list_area) = self.hit_regions.list_area {
+                    if list_area.contains((col, row).into()) {
+                        let clicked_row = row.saturating_sub(list_area.y)
+                            .saturating_sub(self.hit_regions.list_header_offset);
+                        let idx = clicked_row as usize;
+
+                        match self.screen {
+                            Screen::Findings => {
+                                let max = self
+                                    .results
+                                    .as_ref()
+                                    .map_or(0, |r| r.findings.len().saturating_sub(1));
+                                self.selected_finding_index = idx.min(max);
+                            }
+                            Screen::Dashboard | Screen::NetworkMap => {
+                                let max = self
+                                    .results
+                                    .as_ref()
+                                    .map_or(0, |r| r.devices.len().saturating_sub(1));
+                                self.selected_device_index = idx.min(max);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Double-click enters detail
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.enter_detail();
+            }
+
+            // Scroll wheel = move selection
+            MouseEventKind::ScrollUp => self.move_selection(-1),
+            MouseEventKind::ScrollDown => self.move_selection(1),
+
             _ => {}
         }
         false

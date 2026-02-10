@@ -218,6 +218,15 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
     .with_service("HTTP")
 }
 
+/// Heuristic: is this port likely serving HTTP?
+const fn is_likely_http_port(port: u16) -> bool {
+    matches!(
+        port,
+        80 | 443 | 3000 | 5000 | 8000 | 8008 | 8080 | 8081 | 8443 | 8444 | 8888 | 8880
+            | 9000 | 9090 | 9443
+    )
+}
+
 #[async_trait]
 impl Scanner for ServicesScanner {
     fn id(&self) -> &'static str {
@@ -234,7 +243,46 @@ impl Scanner for ServicesScanner {
 
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running service banner scan");
+        let mut findings = Vec::new();
 
+        // ── Adaptive mode: use Phase 1 discovered devices ───────────
+        if !ctx.discovered_devices.is_empty() {
+            tracing::info!(
+                device_count = ctx.discovered_devices.len(),
+                "adaptive banner scan using discovered devices"
+            );
+
+            for device in &ctx.discovered_devices {
+                let ip = device.ip;
+                // Grab banners on all discovered open ports (not just hardcoded)
+                for open_port in &device.open_ports {
+                    let port = open_port.port;
+                    if BANNER_PORTS.contains(&port) {
+                        if let Some(banner) = grab_banner(ip, port).await {
+                            if let Some(finding) = classify_banner(ip, port, &banner) {
+                                findings.push(finding);
+                            }
+                        }
+                    } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
+                        if let Some(server) = grab_http_server(ip, port).await {
+                            findings.push(classify_http_server(ip, port, &server));
+                        }
+                    } else {
+                        // Try banner grab on unknown ports too
+                        if let Some(banner) = grab_banner(ip, port).await {
+                            if let Some(finding) = classify_banner(ip, port, &banner) {
+                                findings.push(finding);
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::info!(findings_count = findings.len(), "adaptive banner scan complete");
+            return Ok(findings);
+        }
+
+        // ── Fallback: classic mode using ARP cache ──────────────────
         let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
             ScanError::ScannerFailed {
                 scanner: "services".to_owned(),
@@ -260,10 +308,7 @@ impl Scanner for ServicesScanner {
 
         tracing::info!(target_count = targets.len(), "banner grabbing targets");
 
-        let mut findings = Vec::new();
-
         for &ip in &targets {
-            // Banner ports (service speaks first)
             for &port in BANNER_PORTS {
                 if let Some(banner) = grab_banner(ip, port).await {
                     if let Some(finding) = classify_banner(ip, port, &banner) {
@@ -272,7 +317,6 @@ impl Scanner for ServicesScanner {
                 }
             }
 
-            // HTTP ports (we send request)
             for &port in HTTP_PORTS {
                 if let Some(server) = grab_http_server(ip, port).await {
                     findings.push(classify_http_server(ip, port, &server));
@@ -292,6 +336,7 @@ impl Scanner for ServicesScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_extract_ssh_version() {
@@ -325,5 +370,92 @@ mod tests {
             classify_banner(ip, 6379, "+PONG\r\nredis_version:7.2.0").unwrap();
         // Contains "redis" and doesn't have "err" or "noauth" → Critical
         assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn test_classify_http_server_info() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 80, "nginx/1.18.0");
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.scanner, "services");
+        assert_eq!(finding.affected_port, Some(80));
+    }
+
+    #[test]
+    fn test_classify_http_server_empty() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 8080, "");
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_banner_mysql() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let finding = classify_banner(ip, 3306, "5.7.42-MySQL Community Server").unwrap();
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.affected_service.as_deref(), Some("MySQL"));
+    }
+
+    #[test]
+    fn test_classify_banner_postgresql() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let finding = classify_banner(ip, 5432, "").unwrap();
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.affected_service.as_deref(), Some("PostgreSQL"));
+    }
+
+    #[test]
+    fn test_classify_banner_ftp() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let finding = classify_banner(ip, 21, "220 ProFTPD 1.3.5 Server").unwrap();
+        assert_eq!(finding.severity, Severity::Low);
+        assert_eq!(finding.affected_service.as_deref(), Some("FTP"));
+    }
+
+    #[test]
+    fn test_classify_banner_generic() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let finding = classify_banner(ip, 25, "220 mail.local ESMTP").unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_banner_empty() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let finding = classify_banner(ip, 25, "");
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_is_likely_http_port() {
+        assert!(is_likely_http_port(80));
+        assert!(is_likely_http_port(443));
+        assert!(is_likely_http_port(8080));
+        assert!(is_likely_http_port(3000));
+        assert!(!is_likely_http_port(22));
+        assert!(!is_likely_http_port(21));
+        assert!(!is_likely_http_port(12345));
+    }
+
+    proptest! {
+        /// classify_http_server never panics on arbitrary strings
+        #[test]
+        fn prop_classify_http_server_no_panic(server in ".*") {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = classify_http_server(ip, 80, &server);
+        }
+
+        /// classify_banner never panics on arbitrary strings
+        #[test]
+        fn prop_classify_banner_no_panic(banner in ".*", port in 1_u16..=65535_u16) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = classify_banner(ip, port, &banner);
+        }
+
+        /// extract_ssh_major_version never panics on arbitrary strings
+        #[test]
+        fn prop_extract_ssh_version_no_panic(banner in ".*") {
+            let _ = extract_ssh_major_version(&banner);
+        }
     }
 }

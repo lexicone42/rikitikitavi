@@ -42,10 +42,12 @@ impl ScannerRegistry {
     pub fn new() -> Self {
         Self {
             scanners: vec![
+                // Phase 1: Discovery scanners
                 Box::new(crate::network::NetworkScanner),
-                Box::new(crate::router::RouterScanner),
-                Box::new(crate::device::DeviceScanner),
                 Box::new(crate::ports::PortScanner),
+                Box::new(crate::device::DeviceScanner),
+                // Phase 2: Deep analysis scanners
+                Box::new(crate::router::RouterScanner),
                 Box::new(crate::dns::DnsScanner),
                 Box::new(crate::wifi::WifiScanner),
                 Box::new(crate::exposure::ExposureScanner),
@@ -53,6 +55,13 @@ impl ScannerRegistry {
                 Box::new(crate::neighbor::NeighborScanner),
                 Box::new(crate::isolation::IsolationScanner),
                 Box::new(crate::services::ServicesScanner),
+                Box::new(crate::ssl::SslScanner),
+                Box::new(crate::mdns::MdnsScanner),
+                Box::new(crate::http_audit::HttpAuditScanner),
+                Box::new(crate::database::DatabaseScanner),
+                Box::new(crate::smb::SmbScanner),
+                Box::new(crate::arp::ArpScanner),
+                Box::new(crate::dhcp::DhcpScanner),
             ],
         }
     }

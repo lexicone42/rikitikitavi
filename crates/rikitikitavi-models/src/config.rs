@@ -181,3 +181,113 @@ impl Default for LoggingConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_scan_config_defaults_sensible() {
+        let config = ScanConfig::default();
+        assert!(config.timeout_seconds > 0);
+        assert!(config.parallelism > 0);
+        assert!(config.attack_paths);
+        assert!(config.modules.is_none());
+        assert!(config.excluded_networks.is_empty());
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert!(config.organization.name.is_none());
+        assert!(!config.security_lake.enabled);
+        assert_eq!(config.output.report_format, ReportFormat::Html);
+    }
+
+    #[test]
+    fn test_scan_config_yaml_roundtrip() {
+        let config = ScanConfig {
+            perspective: Perspective::Authenticated,
+            intensity: ScanIntensity::Aggressive,
+            timeout_seconds: 60,
+            parallelism: 50,
+            port_scan_range: PortRange::Extended,
+            attack_paths: false,
+            ..ScanConfig::default()
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let recovered: ScanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(recovered.timeout_seconds, 60);
+        assert_eq!(recovered.parallelism, 50);
+        assert!(!recovered.attack_paths);
+    }
+
+    #[test]
+    fn test_partial_deserialization_uses_defaults() {
+        let yaml = "timeout_seconds: 120\n";
+        let config: ScanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.timeout_seconds, 120);
+        // Other fields should use defaults
+        assert_eq!(config.parallelism, 100);
+        assert!(config.attack_paths);
+    }
+
+    #[test]
+    fn test_port_range_custom_roundtrip() {
+        let range = PortRange::Custom(vec![22, 80, 443, 8080]);
+        let json = serde_json::to_string(&range).unwrap();
+        let recovered: PortRange = serde_json::from_str(&json).unwrap();
+        if let PortRange::Custom(ports) = recovered {
+            assert_eq!(ports, vec![22, 80, 443, 8080]);
+        } else {
+            panic!("expected Custom variant");
+        }
+    }
+
+    #[test]
+    fn test_scan_intensity_variants() {
+        for (variant, expected) in [
+            (ScanIntensity::Passive, "\"passive\""),
+            (ScanIntensity::Active, "\"active\""),
+            (ScanIntensity::Aggressive, "\"aggressive\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let recovered: ScanIntensity = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, variant);
+        }
+    }
+
+    #[test]
+    fn test_unifi_mode_variants() {
+        for variant in [
+            UniFiMode::Auto,
+            UniFiMode::Local,
+            UniFiMode::Remote,
+            UniFiMode::Cloud,
+            UniFiMode::Disabled,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let recovered: UniFiMode = serde_json::from_str(&json).unwrap();
+            // Just check roundtrip doesn't panic
+            let _ = recovered;
+        }
+    }
+
+    proptest! {
+        /// PortRange::Custom roundtrip with arbitrary Vec<u16>
+        #[test]
+        fn prop_port_range_custom_roundtrip(ports in proptest::collection::vec(1_u16..=65535_u16, 0..20)) {
+            let range = PortRange::Custom(ports.clone());
+            let json = serde_json::to_string(&range).unwrap();
+            let recovered: PortRange = serde_json::from_str(&json).unwrap();
+            if let PortRange::Custom(recovered_ports) = recovered {
+                assert_eq!(recovered_ports, ports);
+            } else {
+                panic!("expected Custom variant");
+            }
+        }
+    }
+}

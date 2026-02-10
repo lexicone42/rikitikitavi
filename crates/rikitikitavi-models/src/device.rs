@@ -105,3 +105,138 @@ pub enum PortProtocol {
     Tcp,
     Udp,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_device_new_defaults() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let device = Device::new(ip);
+        assert_eq!(device.ip, ip);
+        assert!(device.mac.is_none());
+        assert!(device.hostname.is_none());
+        assert!(device.vendor.is_none());
+        assert_eq!(device.device_type, DeviceType::Unknown);
+        assert!(device.open_ports.is_empty());
+        assert!(device.os_guess.is_none());
+    }
+
+    #[test]
+    fn test_device_builder_chain() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let device = Device::new(ip)
+            .with_mac("aa:bb:cc:dd:ee:ff")
+            .with_hostname("myhost")
+            .with_device_type(DeviceType::Router);
+
+        assert_eq!(device.ip, ip);
+        assert_eq!(device.mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(device.hostname.as_deref(), Some("myhost"));
+        assert_eq!(device.device_type, DeviceType::Router);
+    }
+
+    #[test]
+    fn test_device_json_roundtrip() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let device = Device::new(ip)
+            .with_mac("00:11:22:33:44:55")
+            .with_device_type(DeviceType::Nas);
+
+        let json = serde_json::to_string(&device).unwrap();
+        let recovered: Device = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.ip, device.ip);
+        assert_eq!(recovered.mac, device.mac);
+        assert_eq!(recovered.device_type, device.device_type);
+    }
+
+    #[test]
+    fn test_device_type_serialization() {
+        let variants = [
+            DeviceType::Router,
+            DeviceType::Switch,
+            DeviceType::AccessPoint,
+            DeviceType::Desktop,
+            DeviceType::Laptop,
+            DeviceType::Phone,
+            DeviceType::Tablet,
+            DeviceType::Server,
+            DeviceType::Nas,
+            DeviceType::Printer,
+            DeviceType::Camera,
+            DeviceType::SmartTv,
+            DeviceType::IoT,
+            DeviceType::GameConsole,
+            DeviceType::MediaPlayer,
+            DeviceType::Unknown,
+        ];
+
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let recovered: DeviceType = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, *variant);
+        }
+    }
+
+    #[test]
+    fn test_open_port_roundtrip() {
+        let port = OpenPort {
+            port: 443,
+            protocol: PortProtocol::Tcp,
+            service: Some("HTTPS".to_owned()),
+            version: Some("1.1".to_owned()),
+            banner: None,
+        };
+
+        let json = serde_json::to_string(&port).unwrap();
+        let recovered: OpenPort = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.port, 443);
+        assert_eq!(recovered.protocol, PortProtocol::Tcp);
+        assert_eq!(recovered.service.as_deref(), Some("HTTPS"));
+    }
+
+    #[test]
+    fn test_device_type_default() {
+        assert_eq!(DeviceType::default(), DeviceType::Unknown);
+    }
+
+    proptest! {
+        /// Builder chaining with arbitrary data preserves all fields
+        #[test]
+        fn prop_device_builder_preserves(
+            a in 0_u8..=255_u8,
+            b in 0_u8..=255_u8,
+            c in 0_u8..=255_u8,
+            d in 0_u8..=255_u8,
+            mac in "[0-9a-f]{2}(:[0-9a-f]{2}){5}",
+            hostname in "[a-z]{1,10}",
+        ) {
+            let ip = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+            let device = Device::new(ip)
+                .with_mac(&mac)
+                .with_hostname(&hostname);
+
+            assert_eq!(device.ip, ip);
+            assert_eq!(device.mac.as_deref(), Some(mac.as_str()));
+            assert_eq!(device.hostname.as_deref(), Some(hostname.as_str()));
+        }
+
+        /// Device JSON roundtrip preserves data
+        #[test]
+        fn prop_device_json_roundtrip(
+            a in 1_u8..=254_u8,
+            b in 0_u8..=255_u8,
+            c in 0_u8..=255_u8,
+            d in 1_u8..=254_u8,
+        ) {
+            let ip = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+            let device = Device::new(ip);
+            let json = serde_json::to_string(&device).unwrap();
+            let recovered: Device = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered.ip, device.ip);
+        }
+    }
+}

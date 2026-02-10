@@ -31,7 +31,7 @@ const fn device_icon(device: &rikitikitavi_models::Device) -> &'static str {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let palette = Palette::from_theme(app.config.theme);
 
     let chunks = Layout::default()
@@ -177,6 +177,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
     }
 
+    let map_area = chunks[0];
     let map = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
@@ -189,7 +190,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             .border_style(Style::default().fg(palette.border))
             .border_type(ratatui::widgets::BorderType::Rounded),
     );
-    frame.render_widget(map, chunks[0]);
+    frame.render_widget(map, map_area);
 
     // Footer
     let footer = Paragraph::new(Line::from(vec![
@@ -217,4 +218,10 @@ pub fn render(frame: &mut Frame, app: &App) {
             .border_type(ratatui::widgets::BorderType::Rounded),
     );
     frame.render_widget(footer, chunks[1]);
+
+    // Record the map area for mouse clicks on device lines (after borrows dropped).
+    // Lines before first device: border(1) + empty(1) + internet box(3) + pipe(1)
+    //   + router box(3) + pipe(1) + backbone(1) = 11
+    app.hit_regions.list_area = Some(map_area);
+    app.hit_regions.list_header_offset = 12;
 }

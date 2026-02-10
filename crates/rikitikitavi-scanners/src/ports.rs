@@ -378,3 +378,243 @@ impl Scanner for PortScanner {
         120
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rikitikitavi_core::Severity;
+
+    // ── port_to_service tests ───────────────────────────────────────
+
+    #[test]
+    fn test_port_to_service_known_ports() {
+        assert_eq!(port_to_service(21), "FTP");
+        assert_eq!(port_to_service(22), "SSH");
+        assert_eq!(port_to_service(23), "Telnet");
+        assert_eq!(port_to_service(25), "SMTP");
+        assert_eq!(port_to_service(53), "DNS");
+        assert_eq!(port_to_service(80), "HTTP");
+        assert_eq!(port_to_service(443), "HTTPS");
+        assert_eq!(port_to_service(445), "SMB");
+        assert_eq!(port_to_service(3306), "MySQL");
+        assert_eq!(port_to_service(3389), "RDP");
+        assert_eq!(port_to_service(5432), "PostgreSQL");
+        assert_eq!(port_to_service(5900), "VNC");
+        assert_eq!(port_to_service(6379), "Redis");
+        assert_eq!(port_to_service(8080), "HTTP-Proxy");
+        assert_eq!(port_to_service(27017), "MongoDB");
+    }
+
+    #[test]
+    fn test_port_to_service_unknown() {
+        assert_eq!(port_to_service(12345), "Unknown");
+        assert_eq!(port_to_service(0), "Unknown");
+        assert_eq!(port_to_service(65535), "Unknown");
+    }
+
+    // ── common_ports / extended_ports tests ──────────────────────────
+
+    #[test]
+    fn test_common_ports_contains_expected() {
+        let ports = common_ports();
+        assert!(ports.contains(&22), "SSH missing");
+        assert!(ports.contains(&80), "HTTP missing");
+        assert!(ports.contains(&443), "HTTPS missing");
+        assert!(ports.contains(&21), "FTP missing");
+        assert!(ports.contains(&23), "Telnet missing");
+        assert!(ports.contains(&445), "SMB missing");
+        assert!(ports.contains(&3389), "RDP missing");
+    }
+
+    #[test]
+    fn test_common_ports_reasonable_size() {
+        let ports = common_ports();
+        assert!(ports.len() >= 30, "too few common ports");
+        assert!(ports.len() <= 100, "too many common ports");
+    }
+
+    #[test]
+    fn test_extended_ports_superset() {
+        let common = common_ports();
+        let extended = extended_ports();
+        for port in &common {
+            assert!(
+                extended.contains(port),
+                "extended_ports missing common port {port}"
+            );
+        }
+        assert!(extended.len() > common.len());
+    }
+
+    #[test]
+    fn test_extended_ports_sorted_and_deduped() {
+        let extended = extended_ports();
+        for window in extended.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "extended_ports not sorted/deduped: {} >= {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    // ── get_ports tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_get_ports_common() {
+        let ports = get_ports(&PortRange::Common);
+        assert_eq!(ports, common_ports());
+    }
+
+    #[test]
+    fn test_get_ports_extended() {
+        let ports = get_ports(&PortRange::Extended);
+        assert_eq!(ports, extended_ports());
+    }
+
+    #[test]
+    fn test_get_ports_full() {
+        let ports = get_ports(&PortRange::Full);
+        assert_eq!(ports.len(), 65535);
+        assert_eq!(*ports.first().unwrap(), 1);
+        assert_eq!(*ports.last().unwrap(), 65535);
+    }
+
+    #[test]
+    fn test_get_ports_custom() {
+        let custom = vec![22, 80, 443];
+        let ports = get_ports(&PortRange::Custom(custom.clone()));
+        assert_eq!(ports, custom);
+    }
+
+    #[test]
+    fn test_get_ports_custom_empty() {
+        let ports = get_ports(&PortRange::Custom(Vec::new()));
+        assert!(ports.is_empty());
+    }
+
+    // ── classify_port tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_classify_telnet_high() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 23);
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.affected_port, Some(23));
+        assert_eq!(finding.affected_service.as_deref(), Some("Telnet"));
+        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-319"));
+    }
+
+    #[test]
+    fn test_classify_ftp_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 21);
+        assert_eq!(finding.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_ssh_low() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 22);
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_http_info() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 80);
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_rdp_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 3389);
+        assert_eq!(finding.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_vnc_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 5900);
+        assert_eq!(finding.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_databases_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        for port in [3306, 5432, 27017, 6379] {
+            let finding = classify_port(ip, port);
+            assert_eq!(finding.severity, Severity::Medium, "port {port}");
+        }
+    }
+
+    #[test]
+    fn test_classify_upnp_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(classify_port(ip, 1900).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 49152).severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_printer_low() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(classify_port(ip, 9100).severity, Severity::Low);
+        assert_eq!(classify_port(ip, 631).severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_mail_medium() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(classify_port(ip, 110).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 143).severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_unknown_info() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 12345);
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.affected_service.as_deref(), Some("Unknown"));
+    }
+
+    #[test]
+    fn test_classify_port_always_has_ip_and_port() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        for port in [22, 23, 80, 443, 3389, 5900, 6379, 12345] {
+            let finding = classify_port(ip, port);
+            assert_eq!(finding.affected_ip, Some(ip));
+            assert_eq!(finding.affected_port, Some(port));
+            assert_eq!(finding.scanner, "ports");
+        }
+    }
+
+    // ── Proptests ───────────────────────────────────────────────────
+
+    proptest! {
+        /// port_to_service never panics on any u16
+        #[test]
+        fn prop_port_to_service_no_panic(port in 0_u16..=u16::MAX) {
+            let _ = port_to_service(port);
+        }
+
+        /// classify_port always returns a valid Finding for any port
+        #[test]
+        fn prop_classify_port_valid(
+            a in 0_u8..=255_u8,
+            b in 0_u8..=255_u8,
+            c in 0_u8..=255_u8,
+            d in 0_u8..=255_u8,
+            port in 1_u16..=65535_u16,
+        ) {
+            let ip: IpAddr = format!("{a}.{b}.{c}.{d}").parse().unwrap();
+            let finding = classify_port(ip, port);
+            assert!(!finding.title.is_empty());
+            assert!(!finding.scanner.is_empty());
+            assert_eq!(finding.affected_ip, Some(ip));
+            assert_eq!(finding.affected_port, Some(port));
+        }
+    }
+}

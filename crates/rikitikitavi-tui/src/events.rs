@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use std::time::Duration;
 
 /// Poll for terminal events with a timeout.
@@ -17,6 +17,14 @@ pub fn as_key_press(event: &Event) -> Option<&KeyEvent> {
         if key.kind == crossterm::event::KeyEventKind::Press {
             return Some(key);
         }
+    }
+    None
+}
+
+/// Extract a mouse event from a terminal event.
+pub const fn as_mouse_event(event: &Event) -> Option<&MouseEvent> {
+    if let Event::Mouse(mouse) = event {
+        return Some(mouse);
     }
     None
 }

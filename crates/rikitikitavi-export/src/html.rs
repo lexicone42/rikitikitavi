@@ -12,7 +12,7 @@ pub fn export_html(results: &ScanResults, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn render_html_report(results: &ScanResults) -> String {
+pub fn render_html_report(results: &ScanResults) -> String {
     // TODO: Implement a proper HTML template
     let findings_count = results.findings.len();
     let devices_count = results.devices.len();
@@ -42,4 +42,78 @@ fn render_html_report(results: &ScanResults) -> String {
 </html>"#,
         results.risk_score
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rikitikitavi_core::Severity;
+    use rikitikitavi_models::Finding;
+
+    fn make_results(findings: Vec<Finding>, risk_score: f64) -> ScanResults {
+        ScanResults {
+            findings,
+            devices: Vec::new(),
+            attack_paths: Vec::new(),
+            risk_score,
+            scan_duration_secs: 0,
+        }
+    }
+
+    #[test]
+    fn test_empty_results_valid_html() {
+        let results = make_results(Vec::new(), 0.0);
+        let html = render_html_report(&results);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("<html>"));
+        assert!(html.contains("</html>"));
+        assert!(html.contains("<strong>0</strong> Findings"));
+        assert!(html.contains("<strong>0</strong> Devices"));
+    }
+
+    #[test]
+    fn test_html_contains_counts() {
+        let findings = vec![
+            Finding::new("test", "Finding 1", "Desc 1", Severity::High),
+            Finding::new("test", "Finding 2", "Desc 2", Severity::Low),
+        ];
+        let results = make_results(findings, 65.0);
+        let html = render_html_report(&results);
+        assert!(html.contains("<strong>2</strong> Findings"));
+        assert!(html.contains("65"));
+    }
+
+    #[test]
+    fn test_html_risk_score_range() {
+        let results = make_results(Vec::new(), 75.5);
+        let html = render_html_report(&results);
+        assert!(html.contains("76")); // Formatted as {:.0}
+    }
+
+    #[test]
+    fn test_html_special_chars_in_title() {
+        // Finding titles with special chars should not break HTML structure
+        let findings = vec![Finding::new(
+            "test",
+            "XSS <script>alert('hi')</script>",
+            "Desc with \"quotes\" & <tags>",
+            Severity::High,
+        )];
+        let results = make_results(findings, 50.0);
+        let html = render_html_report(&results);
+        // The HTML should still be parseable (findings aren't rendered in detail yet)
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+    }
+
+    proptest! {
+        /// render_html_report never panics on arbitrary risk scores
+        #[test]
+        fn prop_render_html_no_panic(risk_score in 0.0_f64..=100.0_f64) {
+            let results = make_results(Vec::new(), risk_score);
+            let html = render_html_report(&results);
+            assert!(html.contains("<!DOCTYPE html>"));
+        }
+    }
 }

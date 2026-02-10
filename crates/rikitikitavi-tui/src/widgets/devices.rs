@@ -9,7 +9,7 @@ use crate::theme::Palette;
 
 /// Render the device detail screen.
 #[allow(clippy::too_many_lines)]
-pub fn render_detail(frame: &mut Frame, app: &App) {
+pub fn render_detail(frame: &mut Frame, app: &mut App) {
     let palette = Palette::from_theme(app.config.theme);
 
     let chunks = Layout::default()
