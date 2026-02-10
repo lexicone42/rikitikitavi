@@ -102,7 +102,11 @@ async fn cmd_scan(
     results.devices = devices;
 
     if let Some(output) = args.output {
-        rikitikitavi_export::export_json(&results, &output)?;
+        match args.format {
+            cli::ReportFormatArg::Json => rikitikitavi_export::export_json(&results, &output)?,
+            cli::ReportFormatArg::Html => rikitikitavi_export::export_html(&results, &output)?,
+            cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(&results, &output)?,
+        }
         println!("Results written to {}", output.display());
     } else if !args.quiet {
         println!("Scan complete: {} findings", results.findings.len());
@@ -249,30 +253,33 @@ fn cmd_report(
 }
 
 #[cfg(feature = "unifi")]
-#[allow(clippy::unused_async)]
 async fn cmd_unifi(
     args: cli::UniFiArgs,
     _app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
     match args.command {
-        cli::UniFiCommand::Scan { local, .. } => {
-            if local {
-                if let Some(env) = rikitikitavi_unifi::UniFiEnvironment::detect() {
-                    println!("Detected UniFi device: {:?}", env.device_type);
-                } else {
-                    println!("Not running on a UniFi device. Use --controller for remote mode.");
-                }
-            }
-            println!("UniFi scan not yet implemented.");
+        cli::UniFiCommand::Scan {
+            local,
+            controller,
+            user,
+            password,
+            token,
+            site,
+            output,
+        } => {
+            cmd_unifi_scan(local, controller, user, password, token, &site, output).await?;
         }
         cli::UniFiCommand::Devices => {
-            println!("Device listing not yet implemented.");
+            println!("Device listing requires a controller connection.");
+            println!("Use `rikitikitavi unifi scan --controller <url>` with credentials first.");
         }
         cli::UniFiCommand::FirmwareCheck => {
-            println!("Firmware check not yet implemented.");
+            println!("Firmware check requires a controller connection.");
+            println!("Use `rikitikitavi unifi scan --controller <url>` with credentials.");
         }
         cli::UniFiCommand::AuditController => {
-            println!("Controller audit not yet implemented.");
+            println!("Controller audit requires a controller connection.");
+            println!("Use `rikitikitavi unifi scan --controller <url>` with credentials.");
         }
         cli::UniFiCommand::Deploy {
             host, persistent, ..
@@ -283,10 +290,149 @@ async fn cmd_unifi(
         cli::UniFiCommand::Tui { .. } => {
             println!("UniFi TUI not yet implemented.");
         }
-        cli::UniFiCommand::Report { .. } => {
-            println!("UniFi report not yet implemented.");
+        cli::UniFiCommand::Report { output, format } => {
+            println!("Run `rikitikitavi unifi scan` first, then generate reports from the output.");
+            if let Some(path) = output {
+                println!("Would write {:?} report to {}", format, path.display());
+            }
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "unifi")]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn cmd_unifi_scan(
+    local: bool,
+    controller: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+    token: Option<String>,
+    site: &str,
+    output: Option<std::path::PathBuf>,
+) -> Result<()> {
+    use rikitikitavi_unifi::UniFiClient;
+
+    // Determine controller URL
+    let url = if local {
+        if let Some(env) = rikitikitavi_unifi::UniFiEnvironment::detect() {
+            println!("Detected UniFi device: {:?}", env.device_type);
+            if let Some(ver) = &env.unifi_os_version {
+                println!("  UniFi OS: {ver}");
+            }
+            "https://localhost".to_owned()
+        } else {
+            anyhow::bail!(
+                "Not running on a UniFi device. Use --controller for remote mode."
+            );
+        }
+    } else if let Some(ctrl) = controller {
+        ctrl
+    } else {
+        anyhow::bail!(
+            "Specify --local (on-device) or --controller <url> for remote scanning."
+        );
+    };
+
+    println!("Connecting to UniFi controller at {url}...");
+
+    let mut client = UniFiClient::new_insecure(&url, site)?;
+
+    // Authenticate
+    if let Some(tok) = token {
+        client.login_token(&tok).await?;
+        println!("Authenticated with API token.");
+    } else if let (Some(u), Some(p)) = (user, password) {
+        client.login(&u, &p).await?;
+        println!("Authenticated with username/password.");
+    } else {
+        anyhow::bail!(
+            "Provide --token <api-token> or --user <username> --password <password>."
+        );
+    }
+
+    println!("Running UniFi security audit...\n");
+
+    let mut all_findings = Vec::new();
+
+    // Audit WLANs
+    match client.get_wlans().await {
+        Ok(wlans) => {
+            println!("WLANs: {} configured", wlans.len());
+            for wlan in &wlans {
+                let status = if wlan.enabled { "enabled" } else { "disabled" };
+                println!(
+                    "  {} ({}, {})",
+                    wlan.name, wlan.security, status
+                );
+            }
+            for wlan in &wlans {
+                all_findings.extend(rikitikitavi_unifi::scanner::audit_wlan(wlan));
+            }
+        }
+        Err(e) => println!("  Failed to fetch WLANs: {e}"),
+    }
+
+    // Audit firewall rules
+    match client.get_firewall_rules().await {
+        Ok(rules) => {
+            println!("\nFirewall rules: {} configured", rules.len());
+            for rule in &rules {
+                let name = rule.name.as_deref().unwrap_or("unnamed");
+                let status = if rule.enabled { "on" } else { "off" };
+                println!("  {} ({}, {})", name, rule.action, status);
+            }
+            all_findings.extend(rikitikitavi_unifi::scanner::audit_firewall_rules(&rules));
+        }
+        Err(e) => println!("  Failed to fetch firewall rules: {e}"),
+    }
+
+    // List devices and firmware
+    match client.get_devices().await {
+        Ok(devices) => {
+            println!("\nAdopted devices: {}", devices.len());
+            for dev in &devices {
+                let name = dev.name.as_deref().unwrap_or(&dev.model);
+                let ip = dev.ip.as_deref().unwrap_or("unknown");
+                println!(
+                    "  {} (model: {}, firmware: {}, ip: {})",
+                    name, dev.model, dev.firmware_version, ip
+                );
+            }
+        }
+        Err(e) => println!("  Failed to fetch devices: {e}"),
+    }
+
+    // IDS/IPS events
+    match client.get_ids_events(100).await {
+        Ok(events) => {
+            if events.is_empty() {
+                println!("\nIDS/IPS: No events recorded (verify Threat Management is enabled)");
+            } else {
+                println!("\nIDS/IPS: {} events", events.len());
+            }
+        }
+        Err(e) => println!("  Failed to fetch IDS events: {e}"),
+    }
+
+    // Summary
+    println!("\n--- UniFi Security Audit ---");
+    println!("Findings: {}", all_findings.len());
+    for f in &all_findings {
+        println!("  [{:8}] {}", f.severity, f.title);
+    }
+
+    // Export if requested
+    if let Some(path) = output {
+        let results = rikitikitavi_models::ScanResults {
+            findings: all_findings,
+            risk_score: 0.0,
+            ..Default::default()
+        };
+        rikitikitavi_export::export_json(&results, &path)?;
+        println!("\nResults written to {}", path.display());
+    }
+
     Ok(())
 }
 

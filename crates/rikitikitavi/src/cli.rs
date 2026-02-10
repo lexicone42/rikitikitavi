@@ -92,6 +92,10 @@ pub struct ScanArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Output format (json or html).
+    #[arg(long, default_value = "json")]
+    pub format: ReportFormatArg,
+
     /// Generate attack path analysis.
     #[arg(long)]
     pub attack_paths: bool,
@@ -186,9 +190,15 @@ pub enum UniFiCommand {
         /// Controller password.
         #[arg(long)]
         password: Option<String>,
+        /// API token (`UniFi` OS 2.x+), alternative to username/password.
+        #[arg(long)]
+        token: Option<String>,
         /// Site name.
         #[arg(long, default_value = "default")]
         site: String,
+        /// Output file path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// List adopted devices.
     Devices,
@@ -306,10 +316,11 @@ pub enum NetworkArg {
     External,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum ReportFormatArg {
     Json,
     Html,
+    Csv,
 }
 
 #[derive(Clone, ValueEnum)]

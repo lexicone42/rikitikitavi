@@ -27,7 +27,7 @@ const DEFAULT_SSIDS: &[&str] = &[
 
 /// Evaluate WLAN security settings for a single WLAN config.
 #[allow(clippy::too_many_lines)]
-fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
+pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     if !wlan.enabled {
@@ -156,7 +156,7 @@ fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
 }
 
 /// Evaluate firewall rules for security issues.
-fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
+pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     if rules.is_empty() {
