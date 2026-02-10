@@ -34,24 +34,45 @@ pub async fn scan_wifi_networks() -> Result<Vec<WifiNetwork>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)]
 fn scan_wifi_platform() -> Result<Vec<WifiNetwork>> {
-    // macOS: use airport utility
-    let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-    let output = std::process::Command::new(airport).arg("-s").output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let contents = String::from_utf8_lossy(&out.stdout);
-            Ok(parse_airport_output(&contents))
-        }
-        Ok(out) => {
-            tracing::warn!("airport scan failed: {}", String::from_utf8_lossy(&out.stderr));
-            Ok(Vec::new())
-        }
-        Err(e) => {
-            tracing::warn!("failed to run airport command: {e}");
-            Ok(Vec::new())
+    // Primary: system_profiler (works on macOS Sequoia+, not deprecated)
+    if let Some(networks) = try_system_profiler_scan() {
+        if !networks.is_empty() {
+            return Ok(networks);
         }
     }
+
+    // Fallback: deprecated airport utility (older macOS)
+    tracing::debug!("system_profiler returned no networks, trying airport fallback");
+    Ok(try_airport_scan().unwrap_or_default())
+}
+
+/// Try scanning with `system_profiler SPAirPortDataType`.
+#[cfg(target_os = "macos")]
+fn try_system_profiler_scan() -> Option<Vec<WifiNetwork>> {
+    let output = std::process::Command::new("system_profiler")
+        .arg("SPAirPortDataType")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        tracing::warn!("system_profiler failed");
+        return None;
+    }
+    let contents = String::from_utf8_lossy(&output.stdout);
+    Some(parse_system_profiler_wifi(&contents))
+}
+
+/// Try scanning with the deprecated `airport -s` utility.
+#[cfg(target_os = "macos")]
+fn try_airport_scan() -> Option<Vec<WifiNetwork>> {
+    let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    let output = std::process::Command::new(airport).arg("-s").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let contents = String::from_utf8_lossy(&output.stdout);
+    Some(parse_airport_output(&contents))
 }
 
 #[cfg(target_os = "linux")]
@@ -101,7 +122,23 @@ pub async fn current_wifi() -> Result<Option<WifiNetwork>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)]
 fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
+    // Use system_profiler — "Current Network Information" section
+    if let Ok(output) = std::process::Command::new("system_profiler")
+        .arg("SPAirPortDataType")
+        .output()
+    {
+        if output.status.success() {
+            let contents = String::from_utf8_lossy(&output.stdout);
+            let current = parse_system_profiler_current(&contents);
+            if current.is_some() {
+                return Ok(current);
+            }
+        }
+    }
+
+    // Fallback: deprecated airport -I
     let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
     let output = std::process::Command::new(airport).arg("-I").output();
     match output {
@@ -132,7 +169,250 @@ fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
     Ok(None)
 }
 
-// ─── macOS parsers ──────────────────────────────────────────────────────────
+// ─── macOS: system_profiler parser ──────────────────────────────────────────
+
+/// Parse `system_profiler SPAirPortDataType` output for all `WiFi` networks.
+///
+/// Returns networks from both "Current Network Information:" and
+/// "Other Local Wi-Fi Networks:" sections.
+///
+/// Format:
+/// ```text
+///   Current Network Information:
+///     MyNetwork:
+///       PHY Mode: 802.11ax
+///       Channel: 6 (2GHz, 20MHz)
+///       Security: WPA2 Personal
+///       Signal / Noise: -45 dBm / -90 dBm
+///   Other Local Wi-Fi Networks:
+///     NeighborNet:
+///       PHY Mode: 802.11n
+///       Channel: 1 (2GHz, 20MHz)
+///       Security: WPA/WPA2 Personal
+///       Signal / Noise: -72 dBm / -95 dBm
+/// ```
+#[cfg(any(target_os = "macos", test))]
+fn parse_system_profiler_wifi(contents: &str) -> Vec<WifiNetwork> {
+    let mut networks = Vec::new();
+
+    // Parse both sections
+    if let Some(section) = extract_section(contents, "Current Network Information:") {
+        networks.extend(parse_profiler_network_entries(&section, false));
+    }
+    if let Some(section) = extract_section(contents, "Other Local Wi-Fi Networks:") {
+        networks.extend(parse_profiler_network_entries(&section, false));
+    }
+
+    networks
+}
+
+/// Parse only the "Current Network Information:" section.
+#[cfg(any(target_os = "macos", test))]
+fn parse_system_profiler_current(contents: &str) -> Option<WifiNetwork> {
+    let section = extract_section(contents, "Current Network Information:")?;
+    parse_profiler_network_entries(&section, false).into_iter().next()
+}
+
+/// Extract the text block for a named section from `system_profiler` output.
+///
+/// A section starts with the section heading (at some indentation level) and
+/// ends when a line at the same or lesser indentation appears.
+#[cfg(any(target_os = "macos", test))]
+fn extract_section(contents: &str, heading: &str) -> Option<String> {
+    let mut lines = contents.lines();
+    let mut section_indent = 0;
+    let mut found = false;
+
+    // Find the heading line
+    for line in &mut lines {
+        if line.trim_start().starts_with(heading) {
+            section_indent = line.len() - line.trim_start().len();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    // Collect lines that belong to this section (indented deeper than heading)
+    let mut section = String::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        // Stop when we hit a line at same or lesser indent (next section)
+        if indent <= section_indent && !line.trim().is_empty() {
+            break;
+        }
+        section.push_str(line);
+        section.push('\n');
+    }
+
+    if section.is_empty() {
+        None
+    } else {
+        Some(section)
+    }
+}
+
+/// Parse network entries from a `system_profiler` section block.
+///
+/// Each network is a label line `  NetworkName:` followed by indented key-value
+/// pairs. We detect network boundaries by the indent level: a network name line
+/// is indented less than its property lines.
+#[cfg(any(target_os = "macos", test))]
+#[allow(clippy::too_many_lines)]
+fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiNetwork> {
+    let mut networks = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut channel = 0u32;
+    let mut signal = 0i32;
+    let mut noise = 0i32;
+    let mut security = String::new();
+    let mut bssid = String::new();
+    let mut name_indent = 0usize;
+
+    let flush = |name: &mut Option<String>,
+                 channel: &mut u32,
+                 signal: &mut i32,
+                 noise: &mut i32,
+                 security: &mut String,
+                 bssid: &mut String,
+                 nets: &mut Vec<WifiNetwork>| {
+        if let Some(ssid) = name.take() {
+            let encryption = classify_profiler_security(security);
+            let hidden = ssid.is_empty();
+            nets.push(WifiNetwork {
+                ssid: if hidden {
+                    "<hidden>".to_owned()
+                } else {
+                    ssid
+                },
+                bssid: std::mem::take(bssid),
+                channel: *channel,
+                frequency_mhz: channel_to_frequency(*channel),
+                signal_strength_dbm: *signal,
+                encryption,
+                wps_enabled: false,
+                hidden,
+            });
+            let _ = noise; // noise available but not currently used
+            *channel = 0;
+            *signal = 0;
+            *noise = 0;
+            security.clear();
+        }
+    };
+
+    for line in section.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+
+        // A network name line ends with ':' and is NOT a key-value pair.
+        // Key-value pairs contain ': ' (colon-space). Network names just end with ':'.
+        if trimmed.ends_with(':') && !trimmed.contains(": ") {
+            // Flush previous network
+            flush(
+                &mut current_name,
+                &mut channel,
+                &mut signal,
+                &mut noise,
+                &mut security,
+                &mut bssid,
+                &mut networks,
+            );
+            // Strip trailing ':'
+            let name = trimmed[..trimmed.len() - 1].to_owned();
+            current_name = Some(name);
+            name_indent = indent;
+            continue;
+        }
+
+        // Property lines must be indented deeper than the name
+        if current_name.is_some() && indent > name_indent {
+            if let Some(val) = trimmed.strip_prefix("Channel: ") {
+                // "6 (2GHz, 20MHz)" → parse the leading number
+                channel = val
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
+            } else if let Some(val) = trimmed.strip_prefix("Security: ") {
+                val.clone_into(&mut security);
+            } else if let Some(val) = trimmed.strip_prefix("Signal / Noise: ") {
+                // "-45 dBm / -90 dBm"
+                let parts: Vec<&str> = val.split('/').collect();
+                if let Some(sig_str) = parts.first() {
+                    signal = sig_str
+                        .trim()
+                        .trim_end_matches(" dBm")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                }
+                if let Some(noise_str) = parts.get(1) {
+                    noise = noise_str
+                        .trim()
+                        .trim_end_matches(" dBm")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                }
+            } else if let Some(val) = trimmed.strip_prefix("BSSID: ") {
+                val.clone_into(&mut bssid);
+            }
+        }
+    }
+
+    // Flush last network
+    flush(
+        &mut current_name,
+        &mut channel,
+        &mut signal,
+        &mut noise,
+        &mut security,
+        &mut bssid,
+        &mut networks,
+    );
+
+    networks
+}
+
+/// Classify `system_profiler` Security string into encryption type.
+///
+/// Examples: "WPA2 Personal", "WPA/WPA2 Personal", "WPA3 Personal",
+/// "WPA2 Enterprise", "WEP", "None", "Open"
+#[cfg(any(target_os = "macos", test))]
+fn classify_profiler_security(security: &str) -> WifiEncryption {
+    let upper = security.to_uppercase();
+    if upper.contains("WPA3") && upper.contains("ENTERPRISE") {
+        WifiEncryption::Wpa3Enterprise
+    } else if upper.contains("WPA3") || upper.contains("SAE") {
+        WifiEncryption::Wpa3Sae
+    } else if upper.contains("WPA2") && upper.contains("ENTERPRISE") {
+        WifiEncryption::Wpa2Enterprise
+    } else if upper.contains("WPA2") {
+        WifiEncryption::Wpa2Psk
+    } else if upper.contains("WPA") {
+        WifiEncryption::WpaPsk
+    } else if upper.contains("WEP") {
+        WifiEncryption::Wep
+    } else if upper.contains("NONE") || upper.contains("OPEN") || upper.is_empty() {
+        WifiEncryption::Open
+    } else {
+        WifiEncryption::Unknown
+    }
+}
+
+// ─── macOS: airport parser (fallback for older macOS) ───────────────────────
 
 /// Parse macOS `airport -s` tabular output.
 ///
@@ -163,34 +443,36 @@ fn parse_airport_output(contents: &str) -> Vec<WifiNetwork> {
         }
 
         let ssid = line[..bssid_col].trim().to_owned();
-        let bssid = line.get(bssid_col..rssi_col)
+        let bssid = line
+            .get(bssid_col..rssi_col)
             .unwrap_or("")
             .trim()
             .to_owned();
-        let rssi: i32 = line.get(rssi_col..channel_col)
+        let rssi: i32 = line
+            .get(rssi_col..channel_col)
             .unwrap_or("")
             .trim()
             .parse()
             .unwrap_or(0);
-        let channel_str = line.get(channel_col..channel_col + 8)
-            .unwrap_or("")
-            .trim();
+        let channel_str = line.get(channel_col..channel_col + 8).unwrap_or("").trim();
         let channel: u32 = channel_str
             .split(|c: char| !c.is_ascii_digit())
             .next()
             .unwrap_or("0")
             .parse()
             .unwrap_or(0);
-        let security = line.get(security_col..)
-            .unwrap_or("")
-            .trim();
+        let security_text = line.get(security_col..).unwrap_or("").trim();
 
-        let encryption = classify_airport_security(security);
-        let wps_enabled = security.contains("WPS");
+        let encryption = classify_airport_security(security_text);
+        let wps_enabled = security_text.contains("WPS");
         let hidden = ssid.is_empty();
 
         networks.push(WifiNetwork {
-            ssid: if hidden { "<hidden>".to_owned() } else { ssid },
+            ssid: if hidden {
+                "<hidden>".to_owned()
+            } else {
+                ssid
+            },
             bssid,
             channel,
             frequency_mhz: channel_to_frequency(channel),
@@ -220,7 +502,8 @@ fn parse_airport_info(contents: &str) -> Option<WifiNetwork> {
         } else if let Some(val) = trimmed.strip_prefix("BSSID:") {
             bssid = Some(val.trim().to_owned());
         } else if let Some(val) = trimmed.strip_prefix("channel:") {
-            channel = val.trim()
+            channel = val
+                .trim()
                 .split(|c: char| !c.is_ascii_digit())
                 .next()
                 .unwrap_or("0")
@@ -335,7 +618,8 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
         // Signal level: "Signal level=-50 dBm"
         if let Some(idx) = line.find("Signal level=") {
             let rest = &line[idx + 13..];
-            let num_str: String = rest.chars()
+            let num_str: String = rest
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '-')
                 .collect();
             current_signal = num_str.parse().unwrap_or(0);
@@ -421,7 +705,8 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
 
         if let Some(idx) = trimmed.find("Signal level=") {
             let rest = &trimmed[idx + 13..];
-            let num_str: String = rest.chars()
+            let num_str: String = rest
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '-')
                 .collect();
             signal = num_str.parse().unwrap_or(0);
@@ -472,29 +757,170 @@ const fn frequency_to_channel(freq_mhz: u32) -> u32 {
 mod tests {
     use super::*;
 
+    // ─── system_profiler tests ──────────────────────────────────────────
+
+    const SAMPLE_SYSTEM_PROFILER: &str = "\
+Wi-Fi:
+
+      Software Versions:
+          CoreWLAN: 16.0 (1657)
+          CoreWLANKit: 16.0 (1657)
+      Interfaces:
+        en0:
+          Card Type: Wi-Fi  (0x14E4, 0x4387)
+          Firmware Version: wl0: Oct 21 2024 05:12:34
+          MAC Address: aa:bb:cc:dd:ee:f0
+          Locale: ETSI
+          Country Code: US
+          Supported PHY Modes: 802.11 a/b/g/n/ac/ax
+          Supported Channels: 1-13,36-64,100-144,149-165
+          Wake On Wireless: Supported
+          AirDrop: Supported
+          AirDrop Channel: 44
+          Auto Unlock: Supported
+          Current Network Information:
+            HomeNetwork:
+              PHY Mode: 802.11ax
+              BSSID: aa:bb:cc:dd:ee:ff
+              Channel: 6 (2GHz, 20MHz)
+              Country Code: US
+              Network Type: Infrastructure
+              Security: WPA2 Personal
+              Signal / Noise: -45 dBm / -90 dBm
+              Transmit Rate: 1201
+              MCS Index: 11
+          Other Local Wi-Fi Networks:
+            NeighborWiFi-5G:
+              PHY Mode: 802.11ac
+              Channel: 149 (5GHz, 80MHz)
+              Country Code: US
+              Network Type: Infrastructure
+              Security: WPA/WPA2 Personal
+              Signal / Noise: -72 dBm / -95 dBm
+            CoffeeShop:
+              PHY Mode: 802.11n
+              Channel: 1 (2GHz, 20MHz)
+              Network Type: Infrastructure
+              Security: None
+              Signal / Noise: -80 dBm / -92 dBm
+            CorpNet:
+              PHY Mode: 802.11ax
+              Channel: 36 (5GHz, 80MHz)
+              Network Type: Infrastructure
+              Security: WPA2 Enterprise
+              Signal / Noise: -65 dBm / -88 dBm
+";
+
     #[test]
-    fn test_channel_to_frequency() {
-        assert_eq!(channel_to_frequency(1), 2412);
-        assert_eq!(channel_to_frequency(6), 2437);
-        assert_eq!(channel_to_frequency(11), 2462);
-        assert_eq!(channel_to_frequency(14), 2484);
-        assert_eq!(channel_to_frequency(36), 5180);
-        assert_eq!(channel_to_frequency(149), 5745);
+    fn test_parse_system_profiler_all_networks() {
+        let networks = parse_system_profiler_wifi(SAMPLE_SYSTEM_PROFILER);
+        assert_eq!(networks.len(), 4);
     }
 
     #[test]
-    fn test_frequency_to_channel() {
-        assert_eq!(frequency_to_channel(2412), 1);
-        assert_eq!(frequency_to_channel(2437), 6);
-        assert_eq!(frequency_to_channel(5180), 36);
+    fn test_parse_system_profiler_current_network() {
+        let networks = parse_system_profiler_wifi(SAMPLE_SYSTEM_PROFILER);
+        let home = &networks[0];
+        assert_eq!(home.ssid, "HomeNetwork");
+        assert_eq!(home.bssid, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(home.channel, 6);
+        assert_eq!(home.frequency_mhz, 2437);
+        assert_eq!(home.signal_strength_dbm, -45);
+        assert_eq!(home.encryption, WifiEncryption::Wpa2Psk);
     }
+
+    #[test]
+    fn test_parse_system_profiler_neighbor_5g() {
+        let networks = parse_system_profiler_wifi(SAMPLE_SYSTEM_PROFILER);
+        let neighbor = &networks[1];
+        assert_eq!(neighbor.ssid, "NeighborWiFi-5G");
+        assert_eq!(neighbor.channel, 149);
+        assert_eq!(neighbor.frequency_mhz, 5745);
+        assert_eq!(neighbor.signal_strength_dbm, -72);
+        assert_eq!(neighbor.encryption, WifiEncryption::Wpa2Psk);
+    }
+
+    #[test]
+    fn test_parse_system_profiler_open_network() {
+        let networks = parse_system_profiler_wifi(SAMPLE_SYSTEM_PROFILER);
+        let coffee = &networks[2];
+        assert_eq!(coffee.ssid, "CoffeeShop");
+        assert_eq!(coffee.channel, 1);
+        assert_eq!(coffee.encryption, WifiEncryption::Open);
+    }
+
+    #[test]
+    fn test_parse_system_profiler_enterprise() {
+        let networks = parse_system_profiler_wifi(SAMPLE_SYSTEM_PROFILER);
+        let corp = &networks[3];
+        assert_eq!(corp.ssid, "CorpNet");
+        assert_eq!(corp.channel, 36);
+        assert_eq!(corp.encryption, WifiEncryption::Wpa2Enterprise);
+    }
+
+    #[test]
+    fn test_parse_system_profiler_current_only() {
+        let current = parse_system_profiler_current(SAMPLE_SYSTEM_PROFILER);
+        assert!(current.is_some());
+        let net = current.unwrap();
+        assert_eq!(net.ssid, "HomeNetwork");
+        assert_eq!(net.signal_strength_dbm, -45);
+    }
+
+    #[test]
+    fn test_parse_system_profiler_empty() {
+        let networks = parse_system_profiler_wifi("Wi-Fi:\n  No wireless interfaces found.\n");
+        assert!(networks.is_empty());
+    }
+
+    #[test]
+    fn test_classify_profiler_security() {
+        assert_eq!(
+            classify_profiler_security("WPA2 Personal"),
+            WifiEncryption::Wpa2Psk
+        );
+        assert_eq!(
+            classify_profiler_security("WPA/WPA2 Personal"),
+            WifiEncryption::Wpa2Psk
+        );
+        assert_eq!(
+            classify_profiler_security("WPA3 Personal"),
+            WifiEncryption::Wpa3Sae
+        );
+        assert_eq!(
+            classify_profiler_security("WPA2 Enterprise"),
+            WifiEncryption::Wpa2Enterprise
+        );
+        assert_eq!(
+            classify_profiler_security("WPA3 Enterprise"),
+            WifiEncryption::Wpa3Enterprise
+        );
+        assert_eq!(classify_profiler_security("WEP"), WifiEncryption::Wep);
+        assert_eq!(classify_profiler_security("None"), WifiEncryption::Open);
+        assert_eq!(classify_profiler_security("Open"), WifiEncryption::Open);
+        assert_eq!(classify_profiler_security(""), WifiEncryption::Open);
+    }
+
+    // ─── airport tests (fallback parser) ────────────────────────────────
 
     #[test]
     fn test_classify_airport_security() {
-        assert_eq!(classify_airport_security("WPA2(PSK/AES/AES)"), WifiEncryption::Wpa2Psk);
-        assert_eq!(classify_airport_security("WPA(PSK/TKIP/TKIP)"), WifiEncryption::WpaPsk);
-        assert_eq!(classify_airport_security("WPA3(SAE/AES/AES)"), WifiEncryption::Wpa3Sae);
-        assert_eq!(classify_airport_security("WPA2 Enterprise"), WifiEncryption::Wpa2Enterprise);
+        assert_eq!(
+            classify_airport_security("WPA2(PSK/AES/AES)"),
+            WifiEncryption::Wpa2Psk
+        );
+        assert_eq!(
+            classify_airport_security("WPA(PSK/TKIP/TKIP)"),
+            WifiEncryption::WpaPsk
+        );
+        assert_eq!(
+            classify_airport_security("WPA3(SAE/AES/AES)"),
+            WifiEncryption::Wpa3Sae
+        );
+        assert_eq!(
+            classify_airport_security("WPA2 Enterprise"),
+            WifiEncryption::Wpa2Enterprise
+        );
         assert_eq!(classify_airport_security("WEP"), WifiEncryption::Wep);
         assert_eq!(classify_airport_security("NONE"), WifiEncryption::Open);
         assert_eq!(classify_airport_security(""), WifiEncryption::Open);
@@ -519,6 +945,27 @@ mod tests {
         assert_eq!(networks[2].ssid, "OpenAP");
         assert_eq!(networks[2].encryption, WifiEncryption::Open);
     }
+
+    // ─── channel/frequency conversion tests ─────────────────────────────
+
+    #[test]
+    fn test_channel_to_frequency() {
+        assert_eq!(channel_to_frequency(1), 2412);
+        assert_eq!(channel_to_frequency(6), 2437);
+        assert_eq!(channel_to_frequency(11), 2462);
+        assert_eq!(channel_to_frequency(14), 2484);
+        assert_eq!(channel_to_frequency(36), 5180);
+        assert_eq!(channel_to_frequency(149), 5745);
+    }
+
+    #[test]
+    fn test_frequency_to_channel() {
+        assert_eq!(frequency_to_channel(2412), 1);
+        assert_eq!(frequency_to_channel(2437), 6);
+        assert_eq!(frequency_to_channel(5180), 36);
+    }
+
+    // ─── Linux tests ────────────────────────────────────────────────────
 
     const SAMPLE_IWCONFIG: &str = "\
 wlan0     IEEE 802.11  ESSID:\"MyNetwork\"
