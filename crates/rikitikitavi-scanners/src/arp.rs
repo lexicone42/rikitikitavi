@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -157,17 +157,10 @@ fn anomaly_to_finding(anomaly: &ArpAnomaly) -> Finding {
             )
             .with_ip(*ip)
             .with_cwe("CWE-290")
-            .with_remediation(Remediation {
-                description: "Investigate and mitigate ARP spoofing.".to_owned(),
-                steps: vec![
-                    "Identify which device legitimately owns this IP address.".to_owned(),
-                    "Check for rogue devices on the network.".to_owned(),
-                    "Enable Dynamic ARP Inspection (DAI) on managed switches.".to_owned(),
-                    "Use static ARP entries for critical infrastructure (router, DNS).".to_owned(),
-                    "Consider 802.1X port-based authentication.".to_owned(),
-                ],
-                effort: Some("15-30 minutes investigation".to_owned()),
-            })
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.arp.spoofing-detected",
+                &[],
+            ))
         }
         ArpAnomaly::DuplicateMac { mac, ips } => {
             let ip_list: Vec<String> = ips.iter().map(ToString::to_string).collect();

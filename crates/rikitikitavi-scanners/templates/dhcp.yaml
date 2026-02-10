@@ -1,0 +1,38 @@
+id: "rikitikitavi.dhcp.rogue-server"
+version: "1.0.0"
+summary: "Investigate and remove rogue DHCP server"
+description: "A non-gateway device has DHCP ports open, potentially hijacking network traffic."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["dhcp", "rogue-server", "network"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "identify-device"
+    kind: "manual.step"
+    params:
+      text: "Identify the device at this IP address."
+  - id: "disable-dhcp"
+    kind: "manual.step"
+    params:
+      text: "Disable DHCP server functionality on non-router devices."
+  - id: "enable-snooping"
+    kind: "manual.step"
+    params:
+      text: "Enable DHCP snooping on managed switches if available."
+  - id: "monitor"
+    kind: "manual.step"
+    params:
+      text: "Monitor for unauthorized DHCP offers on the network."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["network"]
+  changeType: "standard"

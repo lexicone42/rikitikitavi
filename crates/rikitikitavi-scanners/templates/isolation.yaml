@@ -1,0 +1,69 @@
+id: "rikitikitavi.isolation.inter-vlan-routing"
+version: "1.0.0"
+summary: "Implement firewall rules between VLANs"
+description: "Alternate gateways on other subnets are reachable, indicating unrestricted inter-VLAN routing."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["network", "vlan", "segmentation"]
+
+match:
+  resourceKinds: ["network-gateway"]
+
+steps:
+  - id: "review-rules"
+    kind: "manual.step"
+    params:
+      text: "Review your router/firewall's inter-VLAN routing rules."
+  - id: "create-acls"
+    kind: "manual.step"
+    params:
+      text: "Create ACLs to restrict traffic between network segments."
+  - id: "allow-necessary"
+    kind: "manual.step"
+    params:
+      text: "Only allow necessary traffic (e.g. DNS, DHCP) between VLANs."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["network"]
+  changeType: "standard"
+---
+id: "rikitikitavi.isolation.large-flat-network"
+version: "1.0.0"
+summary: "Segment the network using VLANs"
+description: "Many devices share a single network segment without VLAN segmentation."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["network", "vlan", "segmentation"]
+
+match:
+  resourceKinds: ["network-segment"]
+
+steps:
+  - id: "create-vlans"
+    kind: "manual.step"
+    params:
+      text: "Create separate VLANs for IoT devices, guests, and trusted devices."
+  - id: "configure-switch"
+    kind: "manual.step"
+    params:
+      text: "Configure your managed switch and router to support VLANs (802.1Q)."
+  - id: "apply-firewall"
+    kind: "manual.step"
+    params:
+      text: "Apply firewall rules between VLANs to limit lateral movement."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 3600
+  blastRadiusTags: ["network"]
+  changeType: "standard"

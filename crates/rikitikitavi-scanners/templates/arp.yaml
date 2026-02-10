@@ -1,0 +1,42 @@
+id: "rikitikitavi.arp.spoofing-detected"
+version: "1.0.0"
+summary: "Investigate and mitigate ARP spoofing"
+description: "ARP spoofing detected on the network, indicating possible man-in-the-middle attack."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["arp", "spoofing", "mitm"]
+
+match:
+  resourceKinds: ["network-device"]
+
+steps:
+  - id: "identify-owner"
+    kind: "manual.step"
+    params:
+      text: "Identify which device legitimately owns this IP address."
+  - id: "check-rogue"
+    kind: "manual.step"
+    params:
+      text: "Check for rogue devices on the network."
+  - id: "enable-dai"
+    kind: "manual.step"
+    params:
+      text: "Enable Dynamic ARP Inspection (DAI) on managed switches."
+  - id: "static-arp"
+    kind: "manual.step"
+    params:
+      text: "Use static ARP entries for critical infrastructure (router, DNS)."
+  - id: "enable-802-1x"
+    kind: "manual.step"
+    params:
+      text: "Consider 802.1X port-based authentication."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 1200
+  blastRadiusTags: ["network"]
+  changeType: "standard"

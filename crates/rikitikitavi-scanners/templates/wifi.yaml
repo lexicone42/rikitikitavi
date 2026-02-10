@@ -1,0 +1,143 @@
+id: "rikitikitavi.wifi.open-network"
+version: "1.0.0"
+summary: "Enable encryption on this WiFi network"
+description: "WiFi network uses no encryption; all traffic is transmitted in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["wifi", "encryption", "open-network"]
+
+match:
+  resourceKinds: ["wifi-network"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "set-security"
+    kind: "manual.step"
+    params:
+      text: "Set WiFi security to WPA2-PSK (AES) or WPA3-SAE."
+  - id: "strong-passphrase"
+    kind: "manual.step"
+    params:
+      text: "Choose a strong passphrase (12+ characters)."
+  - id: "reconnect"
+    kind: "manual.step"
+    params:
+      text: "Reconnect all devices with the new credentials."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.wep-encryption"
+version: "1.0.0"
+summary: "Replace WEP encryption with WPA2 or WPA3"
+description: "WiFi network uses WEP encryption, which can be cracked in minutes."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["wifi", "wep", "weak-encryption"]
+
+match:
+  resourceKinds: ["wifi-network"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "change-security"
+    kind: "manual.step"
+    params:
+      text: "Change WiFi security from WEP to WPA2-PSK (AES) or WPA3."
+  - id: "replace-router"
+    kind: "manual.step"
+    params:
+      text: "If the router only supports WEP, replace it — it is end-of-life."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.wpa1-weak"
+version: "1.0.0"
+summary: "Upgrade from WPA (TKIP) to WPA2 (AES) or WPA3"
+description: "WiFi network uses WPA with TKIP, which has known weaknesses."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["wifi", "wpa", "weak-encryption"]
+
+match:
+  resourceKinds: ["wifi-network"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "change-security"
+    kind: "manual.step"
+    params:
+      text: "Change WiFi security to WPA2-PSK (AES) or WPA3-SAE."
+  - id: "verify-compat"
+    kind: "manual.step"
+    params:
+      text: "Verify all client devices support WPA2 (nearly all devices from 2006+ do)."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.wps-enabled"
+version: "1.0.0"
+summary: "Disable WPS on your router"
+description: "WiFi Protected Setup (WPS) is enabled; WPS PINs can be brute-forced offline."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["wifi", "wps", "brute-force"]
+
+match:
+  resourceKinds: ["wifi-network"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "disable-wps"
+    kind: "manual.step"
+    params:
+      text: "Navigate to WiFi/Wireless settings and disable WPS."
+  - id: "verify-updates"
+    kind: "manual.step"
+    params:
+      text: "Some routers re-enable WPS after firmware updates — verify after updates."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"

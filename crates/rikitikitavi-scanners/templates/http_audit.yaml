@@ -1,0 +1,104 @@
+id: "rikitikitavi.http_audit.missing-hsts"
+version: "1.0.0"
+summary: "Enable HSTS to force HTTPS connections"
+description: "The server does not send a Strict-Transport-Security header, enabling downgrade attacks."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["http", "hsts", "headers"]
+
+match:
+  resourceKinds: ["web-server"]
+
+steps:
+  - id: "add-header"
+    kind: "manual.step"
+    params:
+      text: "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' header."
+  - id: "apache-config"
+    kind: "manual.step"
+    params:
+      text: "For Apache: Header always set Strict-Transport-Security in VirtualHost."
+  - id: "nginx-config"
+    kind: "manual.step"
+    params:
+      text: "For nginx: add_header Strict-Transport-Security in server block."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["web"]
+  changeType: "standard"
+---
+id: "rikitikitavi.http_audit.directory-listing"
+version: "1.0.0"
+summary: "Disable directory listing on the web server"
+description: "Directory listing is enabled, exposing file names and structure to anyone who can reach the server."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["http", "directory-listing", "information-disclosure"]
+
+match:
+  resourceKinds: ["web-server"]
+
+steps:
+  - id: "apache-fix"
+    kind: "manual.step"
+    params:
+      text: "Apache: Remove 'Options Indexes' or add 'Options -Indexes' in the config."
+  - id: "nginx-fix"
+    kind: "manual.step"
+    params:
+      text: "nginx: Ensure 'autoindex on;' is not set in location blocks."
+  - id: "add-index"
+    kind: "manual.step"
+    params:
+      text: "Alternatively, add an index.html to each directory."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["web"]
+  changeType: "standard"
+---
+id: "rikitikitavi.http_audit.admin-no-auth"
+version: "1.0.0"
+summary: "Restrict access to administrative interfaces"
+description: "An admin path is accessible without authentication, allowing unauthorized administrative access."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["http", "admin", "authentication"]
+
+match:
+  resourceKinds: ["web-server"]
+
+steps:
+  - id: "add-auth"
+    kind: "manual.step"
+    params:
+      text: "Add authentication to all admin paths (HTTP Basic Auth or application-level login)."
+  - id: "restrict-ip"
+    kind: "manual.step"
+    params:
+      text: "Restrict admin access by source IP using firewall rules or web server config."
+  - id: "move-admin"
+    kind: "manual.step"
+    params:
+      text: "Move admin interfaces to a non-standard port or path."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["web"]
+  changeType: "standard"

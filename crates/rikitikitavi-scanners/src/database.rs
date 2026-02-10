@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -337,16 +337,10 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     .with_port(port)
                     .with_service("Redis")
                     .with_cwe("CWE-306")
-                    .with_remediation(Remediation {
-                        description: "Enable Redis authentication.".to_owned(),
-                        steps: vec![
-                            "Edit redis.conf and set 'requirepass <strong-password>'.".to_owned(),
-                            "Bind Redis to 127.0.0.1 if only local access is needed.".to_owned(),
-                            "Use Redis ACLs for fine-grained access control.".to_owned(),
-                            "Consider enabling TLS for encrypted connections.".to_owned(),
-                        ],
-                        effort: Some("10 minutes".to_owned()),
-                    }),
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.database.redis-no-auth",
+                        &[],
+                    )),
                 );
             }
             RedisResult::AuthRequired => {
@@ -385,16 +379,10 @@ async fn check_mongodb(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             .with_port(port)
             .with_service("MongoDB")
             .with_cwe("CWE-306")
-            .with_remediation(Remediation {
-                description: "Enable MongoDB authentication.".to_owned(),
-                steps: vec![
-                    "Enable auth in mongod.conf: 'security.authorization: enabled'.".to_owned(),
-                    "Create admin user with strong password.".to_owned(),
-                    "Bind to specific network interfaces (not 0.0.0.0).".to_owned(),
-                    "Enable TLS for encrypted connections.".to_owned(),
-                ],
-                effort: Some("15 minutes".to_owned()),
-            }),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.database.mongodb-no-auth",
+                &[],
+            )),
         );
     }
 }
@@ -417,16 +405,10 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             .with_port(port)
             .with_service("MySQL")
             .with_cwe("CWE-200")
-            .with_remediation(Remediation {
-                description: "Restrict MySQL network access.".to_owned(),
-                steps: vec![
-                    "Bind MySQL to 127.0.0.1 if only local access is needed.".to_owned(),
-                    "Use firewall rules to restrict access to authorized clients.".to_owned(),
-                    "Disable anonymous login: DELETE FROM mysql.user WHERE User='';".to_owned(),
-                    "Keep MySQL updated to the latest patch version.".to_owned(),
-                ],
-                effort: Some("10 minutes".to_owned()),
-            }),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.database.mysql-exposed",
+                &[],
+            )),
         );
     }
 }
@@ -447,16 +429,10 @@ async fn check_elastic(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             .with_port(port)
             .with_service("Elasticsearch")
             .with_cwe("CWE-306")
-            .with_remediation(Remediation {
-                description: "Enable Elasticsearch security features.".to_owned(),
-                steps: vec![
-                    "Enable X-Pack security or OpenSearch security plugin.".to_owned(),
-                    "Set up authentication for all users.".to_owned(),
-                    "Bind to localhost if only local access is needed.".to_owned(),
-                    "Enable TLS for transport and HTTP layers.".to_owned(),
-                ],
-                effort: Some("20 minutes".to_owned()),
-            }),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.database.elasticsearch-no-auth",
+                &[],
+            )),
         );
     }
 }
@@ -478,16 +454,10 @@ async fn check_memcached(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             .with_port(port)
             .with_service("Memcached")
             .with_cwe("CWE-306")
-            .with_remediation(Remediation {
-                description: "Secure Memcached access.".to_owned(),
-                steps: vec![
-                    "Bind Memcached to 127.0.0.1 (-l 127.0.0.1).".to_owned(),
-                    "Enable SASL authentication if network access is needed.".to_owned(),
-                    "Disable UDP protocol (-U 0) to prevent amplification attacks.".to_owned(),
-                    "Use firewall rules to restrict access.".to_owned(),
-                ],
-                effort: Some("5 minutes".to_owned()),
-            }),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.database.memcached-no-auth",
+                &[],
+            )),
         );
     }
 }
@@ -510,16 +480,10 @@ fn check_postgresql_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>
         .with_port(port)
         .with_service("PostgreSQL")
         .with_cwe("CWE-287")
-        .with_remediation(Remediation {
-            description: "Review PostgreSQL authentication configuration.".to_owned(),
-            steps: vec![
-                "Check pg_hba.conf for 'trust' entries on non-local connections.".to_owned(),
-                "Use 'scram-sha-256' instead of 'md5' or 'trust' for auth.".to_owned(),
-                "Bind to specific interfaces via listen_addresses.".to_owned(),
-                "Enable SSL for encrypted connections.".to_owned(),
-            ],
-            effort: Some("10 minutes".to_owned()),
-        }),
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.database.postgresql-exposed",
+            &[],
+        )),
     );
 }
 

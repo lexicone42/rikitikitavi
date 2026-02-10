@@ -217,8 +217,8 @@ mod tests {
             ..ScanConfig::default()
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let recovered: ScanConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        let recovered: ScanConfig = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(recovered.timeout_seconds, 60);
         assert_eq!(recovered.parallelism, 50);
         assert!(!recovered.attack_paths);
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn test_partial_deserialization_uses_defaults() {
         let yaml = "timeout_seconds: 120\n";
-        let config: ScanConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ScanConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.timeout_seconds, 120);
         // Other fields should use defaults
         assert_eq!(config.parallelism, 100);

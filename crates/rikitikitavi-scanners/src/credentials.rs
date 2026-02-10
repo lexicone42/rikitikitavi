@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -135,16 +135,10 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
                 .with_port(21)
                 .with_service("FTP")
                 .with_cwe("CWE-287")
-                .with_remediation(Remediation {
-                    description: "Disable anonymous FTP access.".to_owned(),
-                    steps: vec![
-                        "Open the FTP server configuration.".to_owned(),
-                        "Disable anonymous login.".to_owned(),
-                        "Require named user accounts with strong passwords.".to_owned(),
-                        "Consider switching to SFTP instead.".to_owned(),
-                    ],
-                    effort: Some("5 minutes".to_owned()),
-                }),
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.credentials.anonymous-ftp",
+                    &[],
+                )),
             );
         } else if code == 530 {
             findings.push(

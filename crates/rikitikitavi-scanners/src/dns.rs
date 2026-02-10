@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::IpAddr;
 
 use crate::Scanner;
@@ -106,15 +106,7 @@ async fn check_dns_rebinding(nameservers: &[IpAddr], findings: &mut Vec<Finding>
                         )
                         .with_ip(ip)
                         .with_cwe("CWE-350")
-                        .with_remediation(Remediation {
-                            description: "Switch to a trusted DNS resolver immediately.".to_owned(),
-                            steps: vec![
-                                "Change DNS to a trusted resolver: Quad9 (9.9.9.9), Cloudflare (1.1.1.1), or Google (8.8.8.8).".to_owned(),
-                                "Check if you are on a captive portal network and authenticate if needed.".to_owned(),
-                                "If this persists after changing DNS, your router may be compromised — reset it.".to_owned(),
-                            ],
-                            effort: Some("5 minutes".to_owned()),
-                        }),
+                        .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.hijacking-detected", &[])),
                     );
                 }
             }
@@ -207,15 +199,7 @@ async fn check_dns_cross_validation(nameservers: &[IpAddr], findings: &mut Vec<F
                     Severity::Medium,
                 )
                 .with_cwe("CWE-350")
-                .with_remediation(Remediation {
-                    description: "Investigate DNS discrepancy and consider switching resolvers.".to_owned(),
-                    steps: vec![
-                        "Compare results: run 'dig example.com @<your-dns>' vs 'dig example.com @1.1.1.1'.".to_owned(),
-                        "If results differ, switch to a trusted public resolver (1.1.1.1 or 9.9.9.9).".to_owned(),
-                        "Check if your ISP is injecting DNS responses (common with some providers).".to_owned(),
-                    ],
-                    effort: Some("10 minutes".to_owned()),
-                }),
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.cross-validation-mismatch", &[])),
             );
         }
     }
@@ -347,15 +331,7 @@ impl Scanner for DnsScanner {
                     .with_references(vec![
                         "https://dnssec-failed.org/".to_owned(),
                     ])
-                    .with_remediation(Remediation {
-                        description: "Switch to a DNS resolver that enforces DNSSEC validation.".to_owned(),
-                        steps: vec![
-                            "Use Quad9 (9.9.9.9) which enforces DNSSEC by default.".to_owned(),
-                            "Or use Cloudflare (1.1.1.1) which also validates DNSSEC.".to_owned(),
-                            "Update /etc/resolv.conf or your router's DNS settings.".to_owned(),
-                        ],
-                        effort: Some("5 minutes".to_owned()),
-                    }),
+                    .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.dnssec-not-enforced", &[])),
                 );
             }
             None => {

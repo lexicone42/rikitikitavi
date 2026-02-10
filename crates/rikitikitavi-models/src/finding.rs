@@ -116,6 +116,15 @@ impl Finding {
         self.remediation = Some(remediation);
         self
     }
+
+    /// Builder-style setter for optional remediation (no-op if `None`).
+    #[must_use]
+    pub fn with_opt_remediation(mut self, remediation: Option<Remediation>) -> Self {
+        if remediation.is_some() {
+            self.remediation = remediation;
+        }
+        self
+    }
 }
 
 impl PartialEq for Finding {

@@ -1,0 +1,209 @@
+id: "rikitikitavi.ssl.tls10-enabled"
+version: "1.0.0"
+summary: "Disable TLS 1.0 and enforce TLS 1.2+"
+description: "TLS 1.0 is deprecated (RFC 8996) and vulnerable to BEAST, POODLE, and other attacks."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "ssl", "deprecated-protocol"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "apache-config"
+    kind: "manual.step"
+    params:
+      text: "Apache: Set 'SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1' in ssl.conf."
+  - id: "nginx-config"
+    kind: "manual.step"
+    params:
+      text: "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;' in server block."
+  - id: "test"
+    kind: "manual.step"
+    params:
+      text: "Test with: openssl s_client -connect <ip>:<port> -tls1"
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.tls11-enabled"
+version: "1.0.0"
+summary: "Disable TLS 1.1 and enforce TLS 1.2+"
+description: "TLS 1.1 is deprecated (RFC 8996) and should be replaced with TLS 1.2 or 1.3."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "ssl", "deprecated-protocol"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "apache-config"
+    kind: "manual.step"
+    params:
+      text: "Apache: Set 'SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1' in ssl.conf."
+  - id: "nginx-config"
+    kind: "manual.step"
+    params:
+      text: "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;' in server block."
+  - id: "test"
+    kind: "manual.step"
+    params:
+      text: "Test with: openssl s_client -connect <ip>:<port> -tls1_1"
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.sslv2v3-enabled"
+version: "1.0.0"
+summary: "Disable SSL 2.0/3.0 immediately"
+description: "SSL 2.0/3.0 are fundamentally broken and must not be used."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "ssl", "broken-protocol"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "apache-config"
+    kind: "manual.step"
+    params:
+      text: "Apache: Set 'SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1'."
+  - id: "nginx-config"
+    kind: "manual.step"
+    params:
+      text: "nginx: Set 'ssl_protocols TLSv1.2 TLSv1.3;'."
+  - id: "firmware-check"
+    kind: "manual.step"
+    params:
+      text: "For embedded devices, check for firmware updates that remove SSLv3."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-expired"
+version: "1.0.0"
+summary: "Renew the expired TLS certificate"
+description: "The TLS certificate has expired, causing browsers to reject connections."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "certificate", "expired"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "renew-cert"
+    kind: "manual.step"
+    params:
+      text: "Generate a new certificate or renew via your CA (e.g. Let's Encrypt)."
+  - id: "install-cert"
+    kind: "manual.step"
+    params:
+      text: "Install the new certificate and restart the service."
+  - id: "auto-renew"
+    kind: "manual.step"
+    params:
+      text: "Set up automatic renewal to prevent future expiry."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-self-signed"
+version: "1.0.0"
+summary: "Replace self-signed certificate with a CA-signed one"
+description: "The TLS certificate is self-signed, preventing proper certificate validation."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "certificate", "self-signed"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "use-le"
+    kind: "manual.step"
+    params:
+      text: "Use Let's Encrypt (free) or an internal CA for trusted certificates."
+  - id: "local-ca"
+    kind: "manual.step"
+    params:
+      text: "For LAN-only devices, consider a local CA with mkcert or step-ca."
+  - id: "install-ca"
+    kind: "manual.step"
+    params:
+      text: "Install the CA root certificate on client devices for trust."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-weak-key"
+version: "1.0.0"
+summary: "Regenerate the certificate with a stronger key"
+description: "The TLS certificate uses a weak key (< 2048-bit RSA)."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["tls", "certificate", "weak-key"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "gen-key"
+    kind: "manual.step"
+    params:
+      text: "Generate a new 2048-bit (or preferably 4096-bit) RSA key, or a 256-bit ECC key."
+  - id: "new-csr"
+    kind: "manual.step"
+    params:
+      text: "Create a new CSR and obtain a replacement certificate."
+  - id: "install-restart"
+    kind: "manual.step"
+    params:
+      text: "Install the new cert and key, then restart the service."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["tls"]
+  changeType: "standard"

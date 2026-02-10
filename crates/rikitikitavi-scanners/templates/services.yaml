@@ -1,0 +1,213 @@
+id: "rikitikitavi.services.redis-no-auth"
+version: "1.0.0"
+summary: "Enable Redis authentication and restrict network access"
+description: "Redis responds to commands without authentication, exposing all data."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "redis", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "set-requirepass"
+    kind: "manual.step"
+    params:
+      text: "Edit redis.conf and set 'requirepass <strong-password>'."
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Bind Redis to 127.0.0.1 if only local access is needed."
+  - id: "firewall-rules"
+    kind: "manual.step"
+    params:
+      text: "Use firewall rules to restrict port 6379 access."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.mysql-exposed"
+version: "1.0.0"
+summary: "Restrict MySQL network access"
+description: "MySQL is listening on the network, exposing version information and accepting connections."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "mysql", "network-access"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Edit my.cnf and set 'bind-address = 127.0.0.1' to bind to localhost only."
+  - id: "remove-skip"
+    kind: "manual.step"
+    params:
+      text: "Remove any 'skip-networking' comments and ensure it is not exposed."
+  - id: "firewall-rules"
+    kind: "manual.step"
+    params:
+      text: "Use firewall rules to block external access to port 3306."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.postgresql-exposed"
+version: "1.0.0"
+summary: "Restrict PostgreSQL network access"
+description: "PostgreSQL is listening on the network and accepting connections."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "postgresql", "network-access"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Edit postgresql.conf and set \"listen_addresses = 'localhost'\"."
+  - id: "review-pghba"
+    kind: "manual.step"
+    params:
+      text: "Review pg_hba.conf to restrict which hosts can connect."
+  - id: "firewall-rules"
+    kind: "manual.step"
+    params:
+      text: "Use firewall rules to block external access to port 5432."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.dropbear-ssh"
+version: "1.0.0"
+summary: "Secure the embedded SSH service"
+description: "Dropbear SSH detected, commonly found on embedded/IoT devices with default credentials."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "ssh", "iot", "embedded"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "change-creds"
+    kind: "manual.step"
+    params:
+      text: "Change default credentials on the device immediately."
+  - id: "firmware-update"
+    kind: "manual.step"
+    params:
+      text: "Check the vendor for firmware updates with patched Dropbear."
+  - id: "restrict-ssh"
+    kind: "manual.step"
+    params:
+      text: "Restrict SSH access to this device via firewall rules."
+  - id: "disable-ssh"
+    kind: "manual.step"
+    params:
+      text: "Consider disabling SSH if remote access is not needed."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["iot"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.eol-openssh"
+version: "1.0.0"
+summary: "Upgrade to a supported OpenSSH version immediately"
+description: "OpenSSH version is end-of-life and vulnerable to known exploits."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "ssh", "eol", "upgrade"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "update-ssh"
+    kind: "manual.step"
+    params:
+      text: "Update OpenSSH via your package manager (apt, yum, etc.)."
+  - id: "upgrade-os"
+    kind: "manual.step"
+    params:
+      text: "For EOL operating systems, plan a full OS upgrade."
+  - id: "regen-keys"
+    kind: "manual.step"
+    params:
+      text: "After upgrading, regenerate host keys if they use DSA."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["ssh"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.outdated-ssh"
+version: "1.0.0"
+summary: "Upgrade SSH to a current supported version"
+description: "SSH server is running an outdated version that may have known vulnerabilities."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["services", "ssh", "outdated", "upgrade"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "update-package"
+    kind: "manual.step"
+    params:
+      text: "Update the SSH server package via your system's package manager."
+  - id: "firmware-check"
+    kind: "manual.step"
+    params:
+      text: "For embedded devices, check for firmware updates from the vendor."
+  - id: "restart-verify"
+    kind: "manual.step"
+    params:
+      text: "After upgrading, restart the SSH service and verify the new version."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["ssh"]
+  changeType: "standard"

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -124,16 +124,7 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
         .with_port(*port)
         .with_service("DHCP")
         .with_cwe("CWE-923")
-        .with_remediation(Remediation {
-            description: "Investigate and remove rogue DHCP server.".to_owned(),
-            steps: vec![
-                "Identify the device at this IP address.".to_owned(),
-                "Disable DHCP server functionality on non-router devices.".to_owned(),
-                "Enable DHCP snooping on managed switches if available.".to_owned(),
-                "Monitor for unauthorized DHCP offers on the network.".to_owned(),
-            ],
-            effort: Some("15 minutes".to_owned()),
-        }),
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.dhcp.rogue-server", &[])),
 
         DhcpAnomaly::NoGateway { interface } => Finding::new(
             "dhcp",

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use rikitikitavi_network::WifiEncryption;
 
 use crate::Scanner;
@@ -106,16 +106,7 @@ impl Scanner for WifiScanner {
                             severity,
                         )
                         .with_cwe("CWE-319")
-                        .with_remediation(Remediation {
-                            description: "Enable encryption on this WiFi network.".to_owned(),
-                            steps: vec![
-                                "Log into your router's admin interface.".to_owned(),
-                                "Set WiFi security to WPA2-PSK (AES) or WPA3-SAE.".to_owned(),
-                                "Choose a strong passphrase (12+ characters).".to_owned(),
-                                "Reconnect all devices with the new credentials.".to_owned(),
-                            ],
-                            effort: Some("10 minutes".to_owned()),
-                        }),
+                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.open-network", &[])),
                     );
                 }
                 WifiEncryption::Wep => {
@@ -132,15 +123,7 @@ impl Scanner for WifiScanner {
                             severity,
                         )
                         .with_cwe("CWE-327")
-                        .with_remediation(Remediation {
-                            description: "Replace WEP encryption with WPA2 or WPA3.".to_owned(),
-                            steps: vec![
-                                "Log into your router's admin interface.".to_owned(),
-                                "Change WiFi security from WEP to WPA2-PSK (AES) or WPA3.".to_owned(),
-                                "If the router only supports WEP, replace it — it is end-of-life.".to_owned(),
-                            ],
-                            effort: Some("10 minutes".to_owned()),
-                        }),
+                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wep-encryption", &[])),
                     );
                 }
                 WifiEncryption::WpaPsk => {
@@ -156,15 +139,7 @@ impl Scanner for WifiScanner {
                             severity,
                         )
                         .with_cwe("CWE-327")
-                        .with_remediation(Remediation {
-                            description: "Upgrade from WPA (TKIP) to WPA2 (AES) or WPA3.".to_owned(),
-                            steps: vec![
-                                "Log into your router's admin interface.".to_owned(),
-                                "Change WiFi security to WPA2-PSK (AES) or WPA3-SAE.".to_owned(),
-                                "Verify all client devices support WPA2 (nearly all devices from 2006+ do).".to_owned(),
-                            ],
-                            effort: Some("10 minutes".to_owned()),
-                        }),
+                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wpa1-weak", &[])),
                     );
                 }
                 _ => {
@@ -199,15 +174,7 @@ impl Scanner for WifiScanner {
                         Severity::Medium,
                     )
                     .with_cwe("CWE-330")
-                    .with_remediation(Remediation {
-                        description: "Disable WPS on your router.".to_owned(),
-                        steps: vec![
-                            "Log into your router's admin interface.".to_owned(),
-                            "Navigate to WiFi/Wireless settings and disable WPS.".to_owned(),
-                            "Some routers re-enable WPS after firmware updates — verify after updates.".to_owned(),
-                        ],
-                        effort: Some("5 minutes".to_owned()),
-                    }),
+                    .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wps-enabled", &[])),
                 );
             }
 

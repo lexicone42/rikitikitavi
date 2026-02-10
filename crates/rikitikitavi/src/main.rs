@@ -513,7 +513,7 @@ fn cmd_config(
             println!("Configuration is valid.");
         }
         cli::ConfigCommand::Show => {
-            let yaml = serde_yaml::to_string(app_config)?;
+            let yaml = serde_yaml_ng::to_string(app_config)?;
             println!("{yaml}");
         }
     }

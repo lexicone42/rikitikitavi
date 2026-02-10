@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -355,18 +355,7 @@ impl Scanner for SmbScanner {
                             .with_port(445)
                             .with_service("SMB")
                             .with_cwe("CWE-327")
-                            .with_remediation(Remediation {
-                                description: "Disable SMBv1 on all systems.".to_owned(),
-                                steps: vec![
-                                    "Windows: Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol"
-                                        .to_owned(),
-                                    "Linux: Add 'min protocol = SMB2' to smb.conf".to_owned(),
-                                    "NAS devices: Check vendor documentation for SMBv1 disable option."
-                                        .to_owned(),
-                                    "Verify with: nmap --script smb-protocols -p445 <ip>".to_owned(),
-                                ],
-                                effort: Some("5 minutes per device".to_owned()),
-                            }),
+                            .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.smbv1-enabled", &[])),
                         );
                     }
                     SmbVersion::V2Plus => {
@@ -422,17 +411,7 @@ impl Scanner for SmbScanner {
                         .with_port(445)
                         .with_service("SMB")
                         .with_cwe("CWE-287")
-                        .with_remediation(Remediation {
-                            description: "Disable anonymous/null SMB sessions.".to_owned(),
-                            steps: vec![
-                                "Windows: Set 'RestrictAnonymous = 1' in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa."
-                                    .to_owned(),
-                                "Windows: Disable 'Network access: Let Everyone permissions apply to anonymous users'."
-                                    .to_owned(),
-                                "Linux/Samba: Set 'restrict anonymous = 2' in smb.conf.".to_owned(),
-                            ],
-                            effort: Some("10 minutes".to_owned()),
-                        }),
+                        .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.null-session", &[])),
                     );
                 }
             }
@@ -454,16 +433,7 @@ impl Scanner for SmbScanner {
                     .with_port(139)
                     .with_service("NetBIOS")
                     .with_cwe("CWE-200")
-                    .with_remediation(Remediation {
-                        description: "Disable NetBIOS over TCP/IP.".to_owned(),
-                        steps: vec![
-                            "Windows: Disable NetBIOS in network adapter IPv4 settings → WINS tab."
-                                .to_owned(),
-                            "Linux: Stop and disable the nmbd service.".to_owned(),
-                            "Block port 139 at the firewall.".to_owned(),
-                        ],
-                        effort: Some("5 minutes".to_owned()),
-                    }),
+                    .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.netbios-exposed", &[])),
                 );
             }
         }

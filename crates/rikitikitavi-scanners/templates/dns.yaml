@@ -1,0 +1,104 @@
+id: "rikitikitavi.dns.hijacking-detected"
+version: "1.0.0"
+summary: "Switch to a trusted DNS resolver immediately"
+description: "DNS returns private IP addresses for well-known public domains, indicating DNS hijacking."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["dns", "hijacking", "security"]
+
+match:
+  resourceKinds: ["dns-resolver"]
+
+steps:
+  - id: "change-dns"
+    kind: "manual.step"
+    params:
+      text: "Change DNS to a trusted resolver: Quad9 (9.9.9.9), Cloudflare (1.1.1.1), or Google (8.8.8.8)."
+  - id: "check-captive"
+    kind: "manual.step"
+    params:
+      text: "Check if you are on a captive portal network and authenticate if needed."
+  - id: "check-router"
+    kind: "manual.step"
+    params:
+      text: "If this persists after changing DNS, your router may be compromised — reset it."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["dns", "network"]
+  changeType: "emergency"
+---
+id: "rikitikitavi.dns.cross-validation-mismatch"
+version: "1.0.0"
+summary: "Investigate DNS discrepancy and consider switching resolvers"
+description: "DNS responses from the configured resolver differ from a public resolver, suggesting tampering."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["dns", "tampering", "validation"]
+
+match:
+  resourceKinds: ["dns-resolver"]
+
+steps:
+  - id: "compare-results"
+    kind: "manual.step"
+    params:
+      text: "Compare results: run 'dig example.com @<your-dns>' vs 'dig example.com @1.1.1.1'."
+  - id: "switch-resolver"
+    kind: "manual.step"
+    params:
+      text: "If results differ, switch to a trusted public resolver (1.1.1.1 or 9.9.9.9)."
+  - id: "check-isp"
+    kind: "manual.step"
+    params:
+      text: "Check if your ISP is injecting DNS responses (common with some providers)."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["dns"]
+  changeType: "standard"
+---
+id: "rikitikitavi.dns.dnssec-not-enforced"
+version: "1.0.0"
+summary: "Switch to a DNS resolver that enforces DNSSEC validation"
+description: "The configured DNS resolver does not enforce DNSSEC, leaving responses vulnerable to spoofing."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["dns", "dnssec", "validation"]
+
+match:
+  resourceKinds: ["dns-resolver"]
+
+steps:
+  - id: "use-quad9"
+    kind: "manual.step"
+    params:
+      text: "Use Quad9 (9.9.9.9) which enforces DNSSEC by default."
+  - id: "use-cloudflare"
+    kind: "manual.step"
+    params:
+      text: "Or use Cloudflare (1.1.1.1) which also validates DNSSEC."
+  - id: "update-resolv"
+    kind: "manual.step"
+    params:
+      text: "Update /etc/resolv.conf or your router's DNS settings."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["dns"]
+  changeType: "standard"

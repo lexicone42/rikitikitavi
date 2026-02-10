@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, Remediation, ScanContext};
+use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -252,16 +252,12 @@ impl Scanner for ExposureScanner {
                         .with_port(port)
                         .with_service(service)
                         .with_cwe("CWE-284")
-                        .with_remediation(Remediation {
-                            description: format!(
-                                "Review whether {service} on port {port} needs to be internet-accessible."
-                            ),
-                            steps: vec![
-                                "Check your router's port forwarding settings.".to_owned(),
-                                format!("Remove the port forward for port {port} if not needed."),
-                                "If needed, restrict access via firewall rules or VPN.".to_owned(),
-                            ],
-                            effort: Some("5 minutes".to_owned()),
+                        .with_opt_remediation({
+                            let port_str = port.to_string();
+                            crate::remediation::get(
+                                "rikitikitavi.exposure.port-forwarded",
+                                &[("service", service), ("port", &port_str)],
+                            )
                         }),
                     );
                 }

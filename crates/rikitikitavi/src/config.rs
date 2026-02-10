@@ -7,7 +7,7 @@ pub fn load_config(path: Option<&Path>) -> Result<AppConfig> {
     if let Some(p) = path {
         let contents = std::fs::read_to_string(p)
             .with_context(|| format!("failed to read config file: {}", p.display()))?;
-        let config: AppConfig = serde_yaml::from_str(&contents)
+        let config: AppConfig = serde_yaml_ng::from_str(&contents)
             .with_context(|| format!("failed to parse config file: {}", p.display()))?;
         tracing::info!(path = %p.display(), "loaded configuration");
         Ok(config)
@@ -17,7 +17,7 @@ pub fn load_config(path: Option<&Path>) -> Result<AppConfig> {
             let p = Path::new(candidate);
             if p.exists() {
                 let contents = std::fs::read_to_string(p)?;
-                let config: AppConfig = serde_yaml::from_str(&contents)?;
+                let config: AppConfig = serde_yaml_ng::from_str(&contents)?;
                 tracing::info!(path = %p.display(), "loaded configuration from default location");
                 return Ok(config);
             }

@@ -1,0 +1,233 @@
+id: "rikitikitavi.database.redis-no-auth"
+version: "1.0.0"
+summary: "Enable Redis authentication"
+description: "Redis is accessible without credentials, allowing full read/write access."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "redis", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "set-requirepass"
+    kind: "manual.step"
+    params:
+      text: "Edit redis.conf and set 'requirepass <strong-password>'."
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Bind Redis to 127.0.0.1 if only local access is needed."
+  - id: "enable-acls"
+    kind: "manual.step"
+    params:
+      text: "Use Redis ACLs for fine-grained access control."
+  - id: "enable-tls"
+    kind: "manual.step"
+    params:
+      text: "Consider enabling TLS for encrypted connections."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.mongodb-no-auth"
+version: "1.0.0"
+summary: "Enable MongoDB authentication"
+description: "MongoDB accepts connections without authentication, exposing all databases."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "mongodb", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "enable-auth"
+    kind: "manual.step"
+    params:
+      text: "Enable auth in mongod.conf: 'security.authorization: enabled'."
+  - id: "create-admin"
+    kind: "manual.step"
+    params:
+      text: "Create admin user with strong password."
+  - id: "bind-specific"
+    kind: "manual.step"
+    params:
+      text: "Bind to specific network interfaces (not 0.0.0.0)."
+  - id: "enable-tls"
+    kind: "manual.step"
+    params:
+      text: "Enable TLS for encrypted connections."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.mysql-exposed"
+version: "1.0.0"
+summary: "Restrict MySQL network access"
+description: "MySQL server is network-accessible and reveals its version, aiding attackers."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "mysql", "network-access"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Bind MySQL to 127.0.0.1 if only local access is needed."
+  - id: "firewall-rules"
+    kind: "manual.step"
+    params:
+      text: "Use firewall rules to restrict access to authorized clients."
+  - id: "disable-anon"
+    kind: "manual.step"
+    params:
+      text: "Disable anonymous login: DELETE FROM mysql.user WHERE User='';"
+  - id: "keep-updated"
+    kind: "manual.step"
+    params:
+      text: "Keep MySQL updated to the latest patch version."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.elasticsearch-no-auth"
+version: "1.0.0"
+summary: "Enable Elasticsearch security features"
+description: "Elasticsearch is accessible without authentication, exposing all indices and data."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "elasticsearch", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "enable-xpack"
+    kind: "manual.step"
+    params:
+      text: "Enable X-Pack security or OpenSearch security plugin."
+  - id: "setup-users"
+    kind: "manual.step"
+    params:
+      text: "Set up authentication for all users."
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Bind to localhost if only local access is needed."
+  - id: "enable-tls"
+    kind: "manual.step"
+    params:
+      text: "Enable TLS for transport and HTTP layers."
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 1200
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.memcached-no-auth"
+version: "1.0.0"
+summary: "Secure Memcached access"
+description: "Memcached responds without authentication, enabling DDoS amplification and cache poisoning."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "memcached", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Bind Memcached to 127.0.0.1 (-l 127.0.0.1)."
+  - id: "enable-sasl"
+    kind: "manual.step"
+    params:
+      text: "Enable SASL authentication if network access is needed."
+  - id: "disable-udp"
+    kind: "manual.step"
+    params:
+      text: "Disable UDP protocol (-U 0) to prevent amplification attacks."
+  - id: "firewall-rules"
+    kind: "manual.step"
+    params:
+      text: "Use firewall rules to restrict access."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.postgresql-exposed"
+version: "1.0.0"
+summary: "Review PostgreSQL authentication configuration"
+description: "PostgreSQL is network-accessible and may allow trust authentication from remote hosts."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "postgresql", "authentication"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "check-pghba"
+    kind: "manual.step"
+    params:
+      text: "Check pg_hba.conf for 'trust' entries on non-local connections."
+  - id: "use-scram"
+    kind: "manual.step"
+    params:
+      text: "Use 'scram-sha-256' instead of 'md5' or 'trust' for auth."
+  - id: "bind-specific"
+    kind: "manual.step"
+    params:
+      text: "Bind to specific interfaces via listen_addresses."
+  - id: "enable-ssl"
+    kind: "manual.step"
+    params:
+      text: "Enable SSL for encrypted connections."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"

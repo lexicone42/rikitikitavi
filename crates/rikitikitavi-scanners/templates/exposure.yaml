@@ -1,0 +1,44 @@
+id: "rikitikitavi.exposure.port-forwarded"
+version: "1.0.0"
+summary: "Review whether {{ service }} on port {{ port }} needs to be internet-accessible"
+description: "A port-forwarded service is reachable from the internet and may be unnecessarily exposed."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["exposure", "port-forwarding", "firewall"]
+
+match:
+  resourceKinds: ["network-gateway"]
+
+parameters:
+  - name: "service"
+    type: "string"
+    required: true
+    description: "Service name (e.g., SSH, HTTP)"
+  - name: "port"
+    type: "string"
+    required: true
+    description: "Port number"
+
+steps:
+  - id: "check-router"
+    kind: "manual.step"
+    params:
+      text: "Check your router's port forwarding settings."
+  - id: "remove-forward"
+    kind: "manual.step"
+    params:
+      text: "Remove the port forward for port {{ port }} if not needed."
+  - id: "restrict-access"
+    kind: "manual.step"
+    params:
+      text: "If needed, restrict access via firewall rules or VPN."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["network"]
+  changeType: "standard"

@@ -1,0 +1,108 @@
+id: "rikitikitavi.smb.smbv1-enabled"
+version: "1.0.0"
+summary: "Disable SMBv1 on all systems"
+description: "SMBv1 is enabled, making the host vulnerable to EternalBlue, WannaCry, and other critical exploits."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["smb", "smbv1", "eternalblue", "wannacry"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "disable-windows"
+    kind: "manual.step"
+    params:
+      text: "Windows: Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol"
+  - id: "disable-linux"
+    kind: "manual.step"
+    params:
+      text: "Linux: Add 'min protocol = SMB2' to smb.conf"
+  - id: "disable-nas"
+    kind: "manual.step"
+    params:
+      text: "NAS devices: Check vendor documentation for SMBv1 disable option."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Verify with: nmap --script smb-protocols -p445 <ip>"
+
+remediation:
+  riskLevel: "critical"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["smb"]
+  changeType: "standard"
+---
+id: "rikitikitavi.smb.null-session"
+version: "1.0.0"
+summary: "Disable anonymous/null SMB sessions"
+description: "The host accepts anonymous SMBv2 session setup, allowing unauthenticated enumeration."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["smb", "null-session", "anonymous"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "restrict-windows"
+    kind: "manual.step"
+    params:
+      text: "Windows: Set 'RestrictAnonymous = 1' in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa."
+  - id: "disable-everyone"
+    kind: "manual.step"
+    params:
+      text: "Windows: Disable 'Network access: Let Everyone permissions apply to anonymous users'."
+  - id: "restrict-samba"
+    kind: "manual.step"
+    params:
+      text: "Linux/Samba: Set 'restrict anonymous = 2' in smb.conf."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["smb"]
+  changeType: "standard"
+---
+id: "rikitikitavi.smb.netbios-exposed"
+version: "1.0.0"
+summary: "Disable NetBIOS over TCP/IP"
+description: "NetBIOS on port 139 is accessible, exposing host names and enabling enumeration."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["smb", "netbios", "information-disclosure"]
+
+match:
+  resourceKinds: ["network-service"]
+
+steps:
+  - id: "disable-windows"
+    kind: "manual.step"
+    params:
+      text: "Windows: Disable NetBIOS in network adapter IPv4 settings > WINS tab."
+  - id: "disable-linux"
+    kind: "manual.step"
+    params:
+      text: "Linux: Stop and disable the nmbd service."
+  - id: "block-port"
+    kind: "manual.step"
+    params:
+      text: "Block port 139 at the firewall."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["smb"]
+  changeType: "standard"
