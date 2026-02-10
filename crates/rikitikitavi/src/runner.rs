@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::future::join_all;
 use rikitikitavi_analysis::{calculate_risk_score, generate_attack_paths};
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
 use rikitikitavi_models::{Device, DeviceType, Finding, ScanContext, ScanResults};
@@ -147,19 +148,23 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         "enriched context with discovered devices"
     );
 
-    // ── Phase 2: Deep Analysis ──────────────────────────────────────
-    tracing::info!("Phase 2: Deep Analysis");
-    for scanner in &phase2 {
+    // ── Phase 2: Deep Analysis (concurrent) ────────────────────────
+    tracing::info!("Phase 2: Deep Analysis ({} scanners, concurrent)", phase2.len());
+    let phase2_results = join_all(phase2.iter().map(|scanner| async {
         tracing::info!(
             scanner = scanner.id(),
             name = scanner.name(),
             "running Phase 2 scanner"
         );
+        (scanner.id(), scanner.scan(ctx).await)
+    }))
+    .await;
 
-        match scanner.scan(ctx).await {
+    for (id, result) in phase2_results {
+        match result {
             Ok(findings) => {
                 tracing::info!(
-                    scanner = scanner.id(),
+                    scanner = id,
                     findings_count = findings.len(),
                     "Phase 2 scanner completed"
                 );
@@ -167,7 +172,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
             }
             Err(e) => {
                 tracing::warn!(
-                    scanner = scanner.id(),
+                    scanner = id,
                     error = %e,
                     "Phase 2 scanner failed, continuing"
                 );
@@ -195,7 +200,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     Ok(ScanResults {
         findings: all_findings,
-        devices: ctx.discovered_devices.clone(),
+        devices: std::mem::take(&mut ctx.discovered_devices),
         attack_paths,
         risk_score,
         scan_duration_secs: duration,

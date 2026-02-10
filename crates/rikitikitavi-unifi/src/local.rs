@@ -18,6 +18,8 @@ impl UniFiEnvironment {
     /// Attempt to detect if we're running on a `UniFi` device.
     ///
     /// Checks for `UniFi` OS markers: `/etc/unifi-os/`, `/data/unifi-core/`, etc.
+    /// Only performs detection on Linux, since `UniFi` devices run Linux.
+    #[cfg(target_os = "linux")]
     pub fn detect() -> Option<Self> {
         tracing::info!("attempting UniFi environment detection");
 
@@ -39,6 +41,13 @@ impl UniFiEnvironment {
             has_local_db_access: Path::new("/run/mongodb-27117.sock").exists(),
             has_controller_access: true,
         })
+    }
+
+    /// On non-Linux platforms, `UniFi` on-device detection is not applicable.
+    #[cfg(not(target_os = "linux"))]
+    pub fn detect() -> Option<Self> {
+        tracing::debug!("UniFi on-device detection is only supported on Linux");
+        None
     }
 }
 
@@ -85,6 +94,7 @@ fn parse_board_info(contents: &str) -> Option<String> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn detect_device_type() -> UniFiDevice {
     tracing::debug!("detecting UniFi device type");
 
@@ -112,6 +122,7 @@ fn detect_device_type() -> UniFiDevice {
     UniFiDevice::Unknown
 }
 
+#[cfg(target_os = "linux")]
 fn read_unifi_os_version() -> Option<String> {
     // Primary location
     if let Ok(version) = std::fs::read_to_string("/etc/unifi-os/unifi_version") {
@@ -128,6 +139,7 @@ fn read_unifi_os_version() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(target_os = "linux")]
 fn read_network_app_version() -> Option<String> {
     // Check the UniFi Network app version
     let paths = [

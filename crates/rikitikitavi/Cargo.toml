@@ -26,6 +26,7 @@ rikitikitavi-tui = { path = "../rikitikitavi-tui", optional = true }
 rikitikitavi-unifi = { path = "../rikitikitavi-unifi", optional = true }
 
 tokio.workspace = true
+futures.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
