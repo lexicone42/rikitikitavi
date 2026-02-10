@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Deploy rikitikitavi to a remote `UniFi` device via SSH.
+#[allow(clippy::unused_async)]
 pub async fn deploy_to_device(host: &str, binary_path: &Path, persistent: bool) -> Result<()> {
     tracing::info!(%host, ?binary_path, persistent, "deploying to UniFi device");
     // TODO: Implement SSH-based deployment
@@ -13,6 +14,7 @@ pub async fn deploy_to_device(host: &str, binary_path: &Path, persistent: bool) 
 }
 
 /// Check the status of a rikitikitavi installation on a remote `UniFi` device.
+#[allow(clippy::unused_async)]
 pub async fn check_status(host: &str) -> Result<InstallStatus> {
     tracing::info!(%host, "checking installation status");
     let _ = host;
@@ -20,6 +22,7 @@ pub async fn check_status(host: &str) -> Result<InstallStatus> {
 }
 
 /// Remove rikitikitavi from a `UniFi` device.
+#[allow(clippy::unused_async)]
 pub async fn uninstall(host: &str) -> Result<()> {
     tracing::info!(%host, "uninstalling from UniFi device");
     let _ = host;

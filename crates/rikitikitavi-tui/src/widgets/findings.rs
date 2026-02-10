@@ -61,16 +61,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(table, chunks[0]);
 
     // Detail pane for selected finding
-    let detail_text = if let Some(f) = findings.get(app.selected_finding_index) {
-        vec![
-            Line::from(format!("  {}", f.title))
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-            Line::from(""),
-            Line::from(format!("  {}", f.description)),
-        ]
-    } else {
-        vec![Line::from("  Select a finding to see details.")]
-    };
+    let detail_text = findings.get(app.selected_finding_index).map_or_else(
+        || vec![Line::from("  Select a finding to see details.")],
+        |f| {
+            vec![
+                Line::from(format!("  {}", f.title))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(""),
+                Line::from(format!("  {}", f.description)),
+            ]
+        },
+    );
 
     let detail = Paragraph::new(detail_text).block(
         Block::default()

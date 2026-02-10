@@ -62,6 +62,7 @@ pub enum Command {
 }
 
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ScanArgs {
     /// Attacker perspective to simulate.
     #[arg(long, default_value = "unauthenticated")]

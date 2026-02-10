@@ -9,6 +9,7 @@ license.workspace = true
 rikitikitavi-core = { path = "../rikitikitavi-core" }
 rikitikitavi-models = { path = "../rikitikitavi-models" }
 rikitikitavi-scanners = { path = "../rikitikitavi-scanners" }
+rikitikitavi-export = { path = "../rikitikitavi-export" }
 
 ratatui.workspace = true
 crossterm.workspace = true

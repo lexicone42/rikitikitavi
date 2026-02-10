@@ -3,6 +3,7 @@ use rikitikitavi_models::config::SecurityLakeConfig;
 use rikitikitavi_models::ScanResults;
 
 /// Upload scan results to AWS Security Lake.
+#[allow(clippy::unused_async)] // Will use await once S3 upload is implemented
 pub async fn upload_to_security_lake(
     results: &ScanResults,
     config: &SecurityLakeConfig,
@@ -17,6 +18,7 @@ pub async fn upload_to_security_lake(
 }
 
 /// Register a custom source in AWS Security Lake.
+#[allow(clippy::unused_async)] // Will use await once API calls are implemented
 pub async fn register_custom_source(config: &SecurityLakeConfig) -> Result<()> {
     tracing::info!("registering custom Security Lake source");
     let _ = config;

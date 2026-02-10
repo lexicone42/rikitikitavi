@@ -14,6 +14,7 @@ pub struct MdnsService {
 }
 
 /// Discover services via mDNS on the local network.
+#[allow(clippy::unused_async)] // Will use await once mDNS discovery is implemented
 pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
     // TODO: Implement mDNS/Bonjour discovery
     tracing::debug!(timeout_secs, "discovering mDNS services");

@@ -68,6 +68,48 @@ impl Finding {
         self
     }
 
+    /// Builder-style setter for affected port.
+    #[must_use]
+    pub const fn with_port(mut self, port: u16) -> Self {
+        self.affected_port = Some(port);
+        self
+    }
+
+    /// Builder-style setter for affected MAC address.
+    #[must_use]
+    pub fn with_mac(mut self, mac: impl Into<String>) -> Self {
+        self.affected_mac = Some(mac.into());
+        self
+    }
+
+    /// Builder-style setter for affected hostname.
+    #[must_use]
+    pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.affected_hostname = Some(hostname.into());
+        self
+    }
+
+    /// Builder-style setter for affected service name.
+    #[must_use]
+    pub fn with_service(mut self, service: impl Into<String>) -> Self {
+        self.affected_service = Some(service.into());
+        self
+    }
+
+    /// Builder-style setter for CWE ID.
+    #[must_use]
+    pub fn with_cwe(mut self, cwe: impl Into<String>) -> Self {
+        self.cwe_id = Some(cwe.into());
+        self
+    }
+
+    /// Builder-style setter for external references.
+    #[must_use]
+    pub fn with_references(mut self, refs: Vec<String>) -> Self {
+        self.references = refs;
+        self
+    }
+
     /// Builder-style setter for remediation.
     #[must_use]
     pub fn with_remediation(mut self, remediation: Remediation) -> Self {

@@ -49,6 +49,45 @@ pub enum DeviceType {
     Unknown,
 }
 
+impl Device {
+    /// Create a new device with only an IP address, defaulting everything else.
+    pub fn new(ip: IpAddr) -> Self {
+        let now = Utc::now();
+        Self {
+            ip,
+            mac: None,
+            hostname: None,
+            vendor: None,
+            device_type: DeviceType::Unknown,
+            open_ports: Vec::new(),
+            first_seen: now,
+            last_seen: now,
+            os_guess: None,
+        }
+    }
+
+    /// Builder-style setter for MAC address.
+    #[must_use]
+    pub fn with_mac(mut self, mac: impl Into<String>) -> Self {
+        self.mac = Some(mac.into());
+        self
+    }
+
+    /// Builder-style setter for device type.
+    #[must_use]
+    pub const fn with_device_type(mut self, device_type: DeviceType) -> Self {
+        self.device_type = device_type;
+        self
+    }
+
+    /// Builder-style setter for hostname.
+    #[must_use]
+    pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.hostname = Some(hostname.into());
+        self
+    }
+}
+
 /// An open port on a device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenPort {
