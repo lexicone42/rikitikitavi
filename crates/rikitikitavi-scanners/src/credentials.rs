@@ -15,9 +15,15 @@ pub struct CredentialScanner;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Result of an anonymous FTP check.
+struct FtpCheckResult {
+    code: u16,
+    listing: Option<String>,
+}
+
 /// Check if a host accepts anonymous FTP login.
-/// Returns the FTP response code if we got one.
-async fn check_anonymous_ftp(ip: IpAddr) -> Option<u16> {
+/// Returns the FTP response code and, on success (230), a directory listing.
+async fn check_anonymous_ftp(ip: IpAddr) -> Option<FtpCheckResult> {
     let addr = SocketAddr::new(ip, 21);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -48,7 +54,7 @@ async fn check_anonymous_ftp(ip: IpAddr) -> Option<u16> {
     let user_resp = String::from_utf8_lossy(&buf[..n]);
 
     // If we get 331 (password required), send password
-    if user_resp.starts_with("331") {
+    let code = if user_resp.starts_with("331") {
         tokio::time::timeout(
             READ_TIMEOUT,
             stream.write_all(b"PASS test@rikitikitavi\r\n"),
@@ -63,10 +69,67 @@ async fn check_anonymous_ftp(ip: IpAddr) -> Option<u16> {
             .ok()?
             .ok()?;
         let pass_resp = String::from_utf8_lossy(&buf[..n]);
-        return extract_ftp_code(&pass_resp);
+        extract_ftp_code(&pass_resp)?
+    } else {
+        extract_ftp_code(&user_resp)?
+    };
+
+    // If login succeeded (230), try PASV + LIST for directory listing evidence
+    let listing = if code == 230 {
+        try_ftp_listing(&mut stream, ip).await
+    } else {
+        None
+    };
+
+    Some(FtpCheckResult { code, listing })
+}
+
+/// Attempt to get a directory listing via FTP PASV mode.
+async fn try_ftp_listing(stream: &mut TcpStream, _ip: IpAddr) -> Option<String> {
+    // Send PASV command
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"PASV\r\n"))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 1024];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    let pasv_resp = String::from_utf8_lossy(&buf[..n]);
+
+    let data_addr = parse_pasv_response(&pasv_resp)?;
+
+    // Connect to data port
+    let mut data_stream =
+        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(data_addr))
+            .await
+            .ok()?
+            .ok()?;
+
+    // Send LIST command on control connection
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"LIST\r\n"))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Read listing from data connection
+    let mut listing_buf = vec![0u8; 2048];
+    let listing_n =
+        tokio::time::timeout(READ_TIMEOUT, data_stream.read(&mut listing_buf))
+            .await
+            .ok()?
+            .ok()?;
+
+    if listing_n == 0 {
+        return None;
     }
 
-    extract_ftp_code(&user_resp)
+    let listing = String::from_utf8_lossy(&listing_buf[..listing_n])
+        .trim()
+        .to_owned();
+    if listing.is_empty() { None } else { Some(listing) }
 }
 
 /// Extract the 3-digit FTP response code from a response line.
@@ -75,8 +138,16 @@ fn extract_ftp_code(response: &str) -> Option<u16> {
     code_str.parse().ok()
 }
 
+/// Result of an HTTP no-auth check.
+struct HttpCheckResult {
+    no_auth: bool,
+    evidence: Option<String>,
+}
+
 /// Check if an HTTP admin interface is accessible without authentication.
-async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
+/// On success (200 without login form), captures evidence: first HTTP line,
+/// Server header, and page title.
+async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<HttpCheckResult> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -108,39 +179,147 @@ async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     if first_line.contains("200") {
         // Check if the body suggests a login page despite 200
         let body_lower = response.to_lowercase();
-        if body_lower.contains("login") || body_lower.contains("password") || body_lower.contains("sign in") {
-            return Some(false); // Has login page
+        if body_lower.contains("login")
+            || body_lower.contains("password")
+            || body_lower.contains("sign in")
+        {
+            return Some(HttpCheckResult {
+                no_auth: false,
+                evidence: None,
+            });
         }
-        return Some(true); // No auth needed
+        // Build evidence: first HTTP line + Server header + page title
+        let mut evidence_parts = vec![first_line.to_owned()];
+        for line in response.lines().skip(1) {
+            if line.to_lowercase().starts_with("server:") {
+                evidence_parts.push(line.trim().to_owned());
+                break;
+            }
+        }
+        if let Some(title) = extract_html_title(&response) {
+            evidence_parts.push(format!("Title: {title}"));
+        }
+        return Some(HttpCheckResult {
+            no_auth: true,
+            evidence: Some(evidence_parts.join("\n")),
+        });
     }
 
-    Some(false) // Not a 200 = some form of auth or redirect
+    Some(HttpCheckResult {
+        no_auth: false,
+        evidence: None,
+    })
+}
+
+/// Capture the telnet login prompt/banner (non-destructive).
+///
+/// Connects to port 23, reads the initial banner, and strips telnet IAC
+/// sequences (0xFF xx xx) to produce clean text.
+async fn capture_telnet_prompt(ip: IpAddr) -> Option<String> {
+    let addr = SocketAddr::new(ip, 23);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 1024];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    if n == 0 {
+        return None;
+    }
+
+    // Strip telnet IAC sequences (0xFF followed by 2 bytes)
+    let cleaned = strip_telnet_iac(&buf[..n]);
+    let text = String::from_utf8_lossy(&cleaned);
+    let trimmed = text.trim().to_owned();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+/// Strip telnet IAC (Interpret As Command) sequences from raw bytes.
+///
+/// IAC sequences start with 0xFF followed by a command byte and optionally
+/// an option byte. Commands 251-254 (WILL/WONT/DO/DONT) take one option byte.
+fn strip_telnet_iac(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0xFF && i + 1 < data.len() {
+            let cmd = data[i + 1];
+            if (251..=254).contains(&cmd) && i + 2 < data.len() {
+                // WILL/WONT/DO/DONT + option byte: skip 3 bytes
+                i += 3;
+            } else {
+                // Other IAC commands: skip 2 bytes
+                i += 2;
+            }
+        } else {
+            result.push(data[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Extract the `<title>` content from an HTML response.
+fn extract_html_title(body: &str) -> Option<String> {
+    let lower = body.to_lowercase();
+    let start = lower.find("<title>")? + 7;
+    let end = lower[start..].find("</title>")? + start;
+    let title = body[start..end].trim().to_owned();
+    if title.is_empty() { None } else { Some(title) }
+}
+
+/// Parse an FTP PASV response to extract the data port address.
+///
+/// PASV response format: `227 Entering Passive Mode (h1,h2,h3,h4,p1,p2).`
+fn parse_pasv_response(response: &str) -> Option<SocketAddr> {
+    let start = response.find('(')? + 1;
+    let end = response.find(')')?;
+    let parts: Vec<&str> = response[start..end].split(',').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let nums: Vec<u8> = parts.iter().filter_map(|p| p.trim().parse().ok()).collect();
+    if nums.len() != 6 {
+        return None;
+    }
+    let ip_addr: IpAddr = format!("{}.{}.{}.{}", nums[0], nums[1], nums[2], nums[3])
+        .parse()
+        .ok()?;
+    let port = u16::from(nums[4]) * 256 + u16::from(nums[5]);
+    Some(SocketAddr::new(ip_addr, port))
 }
 
 /// Check FTP credentials on a target and push findings.
 async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
-    if let Some(code) = check_anonymous_ftp(ip).await {
-        if code == 230 {
-            findings.push(
-                Finding::new(
-                    "credentials",
-                    &format!("Anonymous FTP login accepted on {ip}"),
-                    &format!(
-                        "FTP server at {ip}:21 accepts anonymous login. Anyone on the \
-                         network can read (and possibly write) files."
-                    ),
-                    Severity::High,
-                )
-                .with_ip(ip)
-                .with_port(21)
-                .with_service("FTP")
-                .with_cwe("CWE-287")
-                .with_opt_remediation(crate::remediation::get(
-                    "rikitikitavi.credentials.anonymous-ftp",
-                    &[],
-                )),
-            );
-        } else if code == 530 {
+    if let Some(result) = check_anonymous_ftp(ip).await {
+        if result.code == 230 {
+            let mut finding = Finding::new(
+                "credentials",
+                &format!("Anonymous FTP login accepted on {ip}"),
+                &format!(
+                    "FTP server at {ip}:21 accepts anonymous login. Anyone on the \
+                     network can read (and possibly write) files."
+                ),
+                Severity::High,
+            )
+            .with_ip(ip)
+            .with_port(21)
+            .with_service("FTP")
+            .with_cwe("CWE-287")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.credentials.anonymous-ftp",
+                &[],
+            ));
+            if let Some(listing) = &result.listing {
+                finding = finding.with_evidence(format!("Directory listing:\n{listing}"));
+            }
+            findings.push(finding);
+        } else if result.code == 530 {
             findings.push(
                 Finding::new(
                     "credentials",
@@ -211,22 +390,33 @@ impl Scanner for CredentialScanner {
 
                 // Telnet: flag if open (cleartext protocol)
                 if has_port(23) {
-                    findings.push(
-                        Finding::new(
-                            "credentials",
-                            &format!("Telnet service with potential default credentials on {ip}"),
-                            &format!(
-                                "Telnet on {ip}:23 transmits credentials in cleartext. \
-                                 Many devices ship with default telnet passwords. \
-                                 Disable telnet and use SSH instead."
-                            ),
-                            Severity::High,
-                        )
-                        .with_ip(ip)
-                        .with_port(23)
-                        .with_service("Telnet")
-                        .with_cwe("CWE-319"),
-                    );
+                    let mut finding = Finding::new(
+                        "credentials",
+                        &format!("Telnet service with potential default credentials on {ip}"),
+                        &format!(
+                            "Telnet on {ip}:23 transmits credentials in cleartext. \
+                             Many devices ship with default telnet passwords. \
+                             Disable telnet and use SSH instead."
+                        ),
+                        Severity::High,
+                    )
+                    .with_ip(ip)
+                    .with_port(23)
+                    .with_service("Telnet")
+                    .with_cwe("CWE-319")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.credentials.telnet-default",
+                        &[],
+                    ));
+                    if ctx.config.intensity.at_least(
+                        rikitikitavi_models::config::ScanIntensity::Active,
+                    ) {
+                        if let Some(prompt) = capture_telnet_prompt(ip).await {
+                            finding =
+                                finding.with_evidence(format!("Login prompt: {prompt}"));
+                        }
+                    }
+                    findings.push(finding);
                 }
 
                 // SMB: flag if port 445 is open
@@ -245,7 +435,11 @@ impl Scanner for CredentialScanner {
                         .with_ip(ip)
                         .with_port(445)
                         .with_service("SMB")
-                        .with_cwe("CWE-287"),
+                        .with_cwe("CWE-287")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.credentials.smb-exposed",
+                            &[],
+                        )),
                     );
                 }
 
@@ -265,7 +459,11 @@ impl Scanner for CredentialScanner {
                         .with_ip(ip)
                         .with_port(3389)
                         .with_service("RDP")
-                        .with_cwe("CWE-287"),
+                        .with_cwe("CWE-287")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.credentials.rdp-exposed",
+                            &[],
+                        )),
                     );
                 }
 
@@ -278,14 +476,14 @@ impl Scanner for CredentialScanner {
                     .collect();
 
                 for port in http_ports {
-                    if check_http_no_auth(ip, port).await == Some(true) {
-                        let label = if ctx.gateway == Some(ip) {
-                            "Router admin panel"
-                        } else {
-                            "Web admin panel"
-                        };
-                        findings.push(
-                            Finding::new(
+                    if let Some(result) = check_http_no_auth(ip, port).await {
+                        if result.no_auth {
+                            let label = if ctx.gateway == Some(ip) {
+                                "Router admin panel"
+                            } else {
+                                "Web admin panel"
+                            };
+                            let mut finding = Finding::new(
                                 "credentials",
                                 &format!("{label} without auth on {ip}:{port}"),
                                 &format!(
@@ -297,8 +495,16 @@ impl Scanner for CredentialScanner {
                             .with_ip(ip)
                             .with_port(port)
                             .with_service("HTTP")
-                            .with_cwe("CWE-306"),
-                        );
+                            .with_cwe("CWE-306")
+                            .with_opt_remediation(crate::remediation::get(
+                                "rikitikitavi.credentials.http-no-auth",
+                                &[],
+                            ));
+                            if let Some(evidence) = result.evidence {
+                                finding = finding.with_evidence(evidence);
+                            }
+                            findings.push(finding);
+                        }
                     }
                 }
             }
@@ -331,22 +537,32 @@ impl Scanner for CredentialScanner {
 
             if ctx.gateway == Some(ip) {
                 for &port in &[80, 443, 8080, 8443] {
-                    if check_http_no_auth(ip, port).await == Some(true) {
-                        findings.push(
-                            Finding::new(
+                    if let Some(result) = check_http_no_auth(ip, port).await {
+                        if result.no_auth {
+                            let mut finding = Finding::new(
                                 "credentials",
-                                &format!("Router admin panel without auth on {ip}:{port}"),
                                 &format!(
-                                    "The router admin panel at {ip}:{port} returned HTTP 200 \
-                                     without requiring authentication."
+                                    "Router admin panel without auth on {ip}:{port}"
+                                ),
+                                &format!(
+                                    "The router admin panel at {ip}:{port} returned \
+                                     HTTP 200 without requiring authentication."
                                 ),
                                 Severity::Medium,
                             )
                             .with_ip(ip)
                             .with_port(port)
                             .with_service("HTTP")
-                            .with_cwe("CWE-306"),
-                        );
+                            .with_cwe("CWE-306")
+                            .with_opt_remediation(crate::remediation::get(
+                                "rikitikitavi.credentials.http-no-auth",
+                                &[],
+                            ));
+                            if let Some(evidence) = result.evidence {
+                                finding = finding.with_evidence(evidence);
+                            }
+                            findings.push(finding);
+                        }
                     }
                 }
             }
@@ -370,7 +586,11 @@ impl Scanner for CredentialScanner {
                     .with_ip(ip)
                     .with_port(445)
                     .with_service("SMB")
-                    .with_cwe("CWE-287"),
+                    .with_cwe("CWE-287")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.credentials.smb-exposed",
+                        &[],
+                    )),
                 );
             }
         }
@@ -414,5 +634,110 @@ mod tests {
     #[test]
     fn test_extract_ftp_code_garbage() {
         assert_eq!(extract_ftp_code("Hello"), None);
+    }
+
+    // ── parse_pasv_response tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_pasv_standard() {
+        let resp = "227 Entering Passive Mode (192,168,1,1,39,5).";
+        let addr = parse_pasv_response(resp).unwrap();
+        assert_eq!(addr.ip(), IpAddr::from([192, 168, 1, 1]));
+        // port = 39*256 + 5 = 9989
+        assert_eq!(addr.port(), 9989);
+    }
+
+    #[test]
+    fn test_parse_pasv_high_port() {
+        let resp = "227 Entering Passive Mode (10,0,0,1,200,100).";
+        let addr = parse_pasv_response(resp).unwrap();
+        assert_eq!(addr.ip(), IpAddr::from([10, 0, 0, 1]));
+        // port = 200*256 + 100 = 51300
+        assert_eq!(addr.port(), 51300);
+    }
+
+    #[test]
+    fn test_parse_pasv_no_parens() {
+        assert!(parse_pasv_response("227 No parens here").is_none());
+    }
+
+    #[test]
+    fn test_parse_pasv_wrong_part_count() {
+        assert!(parse_pasv_response("227 (1,2,3,4,5)").is_none());
+    }
+
+    #[test]
+    fn test_parse_pasv_non_numeric() {
+        assert!(parse_pasv_response("227 (a,b,c,d,e,f)").is_none());
+    }
+
+    // ── extract_html_title tests ──────────────────────────────────
+
+    #[test]
+    fn test_extract_title_basic() {
+        let html = "<html><head><title>Router Admin</title></head></html>";
+        assert_eq!(extract_html_title(html), Some("Router Admin".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_title_mixed_case() {
+        let html = "<HTML><HEAD><TITLE>My Panel</TITLE></HEAD></HTML>";
+        assert_eq!(extract_html_title(html), Some("My Panel".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_title_whitespace() {
+        let html = "<title>  Spaced Title  </title>";
+        assert_eq!(extract_html_title(html), Some("Spaced Title".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_title_empty() {
+        let html = "<title>  </title>";
+        assert_eq!(extract_html_title(html), None);
+    }
+
+    #[test]
+    fn test_extract_title_missing() {
+        let html = "<html><body>No title here</body></html>";
+        assert_eq!(extract_html_title(html), None);
+    }
+
+    // ── strip_telnet_iac tests ────────────────────────────────────
+
+    #[test]
+    fn test_strip_iac_no_sequences() {
+        let data = b"Hello World";
+        assert_eq!(strip_telnet_iac(data), data.to_vec());
+    }
+
+    #[test]
+    fn test_strip_iac_will_do_sequences() {
+        // IAC WILL ECHO (FF FB 01) + IAC DO TERMINAL_TYPE (FF FD 18) + "login: "
+        let mut data = vec![0xFF, 0xFB, 0x01, 0xFF, 0xFD, 0x18];
+        data.extend_from_slice(b"login: ");
+        assert_eq!(strip_telnet_iac(&data), b"login: ".to_vec());
+    }
+
+    #[test]
+    fn test_strip_iac_other_command() {
+        // IAC NOP (FF F1) + "data"
+        let mut data = vec![0xFF, 0xF1];
+        data.extend_from_slice(b"data");
+        assert_eq!(strip_telnet_iac(&data), b"data".to_vec());
+    }
+
+    #[test]
+    fn test_strip_iac_mixed() {
+        // "BusyBox" + IAC WONT ECHO (FF FC 01) + " login: "
+        let mut data = b"BusyBox".to_vec();
+        data.extend_from_slice(&[0xFF, 0xFC, 0x01]);
+        data.extend_from_slice(b" login: ");
+        assert_eq!(strip_telnet_iac(&data), b"BusyBox login: ".to_vec());
+    }
+
+    #[test]
+    fn test_strip_iac_empty() {
+        assert_eq!(strip_telnet_iac(&[]), Vec::<u8>::new());
     }
 }

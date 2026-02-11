@@ -120,6 +120,8 @@ fn init_registry() -> RemediationRegistry {
         include_str!("../templates/exposure.yaml"),
         include_str!("../templates/http_audit.yaml"),
         include_str!("../templates/isolation.yaml"),
+        include_str!("../templates/ports.yaml"),
+        include_str!("../templates/router.yaml"),
         include_str!("../templates/services.yaml"),
         include_str!("../templates/smb.yaml"),
         include_str!("../templates/ssl.yaml"),
@@ -199,10 +201,14 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// All 37 expected template IDs.
+    /// All 53 expected template IDs.
     const EXPECTED_IDS: &[&str] = &[
         "rikitikitavi.arp.spoofing-detected",
         "rikitikitavi.credentials.anonymous-ftp",
+        "rikitikitavi.credentials.http-no-auth",
+        "rikitikitavi.credentials.telnet-default",
+        "rikitikitavi.credentials.rdp-exposed",
+        "rikitikitavi.credentials.smb-exposed",
         "rikitikitavi.database.redis-no-auth",
         "rikitikitavi.database.mongodb-no-auth",
         "rikitikitavi.database.mysql-exposed",
@@ -219,6 +225,18 @@ mod tests {
         "rikitikitavi.http_audit.admin-no-auth",
         "rikitikitavi.isolation.inter-vlan-routing",
         "rikitikitavi.isolation.large-flat-network",
+        "rikitikitavi.ports.telnet-open",
+        "rikitikitavi.ports.ftp-open",
+        "rikitikitavi.ports.rdp-open",
+        "rikitikitavi.ports.vnc-open",
+        "rikitikitavi.ports.upnp-exposed",
+        "rikitikitavi.ports.database-exposed",
+        "rikitikitavi.ports.unencrypted-mail",
+        "rikitikitavi.ports.mqtt-unencrypted",
+        "rikitikitavi.router.admin-http-unencrypted",
+        "rikitikitavi.router.telnet-enabled",
+        "rikitikitavi.router.ftp-enabled",
+        "rikitikitavi.router.upnp-enabled",
         "rikitikitavi.services.redis-no-auth",
         "rikitikitavi.services.mysql-exposed",
         "rikitikitavi.services.postgresql-exposed",
@@ -243,7 +261,7 @@ mod tests {
     #[test]
     fn test_all_templates_parse() {
         let registry = REGISTRY.get_or_init(init_registry);
-        assert_eq!(registry.templates.len(), 37);
+        assert_eq!(registry.templates.len(), 53);
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
     sorted_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
     let mut out = String::from(
-        "severity,scanner,title,description,affected_ip,affected_hostname,affected_port,affected_service,cwe_id,cve_ids,remediation,effort\n"
+        "severity,scanner,title,description,affected_ip,affected_hostname,affected_port,affected_service,cwe_id,cve_ids,remediation,effort,evidence\n"
     );
 
     for f in &sorted_findings {
@@ -57,9 +57,13 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
         out.push(',');
         out.push_str(&csv_escape(&cve_ids));
         out.push(',');
+        let evidence = f.evidence.as_deref().unwrap_or("");
+
         out.push_str(&csv_escape(&remediation));
         out.push(',');
         out.push_str(&csv_escape(effort));
+        out.push(',');
+        out.push_str(&csv_escape(evidence));
         out.push('\n');
     }
 

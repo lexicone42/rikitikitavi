@@ -1,0 +1,127 @@
+id: "rikitikitavi.router.admin-http-unencrypted"
+version: "1.0.0"
+summary: "Enable HTTPS-only access for the router admin interface"
+description: "Router admin interface is accessible over unencrypted HTTP."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["router", "https", "admin"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "enable-https"
+    kind: "manual.step"
+    params:
+      text: "Enable HTTPS and set the admin interface to HTTPS-only mode."
+  - id: "disable-http"
+    kind: "manual.step"
+    params:
+      text: "Disable plain HTTP access or enable automatic HTTP-to-HTTPS redirect."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["router", "admin"]
+  changeType: "standard"
+---
+id: "rikitikitavi.router.telnet-enabled"
+version: "1.0.0"
+summary: "Disable Telnet on the router"
+description: "Router has Telnet enabled, exposing admin credentials in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["router", "telnet", "cleartext"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "disable-telnet"
+    kind: "manual.step"
+    params:
+      text: "Disable Telnet in the router's remote management settings."
+  - id: "enable-ssh"
+    kind: "manual.step"
+    params:
+      text: "Enable SSH if remote CLI access is needed."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["router", "remote-access"]
+  changeType: "standard"
+---
+id: "rikitikitavi.router.ftp-enabled"
+version: "1.0.0"
+summary: "Disable FTP on the router"
+description: "Router has FTP enabled, transmitting credentials in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["router", "ftp", "cleartext"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "disable-ftp"
+    kind: "manual.step"
+    params:
+      text: "Disable FTP in the router's file sharing or USB settings."
+  - id: "use-sftp"
+    kind: "manual.step"
+    params:
+      text: "Use SFTP or a web-based file manager if file access is needed."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["router", "file-sharing"]
+  changeType: "standard"
+---
+id: "rikitikitavi.router.upnp-enabled"
+version: "1.0.0"
+summary: "Disable UPnP on the router"
+description: "Router has UPnP enabled, allowing any device to open ports."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["router", "upnp"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "disable-upnp"
+    kind: "manual.step"
+    params:
+      text: "Disable UPnP in the router's advanced or NAT settings."
+  - id: "manual-forwards"
+    kind: "manual.step"
+    params:
+      text: "Create manual port forwarding rules only for services that need external access."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["router", "network-config"]
+  changeType: "standard"

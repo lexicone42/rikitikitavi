@@ -227,6 +227,18 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
+    // Deduplicate findings from Phase 1 + Phase 2 overlap
+    let pre_dedup = all_findings.len();
+    let all_findings = deduplicate_findings(all_findings);
+    if all_findings.len() < pre_dedup {
+        tracing::info!(
+            before = pre_dedup,
+            after = all_findings.len(),
+            removed = pre_dedup - all_findings.len(),
+            "deduplicated findings"
+        );
+    }
+
     // Generate attack paths if requested
     let attack_paths = if ctx.config.attack_paths {
         generate_attack_paths(&all_findings)
@@ -255,6 +267,71 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         risk_score,
         scan_duration_secs: duration,
     })
+}
+
+/// Deduplicate findings that share the same `(affected_ip, affected_port)`.
+///
+/// When Phase 1 (ports) and Phase 2 (services, ssl, credentials, etc.) both
+/// report on the same IP:port, keep the finding with the highest detail score.
+/// Findings without both IP and port are never deduplicated.
+fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
+    use std::collections::HashMap;
+
+    let mut keyed: HashMap<(IpAddr, u16), Vec<Finding>> = HashMap::new();
+    let mut unkeyed: Vec<Finding> = Vec::new();
+
+    for finding in findings {
+        if let (Some(ip), Some(port)) = (finding.affected_ip, finding.affected_port) {
+            keyed.entry((ip, port)).or_default().push(finding);
+        } else {
+            unkeyed.push(finding);
+        }
+    }
+
+    let mut result: Vec<Finding> = unkeyed;
+    for (_key, mut group) in keyed {
+        if group.len() == 1 {
+            result.push(group.pop().expect("non-empty group"));
+        } else {
+            // Keep the finding with the highest detail score
+            group.sort_by(|a, b| {
+                let score_a = detail_score(a);
+                let score_b = detail_score(b);
+                score_b.cmp(&score_a).then_with(|| {
+                    // Tiebreaker: prefer non-"ports" scanner (Phase 2 is deeper)
+                    let a_is_ports = a.scanner == "ports";
+                    let b_is_ports = b.scanner == "ports";
+                    a_is_ports.cmp(&b_is_ports)
+                })
+            });
+            result.push(group.swap_remove(0));
+        }
+    }
+
+    // Re-sort by severity (descending) for consistent output
+    result.sort_by(|a, b| b.severity.cmp(&a.severity));
+    result
+}
+
+/// Score a finding by how much useful detail it contains.
+fn detail_score(f: &Finding) -> u32 {
+    let mut score = 0;
+    if f.evidence.is_some() {
+        score += 3;
+    }
+    if f.remediation.is_some() {
+        score += 2;
+    }
+    if f.cwe_id.is_some() {
+        score += 1;
+    }
+    if f.affected_service.is_some() {
+        score += 1;
+    }
+    if f.description.len() > 100 {
+        score += 1;
+    }
+    score
 }
 
 /// Enrich `ctx.discovered_devices` from Phase 1 scan findings.
@@ -298,5 +375,132 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
         }
         // If the IP isn't in our device list yet (edge case), we don't create
         // a new device here — discover_network should have found it.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rikitikitavi_core::Severity;
+    use rikitikitavi_models::Remediation;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn basic_finding(scanner: &str, sev: Severity, ip_addr: IpAddr, port: u16) -> Finding {
+        Finding::new(scanner, "title", "short desc", sev)
+            .with_ip(ip_addr)
+            .with_port(port)
+            .with_service("SVC")
+    }
+
+    #[test]
+    fn test_dedup_keeps_more_detailed() {
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23);
+        let f2 = basic_finding("credentials", Severity::High, ip("10.0.0.1"), 23)
+            .with_cwe("CWE-319")
+            .with_remediation(Remediation {
+                description: "Fix".to_owned(),
+                steps: vec!["Do it".to_owned()],
+                effort: None,
+            });
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "credentials");
+    }
+
+    #[test]
+    fn test_dedup_prefers_phase2() {
+        // Same detail score, but prefer non-ports scanner
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 21)
+            .with_cwe("CWE-319");
+        let f2 = basic_finding("credentials", Severity::Medium, ip("10.0.0.1"), 21)
+            .with_cwe("CWE-287");
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "credentials");
+    }
+
+    #[test]
+    fn test_dedup_no_ip_no_dedup() {
+        let f1 = Finding::new("network", "title1", "desc", Severity::Info);
+        let f2 = Finding::new("network", "title2", "desc", Severity::Info);
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_different_ports() {
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 21);
+        let f2 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 22);
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_evidence_wins() {
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23)
+            .with_cwe("CWE-319");
+        let f2 = basic_finding("services", Severity::Medium, ip("10.0.0.1"), 23)
+            .with_evidence("SSH-2.0-OpenSSH_8.9p1");
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].evidence.is_some());
+    }
+
+    #[test]
+    fn test_dedup_empty() {
+        let result = deduplicate_findings(Vec::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_preserves_unkeyed() {
+        let f1 = Finding::new("network", "No IP finding", "desc", Severity::Info);
+        let f2 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23);
+        let result = deduplicate_findings(vec![f1, f2]);
+        assert_eq!(result.len(), 2);
+    }
+
+    fn arb_severity() -> impl Strategy<Value = Severity> {
+        prop_oneof![
+            Just(Severity::Info),
+            Just(Severity::Low),
+            Just(Severity::Medium),
+            Just(Severity::High),
+            Just(Severity::Critical),
+        ]
+    }
+
+    fn arb_finding_for_dedup() -> impl Strategy<Value = Finding> {
+        (
+            prop_oneof![Just("ports"), Just("services"), Just("credentials"), Just("smb")],
+            arb_severity(),
+            (0_u8..5_u8),
+            (1_u16..100_u16),
+            proptest::bool::ANY,
+        )
+            .prop_map(|(scanner, sev, host, port, has_ip)| {
+                let mut f = Finding::new(scanner, "title", "description text here", sev);
+                if has_ip {
+                    f = f
+                        .with_ip(format!("10.0.0.{host}").parse().unwrap())
+                        .with_port(port);
+                }
+                f
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_dedup_never_increases_count(
+            findings in proptest::collection::vec(arb_finding_for_dedup(), 0..50)
+        ) {
+            let original_len = findings.len();
+            let deduped = deduplicate_findings(findings);
+            assert!(deduped.len() <= original_len);
+        }
     }
 }

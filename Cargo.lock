@@ -1526,6 +1526,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "proptest",
  "ratatui",
  "rikitikitavi-analysis",
  "rikitikitavi-core",

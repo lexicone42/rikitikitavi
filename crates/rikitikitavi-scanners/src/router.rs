@@ -174,7 +174,11 @@ impl Scanner for RouterScanner {
                         .with_ip(gateway)
                         .with_port(80)
                         .with_service("HTTP")
-                        .with_cwe("CWE-319"),
+                        .with_cwe("CWE-319")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.router.admin-http-unencrypted",
+                            &[],
+                        )),
                     );
                 }
                 None => {
@@ -198,7 +202,11 @@ impl Scanner for RouterScanner {
                 .with_ip(gateway)
                 .with_port(23)
                 .with_service("Telnet")
-                .with_cwe("CWE-319"),
+                .with_cwe("CWE-319")
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.router.telnet-enabled",
+                    &[],
+                )),
             );
         }
 
@@ -217,7 +225,11 @@ impl Scanner for RouterScanner {
                 .with_ip(gateway)
                 .with_port(21)
                 .with_service("FTP")
-                .with_cwe("CWE-319"),
+                .with_cwe("CWE-319")
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.router.ftp-enabled",
+                    &[],
+                )),
             );
         }
 
@@ -239,7 +251,11 @@ impl Scanner for RouterScanner {
                 .with_cwe("CWE-284")
                 .with_references(vec![
                     "https://www.upnp-hacks.org/".to_owned(),
-                ]),
+                ])
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.router.upnp-enabled",
+                    &[],
+                )),
             );
         }
 

@@ -342,10 +342,18 @@ fn build_smb2_session_setup_anonymous() -> Vec<u8> {
 /// Status codes from SMB2 responses.
 const STATUS_SUCCESS: u32 = 0x0000_0000;
 
+/// Result of an `SMBv2` null session check.
+struct NullSessionResult {
+    /// Whether anonymous access was granted.
+    allowed: bool,
+    /// Session ID from the `SMBv2` response header (bytes 44-51).
+    session_id: Option<u64>,
+}
+
 /// Attempt an anonymous `SMBv2` session setup (null session).
-/// Returns `Some(true)` if anonymous access was granted, `Some(false)` if denied,
+/// Returns session result with session ID evidence on success,
 /// or `None` if we couldn't connect or parse the response.
-async fn check_null_session(ip: IpAddr, port: u16) -> Option<bool> {
+async fn check_null_session(ip: IpAddr, port: u16) -> Option<NullSessionResult> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -389,8 +397,21 @@ async fn check_null_session(ip: IpAddr, port: u16) -> Option<bool> {
 
     // Extract NT Status from bytes 12-15 (little-endian)
     let nt_status = u32::from_le_bytes([resp[12], resp[13], resp[14], resp[15]]);
+    let allowed = nt_status == STATUS_SUCCESS;
 
-    Some(nt_status == STATUS_SUCCESS)
+    // Extract Session ID from SMBv2 header bytes 44-51 (packet offset 48-55)
+    let session_id = if allowed && n2 >= 56 {
+        Some(u64::from_le_bytes([
+            resp[48], resp[49], resp[50], resp[51], resp[52], resp[53], resp[54], resp[55],
+        ]))
+    } else {
+        None
+    };
+
+    Some(NullSessionResult {
+        allowed,
+        session_id,
+    })
 }
 
 /// Check `NetBIOS` Session Service on port 139.
@@ -597,28 +618,32 @@ impl Scanner for SmbScanner {
             }
 
             // Check for anonymous/null session access
-            if let Some(anonymous_allowed) = check_null_session(ip, 445).await {
-                if anonymous_allowed {
-                    findings.push(
-                        Finding::new(
-                            "smb",
-                            &format!("SMB null session allowed on {ip}:445"),
-                            &format!(
-                                "Host {ip} accepts anonymous SMBv2 session setup (null session). \
-                                 This allows unauthenticated users to enumerate shares, users, \
-                                 and other sensitive information."
-                            ),
-                            Severity::High,
-                        )
-                        .with_ip(ip)
-                        .with_port(445)
-                        .with_service("SMB")
-                        .with_cwe("CWE-287")
-                        .with_opt_remediation(crate::remediation::get(
-                            "rikitikitavi.smb.null-session",
-                            &[],
-                        )),
-                    );
+            if let Some(result) = check_null_session(ip, 445).await {
+                if result.allowed {
+                    let mut finding = Finding::new(
+                        "smb",
+                        &format!("SMB null session allowed on {ip}:445"),
+                        &format!(
+                            "Host {ip} accepts anonymous SMBv2 session setup (null session). \
+                             This allows unauthenticated users to enumerate shares, users, \
+                             and other sensitive information."
+                        ),
+                        Severity::High,
+                    )
+                    .with_ip(ip)
+                    .with_port(445)
+                    .with_service("SMB")
+                    .with_cwe("CWE-287")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.smb.null-session",
+                        &[],
+                    ));
+                    if let Some(sid) = result.session_id {
+                        finding = finding.with_evidence(format!(
+                            "Anonymous SMBv2 session established (session ID: {sid:#x})"
+                        ));
+                    }
+                    findings.push(finding);
                 }
             }
 

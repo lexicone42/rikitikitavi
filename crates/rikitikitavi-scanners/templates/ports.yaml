@@ -1,0 +1,255 @@
+id: "rikitikitavi.ports.telnet-open"
+version: "1.0.0"
+summary: "Disable Telnet and use SSH instead"
+description: "Telnet transmits all data including credentials in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["telnet", "cleartext", "ports"]
+
+steps:
+  - id: "disable-telnet"
+    kind: "manual.step"
+    params:
+      text: "Disable the Telnet service on the device."
+  - id: "enable-ssh"
+    kind: "manual.step"
+    params:
+      text: "Enable SSH (port 22) as a secure replacement."
+  - id: "block-port"
+    kind: "manual.step"
+    params:
+      text: "Block port 23 on your firewall."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["remote-access"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.ftp-open"
+version: "1.0.0"
+summary: "Replace FTP with SFTP or FTPS"
+description: "FTP transmits credentials in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["ftp", "cleartext", "ports"]
+
+steps:
+  - id: "disable-ftp"
+    kind: "manual.step"
+    params:
+      text: "Disable the FTP service on the device."
+  - id: "enable-sftp"
+    kind: "manual.step"
+    params:
+      text: "Enable SFTP (via SSH) or FTPS as a secure alternative."
+  - id: "block-port"
+    kind: "manual.step"
+    params:
+      text: "Block port 21 on your firewall."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["file-sharing"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.rdp-open"
+version: "1.0.0"
+summary: "Secure RDP with NLA and VPN"
+description: "RDP is exposed on the local network without additional protection."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["rdp", "remote-access", "ports"]
+
+steps:
+  - id: "enable-nla"
+    kind: "manual.step"
+    params:
+      text: "Enable Network Level Authentication (NLA) on the RDP host."
+  - id: "require-vpn"
+    kind: "manual.step"
+    params:
+      text: "Require VPN access before allowing RDP connections."
+  - id: "limit-access"
+    kind: "manual.step"
+    params:
+      text: "Restrict RDP access to specific IP addresses via firewall rules."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["remote-access"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.vnc-open"
+version: "1.0.0"
+summary: "Tunnel VNC over SSH or VPN"
+description: "VNC is exposed and may lack strong authentication or encryption."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["vnc", "remote-access", "ports"]
+
+steps:
+  - id: "set-password"
+    kind: "manual.step"
+    params:
+      text: "Set a strong VNC password (or disable VNC if unused)."
+  - id: "tunnel-ssh"
+    kind: "manual.step"
+    params:
+      text: "Tunnel VNC through SSH or a VPN for encryption."
+  - id: "firewall"
+    kind: "manual.step"
+    params:
+      text: "Block port 5900 from untrusted networks."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["remote-access"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.upnp-exposed"
+version: "1.0.0"
+summary: "Disable UPnP on the router"
+description: "UPnP allows any device to automatically open ports on the router."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["upnp", "router", "ports"]
+
+steps:
+  - id: "login-router"
+    kind: "manual.step"
+    params:
+      text: "Log into your router's admin interface."
+  - id: "disable-upnp"
+    kind: "manual.step"
+    params:
+      text: "Disable UPnP in the router's advanced settings."
+  - id: "manual-forwards"
+    kind: "manual.step"
+    params:
+      text: "Set up manual port forwards only for services that need them."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["network-config"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.database-exposed"
+version: "1.0.0"
+summary: "Bind database to localhost and require authentication"
+description: "Database service is accessible from the network without restrictions."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["database", "ports"]
+
+steps:
+  - id: "bind-localhost"
+    kind: "manual.step"
+    params:
+      text: "Configure the database to bind to 127.0.0.1 (localhost only)."
+  - id: "require-auth"
+    kind: "manual.step"
+    params:
+      text: "Enable authentication and set strong passwords."
+  - id: "firewall"
+    kind: "manual.step"
+    params:
+      text: "Add firewall rules to restrict database access to authorized hosts."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["database"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.unencrypted-mail"
+version: "1.0.0"
+summary: "Switch to encrypted mail protocols (POP3S/IMAPS)"
+description: "Unencrypted mail protocol transmits credentials and messages in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["mail", "cleartext", "ports"]
+
+steps:
+  - id: "enable-tls"
+    kind: "manual.step"
+    params:
+      text: "Enable TLS on the mail server for POP3S (995) and IMAPS (993)."
+  - id: "disable-cleartext"
+    kind: "manual.step"
+    params:
+      text: "Disable the unencrypted POP3 (110) and IMAP (143) ports."
+  - id: "update-clients"
+    kind: "manual.step"
+    params:
+      text: "Update mail clients to use the encrypted ports."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["mail"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.mqtt-unencrypted"
+version: "1.0.0"
+summary: "Enable MQTT over TLS (port 8883)"
+description: "MQTT without TLS transmits IoT messages in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "stable"
+  tags: ["mqtt", "iot", "cleartext", "ports"]
+
+steps:
+  - id: "enable-tls"
+    kind: "manual.step"
+    params:
+      text: "Configure the MQTT broker to require TLS on port 8883."
+  - id: "disable-cleartext"
+    kind: "manual.step"
+    params:
+      text: "Disable the unencrypted MQTT listener on port 1883."
+  - id: "update-clients"
+    kind: "manual.step"
+    params:
+      text: "Update IoT device MQTT configurations to use port 8883 with TLS."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["iot"]
+  changeType: "standard"

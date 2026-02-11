@@ -266,6 +266,13 @@ pub fn render_html_report(results: &ScanResults) -> String {
             let _ = write!(html, r#"<div class="title">{}</div>"#, html_escape(&f.title));
             let _ = write!(html, r#"<div class="desc">{}</div>"#, html_escape(&f.description));
 
+            if let Some(evidence) = &f.evidence {
+                let _ = write!(html,
+                    r#"<div style="font-family:monospace;background:rgba(237,137,54,0.1);padding:0.4rem 0.6rem;border-radius:4px;margin-bottom:0.5rem;font-size:0.9rem;white-space:pre-wrap;">Evidence: {}</div>"#,
+                    html_escape(evidence),
+                );
+            }
+
             html.push_str(r#"<div class="meta">"#);
             if let Some(cwe) = &f.cwe_id {
                 let _ = write!(html,

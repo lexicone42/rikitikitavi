@@ -35,6 +35,9 @@ pub struct Finding {
     pub cve_ids: Vec<String>,
     /// External references.
     pub references: Vec<String>,
+    /// Proof-of-concept evidence (banner, login prompt, directory listing, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
     /// When the finding was discovered.
     pub discovered_at: DateTime<Utc>,
 }
@@ -57,6 +60,7 @@ impl Finding {
             cwe_id: None,
             cve_ids: Vec::new(),
             references: Vec::new(),
+            evidence: None,
             discovered_at: Utc::now(),
         }
     }
@@ -125,6 +129,24 @@ impl Finding {
         }
         self
     }
+
+    /// Builder-style setter for `PoC` evidence (truncated to 256 chars at a char boundary).
+    #[must_use]
+    pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
+        let s = evidence.into();
+        if s.len() <= 256 {
+            self.evidence = Some(s);
+        } else {
+            // Find the last char boundary at or before byte 256 (MSRV-safe
+            // alternative to `str::floor_char_boundary`).
+            let mut end = 256;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.evidence = Some(s[..end].to_owned());
+        }
+        self
+    }
 }
 
 impl PartialEq for Finding {
@@ -142,6 +164,7 @@ impl PartialEq for Finding {
             && self.cwe_id == other.cwe_id
             && self.cve_ids == other.cve_ids
             && self.references == other.references
+            && self.evidence == other.evidence
     }
 }
 
@@ -186,9 +209,10 @@ mod tests {
             proptest::option::of(arb_ip()),
             proptest::option::of(0_u16..=u16::MAX),
             proptest::option::of("[A-Z]{3,4}-[0-9]{1,5}"),
+            proptest::option::of("[a-zA-Z0-9 ._:-]{1,100}"),
         )
             .prop_map(
-                |(scanner, title, desc, sev, ip, port, cwe)| {
+                |(scanner, title, desc, sev, ip, port, cwe, evidence)| {
                     let mut f = Finding::new(&scanner, &title, &desc, sev);
                     if let Some(ip) = ip {
                         f = f.with_ip(ip);
@@ -198,6 +222,9 @@ mod tests {
                     }
                     if let Some(cwe) = cwe {
                         f = f.with_cwe(cwe);
+                    }
+                    if let Some(evidence) = evidence {
+                        f = f.with_evidence(evidence);
                     }
                     f
                 },

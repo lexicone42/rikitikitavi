@@ -17,6 +17,7 @@ struct PortResult {
     ip: IpAddr,
     port: u16,
     open: bool,
+    banner: Option<String>,
 }
 
 /// Map a port number to a well-known service name.
@@ -112,11 +113,68 @@ async fn tcp_connect_probe(addr: SocketAddr, timeout: Duration) -> bool {
         .is_ok_and(|r| r.is_ok())
 }
 
+/// Non-destructive banner grab: connect, optionally send a minimal request,
+/// read the first bytes of the response.
+///
+/// For HTTP ports, sends a `HEAD / HTTP/1.0` to elicit a response.
+/// For other ports, just reads whatever the server sends on connect.
+async fn grab_banner(addr: SocketAddr) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let timeout = Duration::from_secs(2);
+    let mut stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // For HTTP ports, send a minimal request to get a response
+    let http_ports: &[u16] = &[80, 443, 8080, 8443, 8888, 3000, 8000, 9090];
+    if http_ports.contains(&addr.port()) {
+        let req = format!("HEAD / HTTP/1.0\r\nHost: {}\r\n\r\n", addr.ip());
+        tokio::time::timeout(timeout, stream.write_all(req.as_bytes()))
+            .await
+            .ok()?
+            .ok()?;
+    }
+
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(timeout, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    if n == 0 {
+        return None;
+    }
+
+    // Clean control chars (except \n \r \t) and return lossy UTF-8
+    let raw = String::from_utf8_lossy(&buf[..n]);
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\r' && c != '\t' {
+                '.'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    let trimmed = cleaned.trim().to_owned();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 /// Classify an open port into a finding with appropriate severity.
+///
+/// If a `banner` is provided, it is attached as `PoC` evidence.
 #[allow(clippy::too_many_lines)]
-fn classify_port(ip: IpAddr, port: u16) -> Finding {
+fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
     let service = port_to_service(port);
-    match port {
+    let finding = match port {
         23 => Finding::new(
             "ports",
             &format!("Telnet open on {ip}:{port}"),
@@ -127,7 +185,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-319"),
+        .with_cwe("CWE-319")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.telnet-open",
+            &[],
+        )),
 
         21 => Finding::new(
             "ports",
@@ -138,7 +200,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-319"),
+        .with_cwe("CWE-319")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.ftp-open",
+            &[],
+        )),
 
         110 | 143 => Finding::new(
             "ports",
@@ -152,7 +218,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-319"),
+        .with_cwe("CWE-319")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.unencrypted-mail",
+            &[],
+        )),
 
         3389 => Finding::new(
             "ports",
@@ -164,7 +234,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-284"),
+        .with_cwe("CWE-284")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.rdp-open",
+            &[],
+        )),
 
         5900 => Finding::new(
             "ports",
@@ -176,7 +250,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-284"),
+        .with_cwe("CWE-284")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.vnc-open",
+            &[],
+        )),
 
         3306 | 5432 | 27017 | 6379 => Finding::new(
             "ports",
@@ -191,7 +269,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-284"),
+        .with_cwe("CWE-284")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.database-exposed",
+            &[],
+        )),
 
         1883 => Finding::new(
             "ports",
@@ -203,7 +285,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-319"),
+        .with_cwe("CWE-319")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.mqtt-unencrypted",
+            &[],
+        )),
 
         1900 | 49152 => Finding::new(
             "ports",
@@ -215,7 +301,11 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service)
-        .with_cwe("CWE-284"),
+        .with_cwe("CWE-284")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.upnp-exposed",
+            &[],
+        )),
 
         22 => Finding::new(
             "ports",
@@ -251,10 +341,16 @@ fn classify_port(ip: IpAddr, port: u16) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service(service),
+    };
+    if let Some(banner) = banner {
+        finding.with_evidence(banner)
+    } else {
+        finding
     }
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl Scanner for PortScanner {
     fn id(&self) -> &'static str {
         "ports"
@@ -318,6 +414,10 @@ impl Scanner for PortScanner {
             "starting TCP connect scan"
         );
 
+        let do_banner = ctx.config.intensity.at_least(
+            rikitikitavi_models::config::ScanIntensity::Active,
+        );
+
         // Build all probe tasks
         let mut tasks = Vec::new();
         for &ip in &targets {
@@ -327,7 +427,12 @@ impl Scanner for PortScanner {
                     let _permit = sem.acquire().await;
                     let addr = SocketAddr::new(ip, port);
                     let open = tcp_connect_probe(addr, timeout).await;
-                    PortResult { ip, port, open }
+                    let banner = if open && do_banner {
+                        grab_banner(addr).await
+                    } else {
+                        None
+                    };
+                    PortResult { ip, port, open, banner }
                 });
                 tasks.push(task);
             }
@@ -346,7 +451,11 @@ impl Scanner for PortScanner {
                         .entry(result.ip)
                         .or_default()
                         .push(result.port);
-                    findings.push(classify_port(result.ip, result.port));
+                    findings.push(classify_port(
+                        result.ip,
+                        result.port,
+                        result.banner.as_deref(),
+                    ));
                 }
             }
         }
@@ -507,7 +616,7 @@ mod tests {
     #[test]
     fn test_classify_telnet_high() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 23);
+        let finding = classify_port(ip, 23, None);
         assert_eq!(finding.severity, Severity::High);
         assert_eq!(finding.affected_port, Some(23));
         assert_eq!(finding.affected_service.as_deref(), Some("Telnet"));
@@ -517,35 +626,35 @@ mod tests {
     #[test]
     fn test_classify_ftp_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 21);
+        let finding = classify_port(ip, 21, None);
         assert_eq!(finding.severity, Severity::Medium);
     }
 
     #[test]
     fn test_classify_ssh_low() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 22);
+        let finding = classify_port(ip, 22, None);
         assert_eq!(finding.severity, Severity::Low);
     }
 
     #[test]
     fn test_classify_http_info() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 80);
+        let finding = classify_port(ip, 80, None);
         assert_eq!(finding.severity, Severity::Info);
     }
 
     #[test]
     fn test_classify_rdp_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 3389);
+        let finding = classify_port(ip, 3389, None);
         assert_eq!(finding.severity, Severity::Medium);
     }
 
     #[test]
     fn test_classify_vnc_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 5900);
+        let finding = classify_port(ip, 5900, None);
         assert_eq!(finding.severity, Severity::Medium);
     }
 
@@ -553,7 +662,7 @@ mod tests {
     fn test_classify_databases_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         for port in [3306, 5432, 27017, 6379] {
-            let finding = classify_port(ip, port);
+            let finding = classify_port(ip, port, None);
             assert_eq!(finding.severity, Severity::Medium, "port {port}");
         }
     }
@@ -561,37 +670,52 @@ mod tests {
     #[test]
     fn test_classify_upnp_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert_eq!(classify_port(ip, 1900).severity, Severity::Medium);
-        assert_eq!(classify_port(ip, 49152).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 1900, None).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 49152, None).severity, Severity::Medium);
     }
 
     #[test]
     fn test_classify_printer_low() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert_eq!(classify_port(ip, 9100).severity, Severity::Low);
-        assert_eq!(classify_port(ip, 631).severity, Severity::Low);
+        assert_eq!(classify_port(ip, 9100, None).severity, Severity::Low);
+        assert_eq!(classify_port(ip, 631, None).severity, Severity::Low);
     }
 
     #[test]
     fn test_classify_mail_medium() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert_eq!(classify_port(ip, 110).severity, Severity::Medium);
-        assert_eq!(classify_port(ip, 143).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 110, None).severity, Severity::Medium);
+        assert_eq!(classify_port(ip, 143, None).severity, Severity::Medium);
     }
 
     #[test]
     fn test_classify_unknown_info() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_port(ip, 12345);
+        let finding = classify_port(ip, 12345, None);
         assert_eq!(finding.severity, Severity::Info);
         assert_eq!(finding.affected_service.as_deref(), Some("Unknown"));
+    }
+
+    #[test]
+    fn test_classify_port_with_evidence() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let banner = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1";
+        let finding = classify_port(ip, 22, Some(banner));
+        assert_eq!(finding.evidence.as_deref(), Some(banner));
+    }
+
+    #[test]
+    fn test_classify_port_without_evidence() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_port(ip, 22, None);
+        assert!(finding.evidence.is_none());
     }
 
     #[test]
     fn test_classify_port_always_has_ip_and_port() {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         for port in [22, 23, 80, 443, 3389, 5900, 6379, 12345] {
-            let finding = classify_port(ip, port);
+            let finding = classify_port(ip, port, None);
             assert_eq!(finding.affected_ip, Some(ip));
             assert_eq!(finding.affected_port, Some(port));
             assert_eq!(finding.scanner, "ports");
@@ -617,7 +741,7 @@ mod tests {
             port in 1_u16..=65535_u16,
         ) {
             let ip: IpAddr = format!("{a}.{b}.{c}.{d}").parse().unwrap();
-            let finding = classify_port(ip, port);
+            let finding = classify_port(ip, port, None);
             assert!(!finding.title.is_empty());
             assert!(!finding.scanner.is_empty());
             assert_eq!(finding.affected_ip, Some(ip));

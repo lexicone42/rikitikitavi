@@ -144,6 +144,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     lines.push(Line::from(meta_spans));
                 }
 
+                // Show evidence if present
+                if let Some(evidence) = &f.evidence {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("  Evidence: {evidence}"),
+                        Style::default()
+                            .fg(palette.severity_color(rikitikitavi_core::Severity::Medium)),
+                    )));
+                }
+
                 // Show remediation if present
                 if let Some(remediation) = &f.remediation {
                     lines.push(Line::from(""));

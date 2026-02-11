@@ -177,6 +177,9 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         for f in &actionable {
             println!("    [{:8}] {}", f.severity, f.title);
             println!("              {}", f.description);
+            if let Some(ref evidence) = f.evidence {
+                println!("              Evidence: {evidence}");
+            }
             if let Some(ref rem) = f.remediation {
                 if !rem.steps.is_empty() {
                     let fix = rem.steps.join(" → ");
