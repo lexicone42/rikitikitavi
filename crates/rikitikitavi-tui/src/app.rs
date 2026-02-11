@@ -11,6 +11,7 @@ pub enum Screen {
     NetworkMap,
     Findings,
     AttackPaths,
+    TopActions,
     DeviceDetail,
 }
 
@@ -123,6 +124,7 @@ impl App {
             KeyCode::Char('n') => self.screen = Screen::NetworkMap,
             KeyCode::Char('f') => self.screen = Screen::Findings,
             KeyCode::Char('a') => self.screen = Screen::AttackPaths,
+            KeyCode::Char('t') => self.screen = Screen::TopActions,
             KeyCode::Char('s') if !self.scanning => {
                 self.scanning = true;
                 "Scanning...".clone_into(&mut self.scan_status);
@@ -233,10 +235,11 @@ impl App {
     /// Cycle to the next screen tab (Left arrow / Shift+Tab).
     fn prev_screen(&mut self) {
         self.screen = match self.screen {
-            Screen::Dashboard => Screen::AttackPaths,
+            Screen::Dashboard => Screen::TopActions,
             Screen::NetworkMap => Screen::Dashboard,
             Screen::Findings => Screen::NetworkMap,
             Screen::AttackPaths => Screen::Findings,
+            Screen::TopActions => Screen::AttackPaths,
             Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
         };
     }
@@ -247,7 +250,8 @@ impl App {
             Screen::Dashboard => Screen::NetworkMap,
             Screen::NetworkMap => Screen::Findings,
             Screen::Findings => Screen::AttackPaths,
-            Screen::AttackPaths => Screen::Dashboard,
+            Screen::AttackPaths => Screen::TopActions,
+            Screen::TopActions => Screen::Dashboard,
             Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
         };
     }
@@ -449,7 +453,7 @@ mod tests {
         app.handle_key(KeyCode::Left);
         assert_eq!(app.screen, Screen::NetworkMap);
 
-        // Tab wraps around
+        // Tab wraps around: Dashboard → Network → Findings → Attacks → TopActions → Dashboard
         app.handle_key(KeyCode::Tab);
         assert_eq!(app.screen, Screen::Findings);
 
@@ -457,11 +461,24 @@ mod tests {
         assert_eq!(app.screen, Screen::AttackPaths);
 
         app.handle_key(KeyCode::Tab);
+        assert_eq!(app.screen, Screen::TopActions);
+
+        app.handle_key(KeyCode::Tab);
         assert_eq!(app.screen, Screen::Dashboard);
 
         // BackTab goes backwards
         app.handle_key(KeyCode::BackTab);
+        assert_eq!(app.screen, Screen::TopActions);
+
+        app.handle_key(KeyCode::BackTab);
         assert_eq!(app.screen, Screen::AttackPaths);
+    }
+
+    #[test]
+    fn test_top_actions_shortcut() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('t'));
+        assert_eq!(app.screen, Screen::TopActions);
     }
 
     #[test]
@@ -505,10 +522,8 @@ mod tests {
                 Finding::new("test", "Low", "desc", Severity::Low),
                 Finding::new("test", "Info", "desc", Severity::Info),
             ],
-            devices: Vec::new(),
-            attack_paths: Vec::new(),
             risk_score: 50.0,
-            scan_duration_secs: 0,
+            ..Default::default()
         });
 
         // Default filter: ActionableOnly

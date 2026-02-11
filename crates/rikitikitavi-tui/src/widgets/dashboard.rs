@@ -391,6 +391,7 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
         crate::app::Screen::NetworkMap => "Network Map",
         crate::app::Screen::Findings => "Findings",
         crate::app::Screen::AttackPaths => "Attack Paths",
+        crate::app::Screen::TopActions => "Top Actions",
         crate::app::Screen::DeviceDetail => "Device Detail",
     };
 
@@ -416,6 +417,8 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
         Span::styled("indings  ", Style::default().fg(palette.fg)),
         Span::styled("[A]", Style::default().fg(palette.accent)),
         Span::styled("ttacks  ", Style::default().fg(palette.fg)),
+        Span::styled("[T]", Style::default().fg(palette.accent)),
+        Span::styled("op Actions  ", Style::default().fg(palette.fg)),
         Span::styled("[S]", Style::default().fg(palette.accent)),
         Span::styled("can  ", Style::default().fg(palette.fg)),
         Span::styled("[E]", Style::default().fg(palette.accent)),
@@ -440,6 +443,7 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
         ("[N]etwork", Screen::NetworkMap),
         ("[F]indings", Screen::Findings),
         ("[A]ttacks", Screen::AttackPaths),
+        ("[T]op Actions", Screen::TopActions),
     ];
     for &(label, screen) in tabs {
         #[allow(clippy::cast_possible_truncation)]

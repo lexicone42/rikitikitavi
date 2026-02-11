@@ -252,11 +252,17 @@ async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> 
         .ok()?
         .ok()?;
 
-    // Build a rustls config that accepts any certificate (LAN scanning)
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
+    // Build a rustls config that accepts any certificate (LAN scanning).
+    // Explicitly use aws-lc-rs provider to avoid runtime panics when no
+    // default CryptoProvider is installed (e.g. on macOS).
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .ok()?
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(NoVerifier))
+    .with_no_client_auth();
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let server_name = rustls::pki_types::ServerName::IpAddress(
@@ -327,7 +333,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        rustls::crypto::aws_lc_rs::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -451,12 +457,21 @@ impl Scanner for SslScanner {
             return Ok(findings);
         }
 
+        // In Passive mode, only check port 443 (fastest)
+        let allowed_tls_ports: &[u16] = if ctx.config.intensity.at_least(
+            rikitikitavi_models::config::ScanIntensity::Active,
+        ) {
+            TLS_PORTS
+        } else {
+            &[443]
+        };
+
         for device in &ctx.discovered_devices {
             // Check TLS on discovered open ports that could speak TLS
             let tls_ports: Vec<u16> = device
                 .open_ports
                 .iter()
-                .filter(|p| TLS_PORTS.contains(&p.port))
+                .filter(|p| allowed_tls_ports.contains(&p.port))
                 .map(|p| p.port)
                 .collect();
 
@@ -472,6 +487,11 @@ impl Scanner for SslScanner {
 
     fn estimated_duration_secs(&self) -> u64 {
         30
+    }
+
+    fn relevant_ports(&self) -> &[u16] {
+        // TLS-capable ports
+        &[443, 8443, 8080, 8888, 993, 995, 465, 587, 636, 8883]
     }
 }
 

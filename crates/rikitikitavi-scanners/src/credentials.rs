@@ -183,12 +183,24 @@ impl Scanner for CredentialScanner {
 
         // ── Adaptive mode: use Phase 1 discovered devices ───────────
         if !ctx.discovered_devices.is_empty() {
+            // In Passive mode, only check the gateway/router
+            let target_devices: Vec<_> = if ctx.config.intensity.at_least(
+                rikitikitavi_models::config::ScanIntensity::Active,
+            ) {
+                ctx.discovered_devices.iter().collect()
+            } else {
+                ctx.discovered_devices
+                    .iter()
+                    .filter(|d| ctx.gateway == Some(d.ip))
+                    .collect()
+            };
+
             tracing::info!(
-                device_count = ctx.discovered_devices.len(),
+                device_count = target_devices.len(),
                 "adaptive credential scan using discovered devices"
             );
 
-            for device in &ctx.discovered_devices {
+            for device in &target_devices {
                 let ip = device.ip;
                 let has_port = |p: u16| device.open_ports.iter().any(|op| op.port == p);
 

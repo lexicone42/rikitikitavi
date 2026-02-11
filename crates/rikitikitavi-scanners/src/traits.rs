@@ -30,6 +30,14 @@ pub trait Scanner: Send + Sync {
     fn requires_privileges(&self) -> bool {
         false
     }
+
+    /// Ports this scanner is relevant for. An empty slice (default) means the
+    /// scanner is always relevant regardless of which ports are open. A
+    /// non-empty slice means the scanner should only run if at least one of
+    /// these ports was discovered open during Phase 1.
+    fn relevant_ports(&self) -> &[u16] {
+        &[]
+    }
 }
 
 /// Registry of all available scanners.

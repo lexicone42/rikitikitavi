@@ -3,12 +3,14 @@ pub mod config;
 pub mod device;
 pub mod finding;
 pub mod ocsf;
+pub mod priority_action;
 
 pub use attack_path::{AttackPath, AttackStep};
 pub use config::ScanConfig;
 pub use device::{Device, DeviceType};
 pub use finding::{Finding, Remediation};
 pub use ocsf::OcsfFinding;
+pub use priority_action::PriorityAction;
 
 use rikitikitavi_core::{NetworkMode, Perspective};
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,9 @@ pub struct ScanResults {
     pub findings: Vec<Finding>,
     pub devices: Vec<Device>,
     pub attack_paths: Vec<AttackPath>,
+    /// Top priority remediation actions (deduplicated and ranked).
+    #[serde(default)]
+    pub priority_actions: Vec<PriorityAction>,
     pub risk_score: f64,
     pub scan_duration_secs: u64,
 }

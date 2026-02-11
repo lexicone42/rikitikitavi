@@ -846,7 +846,12 @@ impl Scanner for ServicesScanner {
                             }
                         }
                         // Deep protocol probes for specific services
-                        findings.extend(deep_probe(ip, port).await);
+                        // (skipped in Passive mode for speed)
+                        if ctx.config.intensity.at_least(
+                            rikitikitavi_models::config::ScanIntensity::Active,
+                        ) {
+                            findings.extend(deep_probe(ip, port).await);
+                        }
                     } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
                         if let Some(server) = grab_http_server(ip, port).await {
                             findings.push(classify_http_server(ip, port, &server));
@@ -914,6 +919,10 @@ impl Scanner for ServicesScanner {
 
     fn estimated_duration_secs(&self) -> u64 {
         30
+    }
+
+    fn relevant_ports(&self) -> &[u16] {
+        &[21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1883, 3389, 5900, 8080]
     }
 }
 

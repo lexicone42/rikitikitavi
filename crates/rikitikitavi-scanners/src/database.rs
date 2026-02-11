@@ -250,6 +250,12 @@ impl Scanner for DatabaseScanner {
         tracing::info!("running database security scan");
         let mut findings = Vec::new();
 
+        // Skip in Passive mode — database probes can be slow and intrusive
+        if !ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+            tracing::info!("skipping database scan in quick scan mode");
+            return Ok(findings);
+        }
+
         // Collect targets: use discovered devices if available, else ARP cache
         let targets: Vec<(IpAddr, Vec<u16>)> = if ctx.discovered_devices.is_empty() {
             // Fallback: check all ARP cache IPs for common database ports
@@ -315,6 +321,10 @@ impl Scanner for DatabaseScanner {
 
     fn estimated_duration_secs(&self) -> u64 {
         30
+    }
+
+    fn relevant_ports(&self) -> &[u16] {
+        &[3306, 5432, 6379, 27017, 9200, 1433]
     }
 }
 

@@ -13,6 +13,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::NetworkMap => widgets::network_map::render(frame, app),
         Screen::Findings => widgets::findings::render(frame, app),
         Screen::AttackPaths => widgets::attack_paths::render(frame, app),
+        Screen::TopActions => widgets::top_actions::render(frame, app),
         Screen::DeviceDetail => widgets::devices::render_detail(frame, app),
     }
 }

@@ -84,6 +84,40 @@ pub enum ScanIntensity {
     Aggressive,
 }
 
+impl ScanIntensity {
+    /// Numeric ordinal for comparison: `Passive` = 0, `Active` = 1, `Aggressive` = 2.
+    #[must_use]
+    pub const fn ordinal(self) -> u8 {
+        match self {
+            Self::Passive => 0,
+            Self::Active => 1,
+            Self::Aggressive => 2,
+        }
+    }
+
+    /// Returns `true` if this intensity is at least as aggressive as `other`.
+    #[must_use]
+    pub const fn at_least(self, other: Self) -> bool {
+        self.ordinal() >= other.ordinal()
+    }
+
+    /// Human-readable scan profile name.
+    #[must_use]
+    pub const fn profile_name(self) -> &'static str {
+        match self {
+            Self::Passive => "Quick Scan",
+            Self::Active => "Standard Scan",
+            Self::Aggressive => "Deep Scan",
+        }
+    }
+}
+
+/// Top 20 most security-relevant ports for quick (Passive) scans.
+pub const TOP_20_PORTS: [u16; 20] = [
+    22, 23, 53, 80, 443, 445, 993, 995, 1883, 3306,
+    3389, 5353, 5432, 5900, 6379, 8080, 8443, 8883, 9200, 27017,
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -257,6 +291,41 @@ mod tests {
             assert_eq!(json, expected);
             let recovered: ScanIntensity = serde_json::from_str(&json).unwrap();
             assert_eq!(recovered, variant);
+        }
+    }
+
+    #[test]
+    fn test_scan_intensity_ordinal() {
+        assert_eq!(ScanIntensity::Passive.ordinal(), 0);
+        assert_eq!(ScanIntensity::Active.ordinal(), 1);
+        assert_eq!(ScanIntensity::Aggressive.ordinal(), 2);
+    }
+
+    #[test]
+    fn test_scan_intensity_at_least() {
+        assert!(ScanIntensity::Aggressive.at_least(ScanIntensity::Passive));
+        assert!(ScanIntensity::Aggressive.at_least(ScanIntensity::Active));
+        assert!(ScanIntensity::Aggressive.at_least(ScanIntensity::Aggressive));
+        assert!(ScanIntensity::Active.at_least(ScanIntensity::Passive));
+        assert!(ScanIntensity::Active.at_least(ScanIntensity::Active));
+        assert!(!ScanIntensity::Active.at_least(ScanIntensity::Aggressive));
+        assert!(ScanIntensity::Passive.at_least(ScanIntensity::Passive));
+        assert!(!ScanIntensity::Passive.at_least(ScanIntensity::Active));
+    }
+
+    #[test]
+    fn test_scan_intensity_profile_name() {
+        assert_eq!(ScanIntensity::Passive.profile_name(), "Quick Scan");
+        assert_eq!(ScanIntensity::Active.profile_name(), "Standard Scan");
+        assert_eq!(ScanIntensity::Aggressive.profile_name(), "Deep Scan");
+    }
+
+    #[test]
+    fn test_top_20_ports_count() {
+        assert_eq!(super::TOP_20_PORTS.len(), 20);
+        // All ports should be valid (> 0)
+        for &port in &super::TOP_20_PORTS {
+            assert!(port > 0);
         }
     }
 

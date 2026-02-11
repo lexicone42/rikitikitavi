@@ -25,10 +25,9 @@ mod tests {
     fn make_results(findings: Vec<Finding>) -> ScanResults {
         ScanResults {
             findings,
-            devices: Vec::new(),
-            attack_paths: Vec::new(),
             risk_score: 42.0,
             scan_duration_secs: 10,
+            ..Default::default()
         }
     }
 
@@ -83,11 +82,9 @@ mod tests {
         #[test]
         fn prop_json_always_valid(risk in 0.0_f64..=100.0_f64, duration in 0_u64..=3600_u64) {
             let results = ScanResults {
-                findings: Vec::new(),
-                devices: Vec::new(),
-                attack_paths: Vec::new(),
                 risk_score: risk,
                 scan_duration_secs: duration,
+                ..Default::default()
             };
             let json = to_json_string(&results).unwrap();
             assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());

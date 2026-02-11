@@ -54,10 +54,30 @@ async fn cmd_scan(
     args: cli::ScanArgs,
     app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
+    use rikitikitavi_models::config::{PortRange, ScanIntensity, TOP_20_PORTS};
+
     let perspective: rikitikitavi_core::Perspective = args.perspective.into();
+
+    // Map CLI flags to intensity (--quick and --aggressive are mutually exclusive)
+    let intensity = if args.quick {
+        ScanIntensity::Passive
+    } else if args.aggressive {
+        ScanIntensity::Aggressive
+    } else {
+        app_config.scan.intensity
+    };
+
+    // Override port range based on intensity
+    let port_scan_range = match intensity {
+        ScanIntensity::Passive => PortRange::Custom(TOP_20_PORTS.to_vec()),
+        ScanIntensity::Aggressive => PortRange::Extended,
+        ScanIntensity::Active => app_config.scan.port_scan_range.clone(),
+    };
 
     let scan_config = rikitikitavi_models::config::ScanConfig {
         perspective,
+        intensity,
+        port_scan_range,
         modules: args.modules,
         attack_paths: args.attack_paths,
         ..app_config.scan.clone()
@@ -74,6 +94,7 @@ async fn cmd_scan(
 
     // Perform network discovery to populate context
     if !args.quiet {
+        println!("{}", intensity.profile_name());
         println!("Discovering network...");
     }
     let devices = runner::discover_network(&mut ctx);

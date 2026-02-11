@@ -84,10 +84,7 @@ mod tests {
     fn make_results(findings: Vec<Finding>) -> ScanResults {
         ScanResults {
             findings,
-            devices: Vec::new(),
-            attack_paths: Vec::new(),
-            risk_score: 0.0,
-            scan_duration_secs: 0,
+            ..Default::default()
         }
     }
 

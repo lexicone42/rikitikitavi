@@ -519,6 +519,12 @@ impl Scanner for HttpAuditScanner {
         tracing::info!("running HTTP security audit");
         let mut findings = Vec::new();
 
+        // Skip entirely in Passive mode — HTTP audit is slow and not essential
+        if !ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+            tracing::info!("skipping HTTP audit in quick scan mode");
+            return Ok(findings);
+        }
+
         // Use discovered devices from Phase 1 for adaptive scanning
         if ctx.discovered_devices.is_empty() {
             tracing::info!("no discovered devices, skipping HTTP audit");
@@ -549,6 +555,10 @@ impl Scanner for HttpAuditScanner {
 
     fn estimated_duration_secs(&self) -> u64 {
         45
+    }
+
+    fn relevant_ports(&self) -> &[u16] {
+        &[80, 443, 8080, 8443, 8888, 8000, 8008, 8081, 8090, 3000]
     }
 }
 

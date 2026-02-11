@@ -654,6 +654,10 @@ impl Scanner for SmbScanner {
     fn estimated_duration_secs(&self) -> u64 {
         20
     }
+
+    fn relevant_ports(&self) -> &[u16] {
+        &[445, 139]
+    }
 }
 
 #[cfg(test)]

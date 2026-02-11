@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::future::join_all;
-use rikitikitavi_analysis::{calculate_risk_score, generate_attack_paths};
+use rikitikitavi_analysis::{calculate_risk_score, generate_attack_paths, generate_priority_actions};
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
 use rikitikitavi_models::{Device, DeviceType, Finding, ScanContext, ScanResults};
 use rikitikitavi_scanners::ScannerRegistry;
@@ -103,10 +103,11 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         .into_iter()
         .partition(|s| phase1_ids.contains(&s.id()));
 
+    let phase2_count = phase2.len();
     tracing::info!(
         perspective = %ctx.perspective,
         phase1_count = phase1.len(),
-        phase2_count = phase2.len(),
+        phase2_count,
         "starting two-phase scan"
     );
 
@@ -149,8 +150,54 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     );
 
     // ── Phase 2: Deep Analysis (concurrent) ────────────────────────
-    tracing::info!("Phase 2: Deep Analysis ({} scanners, concurrent)", phase2.len());
-    let phase2_results = join_all(phase2.iter().map(|scanner| async {
+    // Collect all open ports discovered in Phase 1 for smart filtering
+    let discovered_ports: std::collections::HashSet<u16> = ctx
+        .discovered_devices
+        .iter()
+        .flat_map(|d| d.open_ports.iter().map(|p| p.port))
+        .collect();
+
+    // Essential scanners that always run in Passive mode (they don't
+    // depend on open ports and check fundamental network hygiene).
+    let passive_essential: &[&str] = &[
+        "credentials", "router", "wifi", "dns", "arp", "dhcp", "exposure",
+    ];
+
+    let phase2_filtered: Vec<_> = phase2
+        .into_iter()
+        .filter(|scanner| {
+            let ports = scanner.relevant_ports();
+            // If scanner declares relevant ports, skip if none were discovered
+            if !ports.is_empty() && !ports.iter().any(|p| discovered_ports.contains(p)) {
+                tracing::debug!(
+                    scanner = scanner.id(),
+                    "skipping — no relevant ports discovered"
+                );
+                return false;
+            }
+            // In Passive mode, only run essential scanners + port-dependent
+            // scanners whose ports were found
+            if ctx.config.intensity == rikitikitavi_models::config::ScanIntensity::Passive
+                && !passive_essential.contains(&scanner.id())
+                && ports.is_empty()
+            {
+                tracing::debug!(
+                    scanner = scanner.id(),
+                    "skipping — non-essential in quick scan"
+                );
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    let phase2_skipped = phase2_count - phase2_filtered.len();
+    tracing::info!(
+        "Phase 2: Deep Analysis ({} scanners, {} skipped, concurrent)",
+        phase2_filtered.len(),
+        phase2_skipped,
+    );
+    let phase2_results = join_all(phase2_filtered.iter().map(|scanner| async {
         tracing::info!(
             scanner = scanner.id(),
             name = scanner.name(),
@@ -188,11 +235,13 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     };
 
     let risk_score = calculate_risk_score(&all_findings);
+    let priority_actions = generate_priority_actions(&all_findings);
     let duration = start.elapsed().as_secs();
 
     tracing::info!(
         total_findings = all_findings.len(),
         attack_paths = attack_paths.len(),
+        priority_actions = priority_actions.len(),
         risk_score,
         duration_secs = duration,
         "scan complete"
@@ -202,6 +251,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         findings: all_findings,
         devices: std::mem::take(&mut ctx.discovered_devices),
         attack_paths,
+        priority_actions,
         risk_score,
         scan_duration_secs: duration,
     })

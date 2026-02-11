@@ -356,7 +356,7 @@ impl Scanner for MdnsScanner {
         ]
     }
 
-    async fn scan(&self, _ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
+    async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running mDNS/SSDP discovery scan");
         let mut findings = Vec::new();
 
@@ -367,14 +367,19 @@ impl Scanner for MdnsScanner {
             findings.push(classify_ssdp_service(*ip, service));
 
             // Fetch UPnP device description if a LOCATION URL is available
-            if let Some(location) = &service.location {
-                if let Some(device_info) = fetch_upnp_description(location).await {
-                    tracing::debug!(
-                        ip = %ip,
-                        name = ?device_info.friendly_name,
-                        "fetched UPnP device description"
-                    );
-                    findings.extend(classify_upnp_device(*ip, location, &device_info));
+            // (skipped in Passive mode — HTTP fetches slow down quick scans)
+            if ctx.config.intensity.at_least(
+                rikitikitavi_models::config::ScanIntensity::Active,
+            ) {
+                if let Some(location) = &service.location {
+                    if let Some(device_info) = fetch_upnp_description(location).await {
+                        tracing::debug!(
+                            ip = %ip,
+                            name = ?device_info.friendly_name,
+                            "fetched UPnP device description"
+                        );
+                        findings.extend(classify_upnp_device(*ip, location, &device_info));
+                    }
                 }
             }
         }

@@ -200,6 +200,43 @@ pub fn render_html_report(results: &ScanResults) -> String {
         html.push_str("</ul>\n");
     }
 
+    // ── Top 5 Priority Actions ────────────────────────────────────────
+    if !results.priority_actions.is_empty() {
+        html.push_str("<h2>Top 5 Priority Actions</h2>\n");
+        for action in &results.priority_actions {
+            let cls = severity_class(action.severity);
+            let _ = write!(html,
+                r#"<div class="finding-card {cls}"><div class="title">#{rank} {title}</div>"#,
+                rank = action.rank,
+                title = html_escape(&action.title),
+            );
+
+            let _ = write!(html,
+                r#"<div class="meta"><span class="badge {cls}">{sev}</span> {devices} device(s), {findings} finding(s)</div>"#,
+                sev = html_escape(&action.severity.to_string()),
+                devices = action.affected_device_count,
+                findings = action.finding_count,
+            );
+
+            if !action.steps.is_empty() {
+                html.push_str(r#"<div class="remediation"><strong>Steps:</strong><ol>"#);
+                for step in &action.steps {
+                    let _ = write!(html, "<li>{}</li>", html_escape(step));
+                }
+                html.push_str("</ol>");
+                if let Some(effort) = &action.effort {
+                    let _ = write!(html,
+                        r#"<div class="effort">Estimated effort: {}</div>"#,
+                        html_escape(effort),
+                    );
+                }
+                html.push_str("</div>\n");
+            }
+
+            html.push_str("</div>\n");
+        }
+    }
+
     // ── Findings by Severity ─────────────────────────────────────────
     html.push_str("<h2>Findings by Severity</h2>\n");
 
@@ -358,10 +395,8 @@ mod tests {
     fn make_results(findings: Vec<Finding>, risk_score: f64) -> ScanResults {
         ScanResults {
             findings,
-            devices: Vec::new(),
-            attack_paths: Vec::new(),
             risk_score,
-            scan_duration_secs: 0,
+            ..Default::default()
         }
     }
 

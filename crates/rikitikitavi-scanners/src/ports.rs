@@ -300,7 +300,14 @@ impl Scanner for PortScanner {
         }
 
         let ports = get_ports(&ctx.config.port_scan_range);
-        let timeout = Duration::from_secs(2);
+        // Adapt timeout based on scan intensity
+        let timeout = if ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Aggressive) {
+            Duration::from_secs(5)
+        } else if ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(1)
+        };
         let parallelism = ctx.config.parallelism.max(1);
         let semaphore = std::sync::Arc::new(Semaphore::new(parallelism));
 
