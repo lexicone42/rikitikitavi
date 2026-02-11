@@ -219,6 +219,121 @@ impl HeaderSet {
     }
 }
 
+/// Dangerous HTTP methods that should not be publicly exposed.
+const DANGEROUS_METHODS: &[&str] = &["PUT", "DELETE", "TRACE", "CONNECT"];
+
+/// Classify allowed HTTP methods from an `OPTIONS` response.
+pub fn classify_http_methods(ip: IpAddr, port: u16, allow_header: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let methods: Vec<&str> = allow_header.split(',').map(str::trim).collect();
+
+    let dangerous: Vec<&&str> = methods
+        .iter()
+        .filter(|m| DANGEROUS_METHODS.iter().any(|d| m.eq_ignore_ascii_case(d)))
+        .collect();
+
+    if !dangerous.is_empty() {
+        let method_list: Vec<&str> = dangerous.iter().map(|m| **m).collect();
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("Dangerous HTTP methods on {ip}:{port}"),
+                &format!(
+                    "The HTTP OPTIONS response includes dangerous methods: {}. \
+                     PUT/DELETE can allow file upload or deletion, TRACE enables \
+                     cross-site tracing (XST) attacks.",
+                    method_list.join(", ")
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-749"),
+        );
+    }
+
+    // Info finding with all methods
+    if !methods.is_empty() {
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("HTTP methods on {ip}:{port}"),
+                &format!("Allowed methods: {allow_header}"),
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP"),
+        );
+    }
+
+    findings
+}
+
+/// Detect web frameworks from response headers and body content.
+pub fn detect_framework(
+    ip: IpAddr,
+    port: u16,
+    powered_by: Option<&str>,
+    body: &str,
+) -> Option<Finding> {
+    let body_lower = body.to_lowercase();
+
+    // X-Powered-By header
+    if let Some(pb) = powered_by {
+        return Some(
+            Finding::new(
+                "http_audit",
+                &format!("Framework disclosure on {ip}:{port}: {pb}"),
+                &format!(
+                    "X-Powered-By header reveals: {pb}. This helps attackers \
+                     identify the technology stack and target known vulnerabilities."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-200"),
+        );
+    }
+
+    // Body-based framework detection
+    let framework = if body_lower.contains("wp-content") || body_lower.contains("wp-includes") {
+        Some("WordPress")
+    } else if body_lower.contains("__next") || body_lower.contains("_next/static") {
+        Some("Next.js")
+    } else if body_lower.contains("drupal") && body_lower.contains("sites/default") {
+        Some("Drupal")
+    } else if body_lower.contains("joomla") || body_lower.contains("/media/system/") {
+        Some("Joomla")
+    } else if body_lower.contains("laravel") || body_lower.contains("csrf-token") && body_lower.contains("laravel") {
+        Some("Laravel")
+    } else if body_lower.contains("x-django") || body_lower.contains("csrfmiddlewaretoken") {
+        Some("Django")
+    } else if body_lower.contains("rails") && body_lower.contains("csrf-token") {
+        Some("Ruby on Rails")
+    } else {
+        None
+    };
+
+    framework.map(|fw| {
+        Finding::new(
+            "http_audit",
+            &format!("Framework detected on {ip}:{port}: {fw}"),
+            &format!(
+                "The response body contains markers for {fw}. Framework identification \
+                 helps attackers target known vulnerabilities specific to that platform."
+            ),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("HTTP")
+    })
+}
+
 /// Audit a single HTTP endpoint.
 #[allow(clippy::too_many_lines)]
 async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
@@ -280,7 +395,14 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             }
         }
 
-        // Check body for default pages
+        // X-Powered-By framework detection
+        let powered_by = resp
+            .headers()
+            .get("x-powered-by")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+
+        // Check body for default pages and framework fingerprinting
         if let Ok(body) = resp.text().await {
             if is_default_page(&body) {
                 findings.push(
@@ -315,6 +437,28 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.directory-listing", &[])),
                 );
             }
+
+            // Framework fingerprinting from body + X-Powered-By
+            if let Some(fw_finding) =
+                detect_framework(ip, port, powered_by.as_deref(), &body)
+            {
+                findings.push(fw_finding);
+            }
+        }
+    }
+
+    // OPTIONS method enumeration
+    if let Ok(resp) = client
+        .request(reqwest::Method::OPTIONS, &url)
+        .send()
+        .await
+    {
+        if let Some(allow) = resp
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+        {
+            findings.extend(classify_http_methods(ip, port, allow));
         }
     }
 
@@ -527,6 +671,81 @@ mod tests {
         assert!(headers.server.is_none());
     }
 
+    // ── HTTP methods tests ────────────────────────────────────────
+
+    #[test]
+    fn test_classify_http_methods_dangerous() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = classify_http_methods(ip, 80, "GET, POST, PUT, DELETE, OPTIONS");
+        // Should have dangerous methods finding + info listing
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|f| f.severity == Severity::Medium));
+    }
+
+    #[test]
+    fn test_classify_http_methods_safe() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = classify_http_methods(ip, 80, "GET, POST, HEAD, OPTIONS");
+        // Only info listing, no dangerous methods
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_http_methods_trace() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = classify_http_methods(ip, 80, "GET, TRACE");
+        assert!(findings.iter().any(|f| f.severity == Severity::Medium));
+    }
+
+    // ── Framework detection tests ───────────────────────────────────
+
+    #[test]
+    fn test_detect_framework_powered_by() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = detect_framework(ip, 80, Some("Express"), "");
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_detect_framework_wordpress() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let body = "<link rel='stylesheet' href='/wp-content/themes/style.css'>";
+        let finding = detect_framework(ip, 80, None, body);
+        assert!(finding.is_some());
+        let f = finding.unwrap();
+        assert!(f.title.contains("WordPress"));
+    }
+
+    #[test]
+    fn test_detect_framework_nextjs() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let body = "<script src=\"/_next/static/chunks/main.js\"></script>";
+        let finding = detect_framework(ip, 80, None, body);
+        assert!(finding.is_some());
+        let f = finding.unwrap();
+        assert!(f.title.contains("Next.js"));
+    }
+
+    #[test]
+    fn test_detect_framework_django() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let body = "<input type=\"hidden\" name=\"csrfmiddlewaretoken\" value=\"abc123\">";
+        let finding = detect_framework(ip, 80, None, body);
+        assert!(finding.is_some());
+        let f = finding.unwrap();
+        assert!(f.title.contains("Django"));
+    }
+
+    #[test]
+    fn test_detect_framework_none() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let body = "<html><body>Hello world</body></html>";
+        let finding = detect_framework(ip, 80, None, body);
+        assert!(finding.is_none());
+    }
+
     proptest! {
         /// classify_missing_headers never panics with any combination of bools
         #[test]
@@ -570,10 +789,24 @@ mod tests {
             let _ = is_directory_listing(&body);
         }
 
-        /// HeaderSet::from_response never panics on arbitrary strings
+        /// `HeaderSet::from_response` never panics on arbitrary strings
         #[test]
         fn prop_header_set_from_response_no_panic(response in ".*") {
             let _ = HeaderSet::from_response(&response);
+        }
+
+        /// `classify_http_methods` never panics on arbitrary strings
+        #[test]
+        fn prop_classify_http_methods_no_panic(allow in ".*") {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = classify_http_methods(ip, 80, &allow);
+        }
+
+        /// `detect_framework` never panics on arbitrary strings
+        #[test]
+        fn prop_detect_framework_no_panic(body in ".*") {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = detect_framework(ip, 80, None, &body);
         }
     }
 }

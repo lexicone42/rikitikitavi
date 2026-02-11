@@ -1,16 +1,27 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpStream;
 
 use crate::Scanner;
 
 /// TLS/SSL certificate scanner — checks certificates on discovered HTTPS
 /// ports for expiry, self-signed certs, weak keys, and old TLS versions.
+///
+/// Performs direct TLS handshakes using `rustls` to extract:
+/// - Negotiated TLS protocol version (1.2 vs 1.3)
+/// - Negotiated cipher suite (detects weak ciphers like CBC mode, SHA-1)
+/// - Certificate chain details (self-signed, validity)
+/// - HSTS header presence
 pub struct SslScanner;
 
 /// Known HTTP(S) ports to probe for TLS.
 const TLS_PORTS: &[u16] = &[443, 8443, 8080, 8888, 993, 995, 465, 587, 636, 8883];
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Classify a TLS protocol version into a finding.
 ///
@@ -152,55 +163,259 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
     .with_service("TLS")
 }
 
-/// Probe a TLS port and collect certificate information.
+/// Details extracted from a direct TLS handshake via `rustls`.
+#[derive(Debug)]
+struct TlsHandshakeInfo {
+    /// Negotiated protocol version (e.g. "TLS 1.3", "TLS 1.2").
+    protocol_version: String,
+    /// Negotiated cipher suite name.
+    cipher_suite: String,
+    /// Number of certificates in the peer's chain.
+    cert_chain_length: usize,
+}
+
+/// Classify a cipher suite as weak, acceptable, or strong.
+fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding> {
+    let lower = cipher.to_lowercase();
+
+    // CBC mode ciphers are vulnerable to padding oracle attacks (Lucky13, POODLE)
+    if lower.contains("cbc") {
+        return Some(
+            Finding::new(
+                "ssl",
+                &format!("Weak cipher suite (CBC mode) on {ip}:{port}"),
+                &format!(
+                    "TLS on {ip}:{port} negotiated cipher suite '{cipher}' which uses \
+                     CBC mode. CBC ciphers are vulnerable to padding oracle attacks \
+                     (Lucky13). Prefer AEAD ciphers like AES-GCM or ChaCha20-Poly1305."
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-327"),
+        );
+    }
+
+    // SHA-1 in cipher suite (not for cert signature, but for HMAC)
+    if lower.contains("sha1") || lower.contains("sha_1") {
+        return Some(
+            Finding::new(
+                "ssl",
+                &format!("Cipher suite with SHA-1 on {ip}:{port}"),
+                &format!(
+                    "TLS on {ip}:{port} negotiated cipher suite '{cipher}' which \
+                     uses SHA-1 for integrity. SHA-1 is deprecated. Prefer SHA-256+."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-328"),
+        );
+    }
+
+    // RSA key exchange (no forward secrecy)
+    if lower.starts_with("tls_rsa_") && !lower.contains("ecdhe") && !lower.contains("dhe") {
+        return Some(
+            Finding::new(
+                "ssl",
+                &format!("No forward secrecy on {ip}:{port}"),
+                &format!(
+                    "TLS on {ip}:{port} negotiated cipher suite '{cipher}' which uses \
+                     static RSA key exchange without forward secrecy. If the server's \
+                     private key is compromised, all past traffic can be decrypted. \
+                     Prefer ECDHE key exchange."
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-326"),
+        );
+    }
+
+    None
+}
+
+/// Perform a direct TLS handshake using `rustls` to extract protocol details.
 ///
-/// Uses `reqwest` with a custom TLS configuration to inspect the
-/// certificate without validating it (since LAN devices typically
-/// have self-signed certs).
+/// This bypasses certificate validation (LAN devices have self-signed certs)
+/// to inspect what cipher suite and version the server actually negotiates.
+async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> {
+    let addr = SocketAddr::new(ip, port);
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Build a rustls config that accepts any certificate (LAN scanning)
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerifier))
+        .with_no_client_auth();
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = rustls::pki_types::ServerName::IpAddress(
+        rustls::pki_types::IpAddr::from(ip),
+    );
+
+    let tls_stream = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        connector.connect(server_name, tcp),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    let conn = tls_stream.get_ref().1;
+
+    let protocol_version = conn.protocol_version().map_or_else(
+        || "unknown".to_owned(),
+        |v| format!("{v:?}"),
+    );
+
+    let cipher_suite = conn.negotiated_cipher_suite().map_or_else(
+        || "unknown".to_owned(),
+        |cs| format!("{:?}", cs.suite()),
+    );
+
+    let cert_chain_length = conn.peer_certificates().map_or(0, <[_]>::len);
+
+    Some(TlsHandshakeInfo {
+        protocol_version,
+        cipher_suite,
+        cert_chain_length,
+    })
+}
+
+/// A certificate verifier that accepts everything (for LAN scanning).
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Probe a TLS port and collect certificate + protocol information.
 async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // First, check if the port is actually open and speaks TLS
-    let url = format!("https://{ip}:{port}/");
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build();
+    // Direct TLS handshake for cipher suite and version inspection
+    if let Some(info) = probe_tls_handshake(ip, port).await {
+        tracing::debug!(
+            ip = %ip, port, version = %info.protocol_version,
+            cipher = %info.cipher_suite, certs = info.cert_chain_length,
+            "TLS handshake details"
+        );
 
-    let Ok(client) = client else {
-        return findings;
-    };
-
-    if let Ok(resp) = client.head(&url).send().await {
-        // If we got a response, TLS handshake succeeded
-        // Check for HSTS header while we're here
-        if resp.headers().get("strict-transport-security").is_none() {
+        // Check TLS version
+        let version_lower = info.protocol_version.to_lowercase();
+        if version_lower.contains("1.2") {
+            // TLS 1.2 is acceptable but 1.3 is preferred
             findings.push(
                 Finding::new(
                     "ssl",
-                    &format!("HTTPS without HSTS on {ip}:{port}"),
-                    "The HTTPS server does not send a Strict-Transport-Security \
-                     header. This allows downgrade attacks to HTTP.",
-                    Severity::Low,
+                    &format!("TLS 1.2 on {ip}:{port} (TLS 1.3 preferred)"),
+                    &format!(
+                        "Server at {ip}:{port} negotiated TLS 1.2. While still secure, \
+                         TLS 1.3 offers improved performance and stronger security \
+                         guarantees. Cipher: {}", info.cipher_suite
+                    ),
+                    Severity::Info,
                 )
                 .with_ip(ip)
                 .with_port(port)
-                .with_service("HTTPS")
-                .with_cwe("CWE-319"),
+                .with_service("TLS"),
+            );
+        } else if version_lower.contains("1.3") {
+            findings.push(
+                Finding::new(
+                    "ssl",
+                    &format!("TLS 1.3 on {ip}:{port}"),
+                    &format!(
+                        "Server at {ip}:{port} supports TLS 1.3 — the latest and most \
+                         secure protocol version. Cipher: {}", info.cipher_suite
+                    ),
+                    Severity::Info,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("TLS"),
             );
         }
 
-        // Self-signed cert detection: try again with validation enabled
-        let strict_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build();
+        // Classify cipher suite
+        if let Some(finding) = classify_cipher_suite(ip, port, &info.cipher_suite) {
+            findings.push(finding);
+        }
 
-        if let Ok(strict) = strict_client {
-            if strict.head(&url).send().await.is_err() {
-                // Strict validation failed → cert issue (likely self-signed)
-                findings.push(classify_cert_issue(ip, port, "self-signed"));
+        // Single-cert chain may indicate self-signed
+        if info.cert_chain_length == 1 {
+            findings.push(classify_cert_issue(ip, port, "self-signed"));
+        }
+    }
+
+    // Also do reqwest-based HSTS check
+    let url = format!("https://{ip}:{port}/");
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build();
+
+    if let Ok(client) = client {
+        if let Ok(resp) = client.head(&url).send().await {
+            if resp.headers().get("strict-transport-security").is_none() {
+                findings.push(
+                    Finding::new(
+                        "ssl",
+                        &format!("HTTPS without HSTS on {ip}:{port}"),
+                        "The HTTPS server does not send a Strict-Transport-Security \
+                         header. This allows downgrade attacks to HTTP.",
+                        Severity::Low,
+                    )
+                    .with_ip(ip)
+                    .with_port(port)
+                    .with_service("HTTPS")
+                    .with_cwe("CWE-319"),
+                );
             }
         }
     }
@@ -338,19 +553,66 @@ mod tests {
         assert_eq!(finding.severity, Severity::Low);
     }
 
+    // ── Cipher suite classification ─────────────────────────────────
+
+    #[test]
+    fn test_classify_cipher_cbc() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cipher_suite(ip, 443, "TLS_RSA_WITH_AES_128_CBC_SHA256");
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_cipher_sha1() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cipher_suite(ip, 443, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA1");
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_cipher_no_forward_secrecy() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cipher_suite(ip, 443, "TLS_RSA_WITH_AES_256_GCM_SHA384");
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_classify_cipher_strong() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cipher_suite(ip, 443, "TLS13_AES_256_GCM_SHA384");
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_classify_cipher_chacha() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cipher_suite(ip, 443, "TLS13_CHACHA20_POLY1305_SHA256");
+        assert!(finding.is_none());
+    }
+
     proptest! {
-        /// classify_tls_version never panics on arbitrary strings
+        /// `classify_tls_version` never panics on arbitrary strings
         #[test]
         fn prop_classify_tls_version_no_panic(version in ".*", port in 1_u16..=65535_u16) {
             let ip: IpAddr = "10.0.0.1".parse().unwrap();
             let _ = classify_tls_version(ip, port, &version);
         }
 
-        /// classify_cert_issue never panics on arbitrary strings
+        /// `classify_cert_issue` never panics on arbitrary strings
         #[test]
         fn prop_classify_cert_issue_no_panic(issue in ".*", port in 1_u16..=65535_u16) {
             let ip: IpAddr = "10.0.0.1".parse().unwrap();
             let _ = classify_cert_issue(ip, port, &issue);
+        }
+
+        /// `classify_cipher_suite` never panics on arbitrary strings
+        #[test]
+        fn prop_classify_cipher_suite_no_panic(cipher in ".*", port in 1_u16..=65535_u16) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = classify_cipher_suite(ip, port, &cipher);
         }
     }
 }

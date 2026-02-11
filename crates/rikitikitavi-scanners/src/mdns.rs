@@ -6,6 +6,132 @@ use std::time::Duration;
 
 use crate::Scanner;
 
+// ── UPnP device description parsing ─────────────────────────────────
+
+/// Parsed `UPnP` device description fields from `device.xml`.
+#[derive(Debug, Default, Clone)]
+pub struct UpnpDeviceInfo {
+    pub friendly_name: Option<String>,
+    pub manufacturer: Option<String>,
+    pub model_name: Option<String>,
+    pub model_number: Option<String>,
+    pub serial_number: Option<String>,
+    pub firmware_version: Option<String>,
+    pub device_type: Option<String>,
+}
+
+/// Extract the text content between simple XML tags (non-recursive).
+///
+/// Looks for `<tag>content</tag>` and returns `content`.
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let content = xml[start..end].trim();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.to_owned())
+    }
+}
+
+/// Parse a `UPnP` device description XML into structured fields.
+pub fn parse_upnp_device_xml(xml: &str) -> UpnpDeviceInfo {
+    UpnpDeviceInfo {
+        friendly_name: extract_xml_tag(xml, "friendlyName"),
+        manufacturer: extract_xml_tag(xml, "manufacturer"),
+        model_name: extract_xml_tag(xml, "modelName"),
+        model_number: extract_xml_tag(xml, "modelNumber"),
+        serial_number: extract_xml_tag(xml, "serialNumber"),
+        firmware_version: extract_xml_tag(xml, "firmwareVersion")
+            .or_else(|| extract_xml_tag(xml, "modelDescription")),
+        device_type: extract_xml_tag(xml, "deviceType"),
+    }
+}
+
+/// Classify a `UPnP` device description into findings.
+pub fn classify_upnp_device(
+    ip: IpAddr,
+    location: &str,
+    info: &UpnpDeviceInfo,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let name = info.friendly_name.as_deref().unwrap_or("Unknown device");
+    let manufacturer = info.manufacturer.as_deref().unwrap_or("unknown");
+    let model = info.model_name.as_deref().unwrap_or("unknown");
+
+    // Detailed device info finding
+    let mut desc_parts = vec![format!("UPnP device at {ip} ({location})")];
+    desc_parts.push(format!("Name: {name}, Manufacturer: {manufacturer}, Model: {model}"));
+
+    if let Some(model_num) = &info.model_number {
+        desc_parts.push(format!("Model #: {model_num}"));
+    }
+    if let Some(fw) = &info.firmware_version {
+        desc_parts.push(format!("Firmware: {fw}"));
+    }
+    if let Some(serial) = &info.serial_number {
+        desc_parts.push(format!("Serial: {serial}"));
+    }
+
+    findings.push(
+        Finding::new(
+            "mdns",
+            &format!("UPnP device: {name} ({manufacturer} {model}) on {ip}"),
+            &desc_parts.join(". "),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_service("UPnP"),
+    );
+
+    // Serial number exposure is a privacy concern
+    if info.serial_number.is_some() {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("UPnP exposes serial number on {ip}"),
+                &format!(
+                    "Device {name} at {ip} exposes its serial number via UPnP \
+                     device description. Serial numbers can be used for device \
+                     tracking and warranty fraud."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_service("UPnP")
+            .with_cwe("CWE-200"),
+        );
+    }
+
+    findings
+}
+
+/// Fetch a `UPnP` device description XML from a LOCATION URL.
+async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let resp = client.get(location).send().await.ok()?;
+    let body = resp.text().await.ok()?;
+    let info = parse_upnp_device_xml(&body);
+
+    // Only return if we actually got useful data
+    if info.friendly_name.is_some()
+        || info.manufacturer.is_some()
+        || info.model_name.is_some()
+    {
+        Some(info)
+    } else {
+        None
+    }
+}
+
 /// mDNS/SSDP discovery scanner — discovers services advertised via
 /// multicast DNS and UPnP/SSDP on the local network.
 pub struct MdnsScanner;
@@ -239,6 +365,18 @@ impl Scanner for MdnsScanner {
         tracing::info!(ssdp_count = ssdp_results.len(), "SSDP discovery complete");
         for (ip, service) in &ssdp_results {
             findings.push(classify_ssdp_service(*ip, service));
+
+            // Fetch UPnP device description if a LOCATION URL is available
+            if let Some(location) = &service.location {
+                if let Some(device_info) = fetch_upnp_description(location).await {
+                    tracing::debug!(
+                        ip = %ip,
+                        name = ?device_info.friendly_name,
+                        "fetched UPnP device description"
+                    );
+                    findings.extend(classify_upnp_device(*ip, location, &device_info));
+                }
+            }
         }
 
         // mDNS discovery
@@ -358,20 +496,116 @@ mod tests {
         assert_eq!(finding.severity, Severity::Info);
     }
 
+    // ── UPnP device description tests ─────────────────────────────
+
+    #[test]
+    fn test_extract_xml_tag() {
+        let xml = "<root><friendlyName>My Router</friendlyName></root>";
+        assert_eq!(
+            extract_xml_tag(xml, "friendlyName"),
+            Some("My Router".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_extract_xml_tag_missing() {
+        let xml = "<root><modelName>RT-AC68U</modelName></root>";
+        assert!(extract_xml_tag(xml, "friendlyName").is_none());
+    }
+
+    #[test]
+    fn test_extract_xml_tag_empty() {
+        let xml = "<root><friendlyName></friendlyName></root>";
+        assert!(extract_xml_tag(xml, "friendlyName").is_none());
+    }
+
+    #[test]
+    fn test_parse_upnp_device_xml_full() {
+        let xml = r#"<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>
+    <friendlyName>ASUS RT-AC68U</friendlyName>
+    <manufacturer>ASUSTeK Computer Inc.</manufacturer>
+    <modelName>RT-AC68U</modelName>
+    <modelNumber>3.0.0.4</modelNumber>
+    <serialNumber>ABC123456</serialNumber>
+    <firmwareVersion>3.0.0.4.386_51685</firmwareVersion>
+  </device>
+</root>"#;
+        let info = parse_upnp_device_xml(xml);
+        assert_eq!(info.friendly_name.as_deref(), Some("ASUS RT-AC68U"));
+        assert_eq!(info.manufacturer.as_deref(), Some("ASUSTeK Computer Inc."));
+        assert_eq!(info.model_name.as_deref(), Some("RT-AC68U"));
+        assert_eq!(info.model_number.as_deref(), Some("3.0.0.4"));
+        assert_eq!(info.serial_number.as_deref(), Some("ABC123456"));
+        assert_eq!(
+            info.firmware_version.as_deref(),
+            Some("3.0.0.4.386_51685")
+        );
+    }
+
+    #[test]
+    fn test_parse_upnp_device_xml_minimal() {
+        let xml = "<root><device><friendlyName>Chromecast</friendlyName></device></root>";
+        let info = parse_upnp_device_xml(xml);
+        assert_eq!(info.friendly_name.as_deref(), Some("Chromecast"));
+        assert!(info.manufacturer.is_none());
+        assert!(info.serial_number.is_none());
+    }
+
+    #[test]
+    fn test_parse_upnp_device_xml_empty() {
+        let info = parse_upnp_device_xml("");
+        assert!(info.friendly_name.is_none());
+        assert!(info.manufacturer.is_none());
+    }
+
+    #[test]
+    fn test_classify_upnp_device_with_serial() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("My Router".to_owned()),
+            manufacturer: Some("ASUS".to_owned()),
+            model_name: Some("RT-AC68U".to_owned()),
+            serial_number: Some("SN12345".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.1:49152/desc.xml", &info);
+        // Info device listing + serial exposure warning
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|f| f.severity == Severity::Low));
+    }
+
+    #[test]
+    fn test_classify_upnp_device_no_serial() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("Chromecast".to_owned()),
+            manufacturer: Some("Google".to_owned()),
+            ..Default::default()
+        };
+        let findings =
+            classify_upnp_device(ip, "http://192.168.1.50:8008/setup/eureka_info", &info);
+        // Only info listing
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
     proptest! {
-        /// parse_ssdp_response never panics on arbitrary strings
+        /// `parse_ssdp_response` never panics on arbitrary strings
         #[test]
         fn prop_parse_ssdp_no_panic(response in ".*") {
             let _ = parse_ssdp_response(&response);
         }
 
-        /// parse_mdns_names never panics on arbitrary bytes
+        /// `parse_mdns_names` never panics on arbitrary bytes
         #[test]
         fn prop_parse_mdns_names_no_panic(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
             let _ = parse_mdns_names(&data);
         }
 
-        /// classify_ssdp_service never panics with arbitrary service data
+        /// `classify_ssdp_service` never panics with arbitrary service data
         #[test]
         fn prop_classify_ssdp_no_panic(
             location in proptest::option::of(".*"),
@@ -381,6 +615,18 @@ mod tests {
             let ip: IpAddr = "10.0.0.1".parse().unwrap();
             let svc = SsdpService { location, server, service_type };
             let _ = classify_ssdp_service(ip, &svc);
+        }
+
+        /// `parse_upnp_device_xml` never panics on arbitrary strings
+        #[test]
+        fn prop_parse_upnp_device_xml_no_panic(xml in ".*") {
+            let _ = parse_upnp_device_xml(&xml);
+        }
+
+        /// `extract_xml_tag` never panics on arbitrary strings
+        #[test]
+        fn prop_extract_xml_tag_no_panic(xml in ".*", tag in "[a-zA-Z]{1,20}") {
+            let _ = extract_xml_tag(&xml, &tag);
         }
     }
 }

@@ -23,6 +23,9 @@ reqwest.workspace = true
 ipnetwork.workspace = true
 hickory-resolver.workspace = true
 serde_yaml_ng.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

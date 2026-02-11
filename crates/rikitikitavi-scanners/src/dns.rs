@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::TokioAsyncResolver;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
@@ -205,6 +206,223 @@ async fn check_dns_cross_validation(nameservers: &[IpAddr], findings: &mut Vec<F
     }
 }
 
+// ── Email security (SPF / DKIM / DMARC) via TXT records ──────────
+
+/// Classify an SPF TXT record.
+pub fn classify_spf(record: &str) -> Option<Finding> {
+    let lower = record.to_lowercase();
+    if !lower.starts_with("v=spf1") {
+        return None;
+    }
+
+    // SPF with "+all" allows anyone to send mail — very bad
+    if lower.contains("+all") {
+        return Some(
+            Finding::new(
+                "dns",
+                "SPF allows all senders (+all)",
+                &format!(
+                    "SPF record uses +all, which permits any IP to send mail for \
+                     this domain. This defeats the purpose of SPF entirely. \
+                     Record: {record}"
+                ),
+                Severity::High,
+            )
+            .with_cwe("CWE-284"),
+        );
+    }
+
+    // "~all" (softfail) is weak but common
+    if lower.contains("~all") {
+        return Some(Finding::new(
+            "dns",
+            "SPF uses softfail (~all)",
+            &format!(
+                "SPF record uses ~all (softfail) instead of -all (hardfail). \
+                 Unauthorized senders may still deliver mail. Record: {record}"
+            ),
+            Severity::Low,
+        ));
+    }
+
+    // "-all" is good
+    Some(Finding::new(
+        "dns",
+        "SPF record configured",
+        &format!("SPF: {record}"),
+        Severity::Info,
+    ))
+}
+
+/// Classify a DMARC TXT record.
+pub fn classify_dmarc(record: &str) -> Option<Finding> {
+    let lower = record.to_lowercase();
+    if !lower.starts_with("v=dmarc1") {
+        return None;
+    }
+
+    // p=none means monitoring-only — no enforcement
+    if lower.contains("p=none") {
+        return Some(Finding::new(
+            "dns",
+            "DMARC policy is none (monitoring only)",
+            &format!(
+                "DMARC record uses p=none, which monitors but does not reject \
+                 spoofed mail. Consider upgrading to p=quarantine or p=reject. \
+                 Record: {record}"
+            ),
+            Severity::Low,
+        ));
+    }
+
+    Some(Finding::new(
+        "dns",
+        "DMARC policy configured",
+        &format!("DMARC: {record}"),
+        Severity::Info,
+    ))
+}
+
+/// Query TXT records for a domain using the given resolver.
+async fn query_txt_records(
+    resolver: &TokioAsyncResolver,
+    domain: &str,
+) -> Vec<String> {
+    resolver
+        .lookup(domain, RecordType::TXT)
+        .await
+        .map_or_else(
+            |_| Vec::new(),
+            |response| {
+                response
+                    .record_iter()
+                    .filter_map(|r| {
+                        r.data().map(|data| {
+                            let s = data.to_string();
+                            s.trim_matches('"').to_owned()
+                        })
+                    })
+                    .collect()
+            },
+        )
+}
+
+/// Check email security records (SPF, DKIM, DMARC) for a domain.
+async fn check_email_security(
+    nameservers: &[IpAddr],
+    domain: &str,
+    findings: &mut Vec<Finding>,
+) {
+    if nameservers.is_empty() || domain.is_empty() {
+        return;
+    }
+
+    let ns_group = NameServerConfigGroup::from_ips_clear(nameservers, 53, true);
+    let config = ResolverConfig::from_parts(None, Vec::new(), ns_group);
+    let mut opts = ResolverOpts::default();
+    opts.timeout = std::time::Duration::from_secs(5);
+    opts.attempts = 1;
+    let resolver = TokioAsyncResolver::tokio(config, opts);
+
+    // SPF — TXT record on the domain itself
+    let txt_records = query_txt_records(&resolver, &format!("{domain}.")).await;
+    let has_spf = txt_records
+        .iter()
+        .any(|r| r.to_lowercase().starts_with("v=spf1"));
+
+    for record in &txt_records {
+        if let Some(finding) = classify_spf(record) {
+            findings.push(finding);
+        }
+    }
+
+    if !has_spf {
+        findings.push(Finding::new(
+            "dns",
+            &format!("No SPF record for {domain}"),
+            &format!(
+                "No SPF TXT record found for {domain}. Without SPF, anyone can \
+                 send email appearing to come from this domain."
+            ),
+            Severity::Medium,
+        ));
+    }
+
+    // DMARC — TXT record at _dmarc.domain
+    let dmarc_records =
+        query_txt_records(&resolver, &format!("_dmarc.{domain}.")).await;
+    let has_dmarc = dmarc_records
+        .iter()
+        .any(|r| r.to_lowercase().starts_with("v=dmarc1"));
+
+    for record in &dmarc_records {
+        if let Some(finding) = classify_dmarc(record) {
+            findings.push(finding);
+        }
+    }
+
+    if !has_dmarc {
+        findings.push(Finding::new(
+            "dns",
+            &format!("No DMARC record for {domain}"),
+            &format!(
+                "No DMARC TXT record found at _dmarc.{domain}. Without DMARC, \
+                 there is no policy to handle SPF/DKIM failures, making email \
+                 spoofing easier."
+            ),
+            Severity::Medium,
+        ));
+    }
+
+    // DKIM — check common selector "default" at default._domainkey.domain
+    let dkim_records =
+        query_txt_records(&resolver, &format!("default._domainkey.{domain}.")).await;
+    let has_dkim = dkim_records
+        .iter()
+        .any(|r| r.to_lowercase().contains("v=dkim1"));
+
+    if has_dkim {
+        findings.push(Finding::new(
+            "dns",
+            &format!("DKIM record found for {domain}"),
+            &format!(
+                "DKIM record at default._domainkey.{domain}: {}",
+                dkim_records.first().map_or("", String::as_str)
+            ),
+            Severity::Info,
+        ));
+    }
+    // Note: DKIM not found is not necessarily a finding since the selector
+    // could be different (google, selector1, etc.) and we can't enumerate all.
+}
+
+/// Extract the search domain from `/etc/resolv.conf`.
+fn parse_search_domain(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("search") {
+            let domain = rest.split_whitespace().next()?;
+            // Skip obviously internal-only domains
+            if !domain.is_empty() && domain.contains('.') {
+                return Some(domain.to_owned());
+            }
+        } else if let Some(rest) = line.strip_prefix("domain") {
+            let domain = rest.split_whitespace().next()?;
+            if !domain.is_empty() && domain.contains('.') {
+                return Some(domain.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Read the search domain from `/etc/resolv.conf`.
+fn read_search_domain() -> Option<String> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|contents| parse_search_domain(&contents))
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Scanner for DnsScanner {
@@ -339,6 +557,12 @@ impl Scanner for DnsScanner {
             }
         }
 
+        // Email security records (SPF/DKIM/DMARC) for the local domain
+        if let Some(domain) = read_search_domain() {
+            tracing::info!(domain = %domain, "checking email security records");
+            check_email_security(&nameservers, &domain, &mut findings).await;
+        }
+
         Ok(findings)
     }
 
@@ -444,6 +668,81 @@ nameserver 9.9.9.9
         assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 
+    // ── SPF / DMARC classification tests ──────────────────────────
+
+    #[test]
+    fn test_classify_spf_hardfail() {
+        let finding = classify_spf("v=spf1 include:_spf.google.com -all").unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_spf_softfail() {
+        let finding = classify_spf("v=spf1 include:example.com ~all").unwrap();
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_spf_plus_all() {
+        let finding = classify_spf("v=spf1 +all").unwrap();
+        assert_eq!(finding.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_classify_spf_not_spf() {
+        assert!(classify_spf("some random TXT record").is_none());
+    }
+
+    #[test]
+    fn test_classify_dmarc_reject() {
+        let finding = classify_dmarc("v=DMARC1; p=reject; rua=mailto:dmarc@example.com").unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_dmarc_none() {
+        let finding = classify_dmarc("v=DMARC1; p=none; rua=mailto:dmarc@example.com").unwrap();
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_dmarc_not_dmarc() {
+        assert!(classify_dmarc("random record").is_none());
+    }
+
+    // ── Search domain parsing tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_search_domain() {
+        let contents = "nameserver 192.168.1.1\nsearch example.com\n";
+        assert_eq!(
+            parse_search_domain(contents),
+            Some("example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_search_domain_with_domain_keyword() {
+        let contents = "nameserver 8.8.8.8\ndomain mycompany.org\n";
+        assert_eq!(
+            parse_search_domain(contents),
+            Some("mycompany.org".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_search_domain_no_dot() {
+        // Single-label domains like "lan" are skipped
+        let contents = "nameserver 192.168.1.1\nsearch lan\n";
+        assert!(parse_search_domain(contents).is_none());
+    }
+
+    #[test]
+    fn test_parse_search_domain_none() {
+        let contents = "nameserver 192.168.1.1\n";
+        assert!(parse_search_domain(contents).is_none());
+    }
+
     // ── Proptests ───────────────────────────────────────────────────
 
     proptest! {
@@ -469,6 +768,21 @@ nameserver 9.9.9.9
         #[test]
         fn prop_parse_resolv_conf_no_panic(contents in ".*") {
             let _ = parse_resolv_conf(&contents);
+        }
+
+        #[test]
+        fn prop_classify_spf_no_panic(record in ".*") {
+            let _ = classify_spf(&record);
+        }
+
+        #[test]
+        fn prop_classify_dmarc_no_panic(record in ".*") {
+            let _ = classify_dmarc(&record);
+        }
+
+        #[test]
+        fn prop_parse_search_domain_no_panic(contents in ".*") {
+            let _ = parse_search_domain(&contents);
         }
     }
 }
