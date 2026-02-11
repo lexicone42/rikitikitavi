@@ -1,4 +1,5 @@
 use ratatui::layout::Rect;
+use ratatui::widgets::TableState;
 use rikitikitavi_core::Severity;
 use rikitikitavi_models::{Device, Finding, ScanResults};
 
@@ -80,10 +81,18 @@ pub struct App {
     pub hit_regions: HitRegions,
     /// Severity filter for findings display.
     pub severity_filter: SeverityFilter,
+    /// Stateful table state for findings list (tracks scroll offset + selection).
+    pub findings_table_state: TableState,
+    /// Stateful table state for device lists (dashboard / network map).
+    pub devices_table_state: TableState,
 }
 
 impl App {
     pub fn new(config: TuiConfig) -> Self {
+        let mut findings_table_state = TableState::default();
+        findings_table_state.select(Some(0));
+        let mut devices_table_state = TableState::default();
+        devices_table_state.select(Some(0));
         Self {
             screen: Screen::Dashboard,
             config,
@@ -98,6 +107,8 @@ impl App {
             status_message: None,
             hit_regions: HitRegions::default(),
             severity_filter: SeverityFilter::default(),
+            findings_table_state,
+            devices_table_state,
         }
     }
 
@@ -125,6 +136,8 @@ impl App {
                 };
                 // Reset selection when filter changes
                 self.selected_finding_index = 0;
+                self.findings_table_state.select(Some(0));
+                *self.findings_table_state.offset_mut() = 0;
             }
             KeyCode::Char('e') => {
                 self.export_results();
@@ -140,6 +153,10 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::PageUp => self.move_selection(-20),
+            KeyCode::PageDown => self.move_selection(20),
+            KeyCode::Home => self.move_selection_to(0),
+            KeyCode::End => self.move_selection_to(usize::MAX),
             KeyCode::Left | KeyCode::BackTab => self.prev_screen(),
             KeyCode::Right | KeyCode::Tab => self.next_screen(),
             _ => {}
@@ -170,19 +187,28 @@ impl App {
                     if list_area.contains((col, row).into()) {
                         let clicked_row = row.saturating_sub(list_area.y)
                             .saturating_sub(self.hit_regions.list_header_offset);
-                        let idx = clicked_row as usize;
+                        let visual_row = clicked_row as usize;
 
                         match self.screen {
                             Screen::Findings => {
+                                // Account for scroll offset — visible row 0 = offset
+                                let offset = self.findings_table_state.offset();
+                                let idx = offset + visual_row;
                                 let max = self.filtered_findings().len().saturating_sub(1);
                                 self.selected_finding_index = idx.min(max);
+                                self.findings_table_state
+                                    .select(Some(self.selected_finding_index));
                             }
                             Screen::Dashboard | Screen::NetworkMap => {
+                                let offset = self.devices_table_state.offset();
+                                let idx = offset + visual_row;
                                 let max = self
                                     .results
                                     .as_ref()
                                     .map_or(0, |r| r.devices.len().saturating_sub(1));
                                 self.selected_device_index = idx.min(max);
+                                self.devices_table_state
+                                    .select(Some(self.selected_device_index));
                             }
                             _ => {}
                         }
@@ -267,6 +293,8 @@ impl App {
                     self.selected_finding_index =
                         (self.selected_finding_index + usize::try_from(delta).unwrap_or(0)).min(max);
                 }
+                self.findings_table_state
+                    .select(Some(self.selected_finding_index));
             }
             Screen::Dashboard | Screen::NetworkMap => {
                 let max = self
@@ -281,6 +309,30 @@ impl App {
                     self.selected_device_index =
                         (self.selected_device_index + usize::try_from(delta).unwrap_or(0)).min(max);
                 }
+                self.devices_table_state
+                    .select(Some(self.selected_device_index));
+            }
+            _ => {}
+        }
+    }
+
+    /// Jump selection to an absolute index (clamped to list bounds).
+    fn move_selection_to(&mut self, target: usize) {
+        match self.screen {
+            Screen::Findings => {
+                let max = self.filtered_findings().len().saturating_sub(1);
+                self.selected_finding_index = target.min(max);
+                self.findings_table_state
+                    .select(Some(self.selected_finding_index));
+            }
+            Screen::Dashboard | Screen::NetworkMap => {
+                let max = self
+                    .results
+                    .as_ref()
+                    .map_or(0, |r| r.devices.len().saturating_sub(1));
+                self.selected_device_index = target.min(max);
+                self.devices_table_state
+                    .select(Some(self.selected_device_index));
             }
             _ => {}
         }

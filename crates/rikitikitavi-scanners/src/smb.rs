@@ -14,10 +14,30 @@ use crate::Scanner;
 /// - `SMBv1` support (vulnerable to `EternalBlue` / `WannaCry`)
 /// - Null session access (anonymous enumeration)
 /// - `NetBIOS` over TCP (port 139) exposure
+///
+/// To reduce false positives, the scanner:
+/// - Validates the `SMBv1` negotiate response (dialect index, security mode)
+/// - Also performs an `SMBv2` negotiate to distinguish legacy-only vs backward-compat
+/// - Adjusts severity based on whether `SMBv2`+ is also available
 pub struct SmbScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Parsed details from an `SMBv1` negotiate response.
+#[derive(Debug, Clone)]
+struct SmbV1NegotiateDetails {
+    /// Whether the server actually accepted the `SMBv1` dialect.
+    dialect_accepted: bool,
+    /// Whether SMB signing is required by the server.
+    signing_required: bool,
+    /// Whether extended security (`SPNEGO`/`NTLMSSP`) is used.
+    extended_security: bool,
+    /// Raw security mode byte.
+    security_mode: u8,
+    /// Raw capabilities dword.
+    capabilities: u32,
+}
 
 /// SMB negotiate protocol request for `SMBv1`.
 ///
@@ -94,17 +114,31 @@ async fn check_smbv1(ip: IpAddr, port: u16) -> Option<SmbVersion> {
 }
 
 /// SMB version detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SmbVersion {
-    /// Server supports `SMBv1` (responds to `SMBv1` negotiate)
-    V1,
+    /// Server supports `SMBv1` (responds to `SMBv1` negotiate with accepted dialect)
+    V1(SmbV1Info),
     /// Server rejected `SMBv1` or responded with `SMBv2`+
     V2Plus,
     /// Unrecognized response
     Unknown,
 }
 
+/// Summarized info from an `SMBv1` negotiate response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmbV1Info {
+    /// Whether the server actually accepted the offered dialect.
+    dialect_accepted: bool,
+    /// Whether signing is required.
+    signing_required: bool,
+    /// Whether extended security is used.
+    extended_security: bool,
+}
+
 /// Classify an SMB negotiate response to determine protocol version.
+/// For `SMBv1` responses, also parse negotiate details to validate the dialect
+/// was actually accepted (reducing false positives from servers that respond
+/// with `SMBv1` framing but reject the offered dialect).
 fn classify_smb_response(response: &[u8]) -> SmbVersion {
     // Skip NetBIOS header (4 bytes), check SMB magic
     if response.len() < 8 {
@@ -112,16 +146,100 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
     }
 
     // Check for SMBv1 magic: \xFFSMB
-    if response.len() >= 8 && response[4] == 0xFF && &response[5..8] == b"SMB" {
-        return SmbVersion::V1;
+    if response[4] == 0xFF && &response[5..8] == b"SMB" {
+        let details = parse_smbv1_negotiate_details(response);
+        return SmbVersion::V1(SmbV1Info {
+            dialect_accepted: details.dialect_accepted,
+            signing_required: details.signing_required,
+            extended_security: details.extended_security,
+        });
     }
 
     // Check for SMBv2 magic: \xFESMB
-    if response.len() >= 8 && response[4] == 0xFE && &response[5..8] == b"SMB" {
+    if response[4] == 0xFE && &response[5..8] == b"SMB" {
         return SmbVersion::V2Plus;
     }
 
     SmbVersion::Unknown
+}
+
+/// Parse negotiate details from an `SMBv1` response.
+///
+/// `SMBv1` NEGOTIATE response layout (after 4-byte `NetBIOS` + 32-byte SMB header):
+/// - Byte 36: `WordCount` (typically 17 for `NT LM 0.12` dialect)
+/// - Bytes 37-38: `DialectIndex` (LE u16, `0xFFFF` = no dialect accepted)
+/// - Byte 39: `SecurityMode` (bit 0 = signing supported, bit 1 = signing required)
+/// - Bytes 44-47: `Capabilities` (LE u32, bit 31 = extended security)
+fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
+    // Default: assume dialect not accepted
+    let mut details = SmbV1NegotiateDetails {
+        dialect_accepted: false,
+        signing_required: false,
+        extended_security: false,
+        security_mode: 0,
+        capabilities: 0,
+    };
+
+    // Need at least past the WordCount + DialectIndex (offset 38)
+    if response.len() < 39 {
+        return details;
+    }
+
+    let word_count = response[36];
+    // NT LM 0.12 response should have WordCount = 17 (or 13 for older)
+    if word_count == 0 {
+        // WordCount 0 means error / no dialect accepted
+        return details;
+    }
+
+    // DialectIndex at offset 37-38 (little-endian)
+    let dialect_index = u16::from_le_bytes([response[37], response[38]]);
+    // 0xFFFF means no dialect was accepted
+    details.dialect_accepted = dialect_index != 0xFFFF;
+
+    // SecurityMode at offset 39 (if available)
+    if response.len() > 39 {
+        details.security_mode = response[39];
+        // Bit 1 (0x02) = signing required
+        details.signing_required = details.security_mode & 0x02 != 0;
+    }
+
+    // Capabilities at offset 44-47 (if available)
+    if response.len() >= 48 {
+        details.capabilities =
+            u32::from_le_bytes([response[44], response[45], response[46], response[47]]);
+        // Bit 31 (0x8000_0000) = CAP_EXTENDED_SECURITY
+        details.extended_security = details.capabilities & 0x8000_0000 != 0;
+    }
+
+    details
+}
+
+/// Check if a host also supports `SMBv2`+ by sending an `SMBv2` negotiate.
+/// Returns true if the server responds with a valid `SMBv2` negotiate response.
+async fn check_smbv2_support(ip: IpAddr, port: u16) -> bool {
+    let addr = SocketAddr::new(ip, port);
+    let Ok(Ok(mut stream)) =
+        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
+    else {
+        return false;
+    };
+
+    let negotiate = build_smb2_negotiate();
+    if tokio::time::timeout(READ_TIMEOUT, stream.write_all(&negotiate))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    let mut buf = vec![0u8; 512];
+    let Ok(Ok(n)) = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await else {
+        return false;
+    };
+
+    // Valid SMBv2 response: at least 8 bytes, with \xFESMB magic
+    n >= 8 && buf[4] == 0xFE && &buf[5..8] == b"SMB"
 }
 
 /// Build an `SMBv2` NEGOTIATE request.
@@ -283,6 +401,22 @@ async fn check_netbios(ip: IpAddr) -> bool {
         .is_ok_and(|r| r.is_ok())
 }
 
+/// Build a human-readable summary of `SMBv1` protocol details.
+fn format_smbv1_details(info: &SmbV1Info) -> String {
+    let mut parts = Vec::new();
+    if info.signing_required {
+        parts.push("signing required");
+    } else {
+        parts.push("signing NOT required");
+    }
+    if info.extended_security {
+        parts.push("extended security (SPNEGO)");
+    } else {
+        parts.push("legacy auth (no SPNEGO)");
+    }
+    parts.join(", ")
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Scanner for SmbScanner {
@@ -339,24 +473,92 @@ impl Scanner for SmbScanner {
             // Check for SMBv1 support
             if let Some(version) = check_smbv1(ip, 445).await {
                 match version {
-                    SmbVersion::V1 => {
-                        findings.push(
-                            Finding::new(
-                                "smb",
-                                &format!("SMBv1 enabled on {ip}:445"),
-                                &format!(
-                                    "Host {ip} supports SMBv1, which is vulnerable to \
-                                     EternalBlue (MS17-010), WannaCry, and other critical \
-                                     exploits. SMBv1 has been deprecated since 2014."
-                                ),
-                                Severity::Critical,
-                            )
-                            .with_ip(ip)
-                            .with_port(445)
-                            .with_service("SMB")
-                            .with_cwe("CWE-327")
-                            .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.smbv1-enabled", &[])),
-                        );
+                    SmbVersion::V1(ref info) => {
+                        if info.dialect_accepted {
+                            // Confirmed SMBv1 support — now check if SMBv2+ is also available
+                            let also_v2 = check_smbv2_support(ip, 445).await;
+                            let details = format_smbv1_details(info);
+
+                            if also_v2 {
+                                // Server supports both SMBv1 and SMBv2+.
+                                // SMBv1 is likely enabled for backward compatibility.
+                                // Still a risk (downgrade attacks possible) but lower
+                                // severity than a legacy-only SMBv1 system.
+                                findings.push(
+                                    Finding::new(
+                                        "smb",
+                                        &format!("SMBv1 enabled alongside SMBv2+ on {ip}:445"),
+                                        &format!(
+                                            "Host {ip} supports SMBv1 in addition to SMBv2+. \
+                                             While the server supports modern protocols, having \
+                                             SMBv1 enabled allows protocol downgrade attacks and \
+                                             exposes the host to EternalBlue (MS17-010) if \
+                                             unpatched. Protocol details: {details}."
+                                        ),
+                                        Severity::High,
+                                    )
+                                    .with_ip(ip)
+                                    .with_port(445)
+                                    .with_service("SMB")
+                                    .with_cwe("CWE-327")
+                                    .with_opt_remediation(crate::remediation::get(
+                                        "rikitikitavi.smb.smbv1-enabled",
+                                        &[],
+                                    )),
+                                );
+                            } else {
+                                // Server only supports SMBv1 — legacy system, most dangerous
+                                findings.push(
+                                    Finding::new(
+                                        "smb",
+                                        &format!("SMBv1-only server at {ip}:445"),
+                                        &format!(
+                                            "Host {ip} supports only SMBv1 with no SMBv2+ \
+                                             support. This indicates a legacy or severely \
+                                             misconfigured system vulnerable to EternalBlue \
+                                             (MS17-010), WannaCry, and other critical exploits. \
+                                             SMBv1 has been deprecated since 2014. \
+                                             Protocol details: {details}."
+                                        ),
+                                        Severity::Critical,
+                                    )
+                                    .with_ip(ip)
+                                    .with_port(445)
+                                    .with_service("SMB")
+                                    .with_cwe("CWE-327")
+                                    .with_opt_remediation(crate::remediation::get(
+                                        "rikitikitavi.smb.smbv1-enabled",
+                                        &[],
+                                    )),
+                                );
+                            }
+                        } else {
+                            // Server responded with SMBv1 framing but rejected the dialect.
+                            // This is NOT a confirmed SMBv1 vulnerability — the server
+                            // understood the SMBv1 protocol frame but chose not to accept
+                            // our offered dialect. Commonly seen on modern Windows that
+                            // still processes SMBv1 frames to redirect to SMBv2.
+                            tracing::debug!(
+                                ip = %ip,
+                                "SMBv1 response received but dialect rejected — not vulnerable"
+                            );
+                            findings.push(
+                                Finding::new(
+                                    "smb",
+                                    &format!("SMB service on {ip}:445 — SMBv1 dialect rejected"),
+                                    &format!(
+                                        "Host {ip} responded to an SMBv1 negotiate but did not \
+                                         accept the offered dialect. This typically indicates a \
+                                         modern server that processes SMBv1 frames for protocol \
+                                         negotiation but does not support SMBv1 file sharing."
+                                    ),
+                                    Severity::Info,
+                                )
+                                .with_ip(ip)
+                                .with_port(445)
+                                .with_service("SMB"),
+                            );
+                        }
                     }
                     SmbVersion::V2Plus => {
                         findings.push(
@@ -378,16 +580,17 @@ impl Scanner for SmbScanner {
                         findings.push(
                             Finding::new(
                                 "smb",
-                                &format!("SMB service on {ip}:445 — version unclear"),
+                                &format!("Unrecognized service on {ip}:445"),
                                 &format!(
-                                    "Could not determine SMB version on {ip}:445. \
+                                    "Port 445 on {ip} is open but responded with an \
+                                     unrecognized protocol. This may not be an SMB service. \
                                      Manual verification recommended."
                                 ),
                                 Severity::Low,
                             )
                             .with_ip(ip)
                             .with_port(445)
-                            .with_service("SMB"),
+                            .with_service("unknown"),
                         );
                     }
                 }
@@ -411,7 +614,10 @@ impl Scanner for SmbScanner {
                         .with_port(445)
                         .with_service("SMB")
                         .with_cwe("CWE-287")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.null-session", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.smb.null-session",
+                            &[],
+                        )),
                     );
                 }
             }
@@ -433,7 +639,10 @@ impl Scanner for SmbScanner {
                     .with_port(139)
                     .with_service("NetBIOS")
                     .with_cwe("CWE-200")
-                    .with_opt_remediation(crate::remediation::get("rikitikitavi.smb.netbios-exposed", &[])),
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.smb.netbios-exposed",
+                        &[],
+                    )),
                 );
             }
         }
@@ -455,13 +664,67 @@ mod tests {
     // ── SMB response classification tests ───────────────────────────
 
     #[test]
-    fn test_classify_smbv1_response() {
-        // NetBIOS header (4) + \xFFSMB
-        let mut response = vec![0x00, 0x00, 0x00, 0x20]; // NetBIOS
+    fn test_classify_smbv1_response_accepted() {
+        // NetBIOS header (4) + \xFFSMB + header padding + WordCount=17 + DialectIndex=0
+        let mut response = vec![0x00, 0x00, 0x00, 0x40]; // NetBIOS
         response.push(0xFF); // SMBv1 magic
         response.extend_from_slice(b"SMB");
-        response.extend_from_slice(&[0; 24]); // Rest of header
-        assert_eq!(classify_smb_response(&response), SmbVersion::V1);
+        response.extend_from_slice(&[0; 28]); // Rest of 32-byte SMB header
+        response.push(17); // WordCount = 17 (NT LM 0.12 response)
+        response.extend_from_slice(&[0x00, 0x00]); // DialectIndex = 0 (accepted)
+        response.push(0x03); // SecurityMode: signing supported + required
+        response.extend_from_slice(&[0; 4]); // padding to capabilities
+        response.extend_from_slice(&0x8000_0000_u32.to_le_bytes()); // CAP_EXTENDED_SECURITY
+        response.extend_from_slice(&[0; 16]); // padding
+        let result = classify_smb_response(&response);
+        assert_eq!(
+            result,
+            SmbVersion::V1(SmbV1Info {
+                dialect_accepted: true,
+                signing_required: true,
+                extended_security: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_smbv1_response_dialect_rejected() {
+        // Server responds with SMBv1 framing but DialectIndex = 0xFFFF
+        let mut response = vec![0x00, 0x00, 0x00, 0x30]; // NetBIOS
+        response.push(0xFF);
+        response.extend_from_slice(b"SMB");
+        response.extend_from_slice(&[0; 28]); // 32-byte header
+        response.push(17); // WordCount
+        response.extend_from_slice(&[0xFF, 0xFF]); // DialectIndex = 0xFFFF (rejected)
+        response.push(0x00); // SecurityMode
+        response.extend_from_slice(&[0; 20]); // padding
+        let result = classify_smb_response(&response);
+        match result {
+            SmbVersion::V1(info) => {
+                assert!(!info.dialect_accepted, "dialect should be rejected");
+            }
+            other => panic!("expected V1 with rejected dialect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_smbv1_minimal_response() {
+        // Minimal SMBv1 response (short, no negotiate details)
+        let mut response = vec![0x00, 0x00, 0x00, 0x20];
+        response.push(0xFF);
+        response.extend_from_slice(b"SMB");
+        // Only 4 more bytes — not enough for negotiate details
+        response.extend_from_slice(&[0; 4]);
+        let result = classify_smb_response(&response);
+        match result {
+            SmbVersion::V1(info) => {
+                assert!(
+                    !info.dialect_accepted,
+                    "short response should not confirm dialect"
+                );
+            }
+            other => panic!("expected V1 with unconfirmed dialect, got {other:?}"),
+        }
     }
 
     #[test]
@@ -487,6 +750,70 @@ mod tests {
     #[test]
     fn test_classify_smb_empty() {
         assert_eq!(classify_smb_response(&[]), SmbVersion::Unknown);
+    }
+
+    // ── SMBv1 negotiate response detail parsing ─────────────────────
+
+    #[test]
+    fn test_parse_smbv1_details_signing_required() {
+        let mut response = vec![0x00; 50];
+        response[4] = 0xFF;
+        response[5..8].copy_from_slice(b"SMB");
+        response[36] = 17; // WordCount
+        response[37] = 0x00; // DialectIndex = 0
+        response[38] = 0x00;
+        response[39] = 0x03; // SecurityMode: signing supported + required
+        let details = parse_smbv1_negotiate_details(&response);
+        assert!(details.dialect_accepted);
+        assert!(details.signing_required);
+    }
+
+    #[test]
+    fn test_parse_smbv1_details_no_signing() {
+        let mut response = vec![0x00; 50];
+        response[4] = 0xFF;
+        response[5..8].copy_from_slice(b"SMB");
+        response[36] = 17;
+        response[37] = 0x00;
+        response[38] = 0x00;
+        response[39] = 0x01; // SecurityMode: signing supported only
+        let details = parse_smbv1_negotiate_details(&response);
+        assert!(details.dialect_accepted);
+        assert!(!details.signing_required);
+    }
+
+    #[test]
+    fn test_parse_smbv1_details_word_count_zero() {
+        let mut response = vec![0x00; 50];
+        response[4] = 0xFF;
+        response[5..8].copy_from_slice(b"SMB");
+        response[36] = 0; // WordCount = 0 → error response
+        let details = parse_smbv1_negotiate_details(&response);
+        assert!(!details.dialect_accepted);
+    }
+
+    #[test]
+    fn test_format_smbv1_details_with_signing() {
+        let info = SmbV1Info {
+            dialect_accepted: true,
+            signing_required: true,
+            extended_security: true,
+        };
+        let s = format_smbv1_details(&info);
+        assert!(s.contains("signing required"));
+        assert!(s.contains("SPNEGO"));
+    }
+
+    #[test]
+    fn test_format_smbv1_details_without_signing() {
+        let info = SmbV1Info {
+            dialect_accepted: true,
+            signing_required: false,
+            extended_security: false,
+        };
+        let s = format_smbv1_details(&info);
+        assert!(s.contains("signing NOT required"));
+        assert!(s.contains("legacy auth"));
     }
 
     // ── SMBv1 negotiate packet tests ────────────────────────────────
@@ -516,6 +843,11 @@ mod tests {
         #[test]
         fn prop_classify_smb_response_no_panic(data in proptest::collection::vec(any::<u8>(), 0..256)) {
             let _ = classify_smb_response(&data);
+        }
+
+        #[test]
+        fn prop_parse_smbv1_details_no_panic(data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let _ = parse_smbv1_negotiate_details(&data);
         }
 
         #[test]
