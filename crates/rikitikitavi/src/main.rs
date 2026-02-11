@@ -131,15 +131,104 @@ async fn cmd_scan(
         }
         println!("Results written to {}", output.display());
     } else if !args.quiet {
-        println!("Scan complete: {} findings", results.findings.len());
-        println!("Risk score: {:.0}/100", results.risk_score);
-        println!();
-        for f in &results.findings {
-            println!("  [{:8}] {}", f.severity, f.title);
-        }
+        print_cli_report(&results);
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
+    use rikitikitavi_core::Severity;
+
+    let total = results.findings.len();
+    let critical = results.findings.iter().filter(|f| f.severity == Severity::Critical).count();
+    let high = results.findings.iter().filter(|f| f.severity == Severity::High).count();
+    let medium = results.findings.iter().filter(|f| f.severity == Severity::Medium).count();
+    let low = results.findings.iter().filter(|f| f.severity == Severity::Low).count();
+    let info = results.findings.iter().filter(|f| f.severity == Severity::Info).count();
+
+    let (grade, _) = rikitikitavi_analysis::risk_grade(critical, high, medium);
+
+    // ── Header ──────────────────────────────────────────────────
+    println!("Scan complete: {total} findings");
+    println!("Risk score: {:.0}/100 ({grade})", results.risk_score);
+    println!();
+
+    // ── Severity breakdown ──────────────────────────────────────
+    println!("  Severity breakdown:");
+    if critical > 0 { println!("    CRITICAL  {critical}"); }
+    if high > 0     { println!("    HIGH      {high}"); }
+    if medium > 0   { println!("    MEDIUM    {medium}"); }
+    if low > 0      { println!("    LOW       {low}"); }
+    if info > 0     { println!("    INFO      {info}"); }
+    println!();
+
+    // ── Actionable findings (Critical/High/Medium) with detail ─
+    let actionable: Vec<_> = results
+        .findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Critical | Severity::High | Severity::Medium))
+        .collect();
+
+    if !actionable.is_empty() {
+        println!("  Actionable findings:");
+        println!();
+        for f in &actionable {
+            println!("    [{:8}] {}", f.severity, f.title);
+            println!("              {}", f.description);
+            if let Some(ref rem) = f.remediation {
+                if !rem.steps.is_empty() {
+                    let fix = rem.steps.join(" → ");
+                    let effort = rem
+                        .effort
+                        .as_ref()
+                        .map_or(String::new(), |e| format!(" ({e})"));
+                    println!("              Fix: {fix}{effort}");
+                }
+            }
+            println!();
+        }
+    }
+
+    // ── Informational (Low/Info) — compact list ─────────────────
+    let informational: Vec<_> = results
+        .findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Low | Severity::Info))
+        .collect();
+
+    if !informational.is_empty() {
+        println!("  Informational ({}):", informational.len());
+        for f in &informational {
+            println!("    [{:8}] {}", f.severity, f.title);
+        }
+        println!();
+    }
+
+    // ── Priority actions ────────────────────────────────────────
+    if !results.priority_actions.is_empty() {
+        println!("  Top {} Priority Actions:", results.priority_actions.len());
+        println!();
+        for action in &results.priority_actions {
+            let effort = action
+                .effort
+                .as_deref()
+                .map_or(String::new(), |e| format!("  ({e})"));
+            println!(
+                "    #{} [{}] {}{}",
+                action.rank, action.severity, action.title, effort,
+            );
+            println!(
+                "       {} device(s), {} finding(s)",
+                action.affected_device_count, action.finding_count,
+            );
+            for (i, step) in action.steps.iter().enumerate() {
+                println!("       {}. {step}", i + 1);
+            }
+            println!();
+        }
+    }
 }
 
 #[cfg(feature = "tui")]

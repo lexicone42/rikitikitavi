@@ -15,7 +15,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(10),   // Table
-            Constraint::Length(12), // Detail pane (slightly taller for remediation)
+            Constraint::Length(15), // Detail pane with remediation steps
             Constraint::Length(3),  // Footer
         ])
         .split(frame.area());
@@ -117,23 +117,31 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     )),
                 ];
 
-                if let Some(cwe) = &f.cwe_id {
-                    lines.push(Line::from(vec![
-                        Span::styled("  CWE: ", Style::default().fg(palette.border)),
-                        Span::styled(
-                            cwe.clone(),
-                            Style::default()
-                                .fg(palette.accent)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                    ]));
-                }
-
+                // Metadata line: CWE + Device + Port
+                let mut meta_spans = Vec::new();
                 if let Some(ip) = f.affected_ip {
-                    lines.push(Line::from(vec![
-                        Span::styled("  Device: ", Style::default().fg(palette.border)),
-                        Span::styled(ip.to_string(), Style::default().fg(palette.fg)),
-                    ]));
+                    meta_spans.push(Span::styled("  Device: ", Style::default().fg(palette.border)));
+                    meta_spans.push(Span::styled(ip.to_string(), Style::default().fg(palette.fg)));
+                    if let Some(port) = f.affected_port {
+                        meta_spans.push(Span::styled(format!(":{port}"), Style::default().fg(palette.fg)));
+                    }
+                }
+                if let Some(cwe) = &f.cwe_id {
+                    if meta_spans.is_empty() {
+                        meta_spans.push(Span::styled("  ", Style::default()));
+                    } else {
+                        meta_spans.push(Span::styled("  |  ", Style::default().fg(palette.border)));
+                    }
+                    meta_spans.push(Span::styled("CWE: ", Style::default().fg(palette.border)));
+                    meta_spans.push(Span::styled(
+                        cwe.clone(),
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ));
+                }
+                if !meta_spans.is_empty() {
+                    lines.push(Line::from(meta_spans));
                 }
 
                 // Show remediation if present
@@ -145,6 +153,20 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                             .fg(palette.accent)
                             .add_modifier(Modifier::BOLD),
                     )));
+                    for (i, step) in remediation.steps.iter().enumerate() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("    {}. ", i + 1),
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                step.clone(),
+                                Style::default().fg(palette.fg),
+                            ),
+                        ]));
+                    }
                     if let Some(effort) = &remediation.effort {
                         lines.push(Line::from(Span::styled(
                             format!("  Effort: {effort}"),
