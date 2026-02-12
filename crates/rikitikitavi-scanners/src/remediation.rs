@@ -201,12 +201,13 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// All 53 expected template IDs.
+    /// All 54 expected template IDs.
     const EXPECTED_IDS: &[&str] = &[
         "rikitikitavi.arp.spoofing-detected",
         "rikitikitavi.credentials.anonymous-ftp",
         "rikitikitavi.credentials.http-no-auth",
         "rikitikitavi.credentials.telnet-default",
+        "rikitikitavi.credentials.telnet-default-confirmed",
         "rikitikitavi.credentials.rdp-exposed",
         "rikitikitavi.credentials.smb-exposed",
         "rikitikitavi.database.redis-no-auth",
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn test_all_templates_parse() {
         let registry = REGISTRY.get_or_init(init_registry);
-        assert_eq!(registry.templates.len(), 53);
+        assert_eq!(registry.templates.len(), 54);
     }
 
     #[test]

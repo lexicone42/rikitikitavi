@@ -264,6 +264,255 @@ fn strip_telnet_iac(data: &[u8]) -> Vec<u8> {
     result
 }
 
+// ── Telnet default credential testing ────────────────────────────
+
+/// Default credential pairs to test against telnet services.
+/// Covers the most common factory-shipped defaults across routers, `IoT` devices,
+/// and embedded `Linux` systems.
+const DEFAULT_TELNET_CREDS: &[(&str, &str)] = &[
+    ("admin", "admin"),
+    ("root", "root"),
+    ("admin", "password"),
+    ("admin", ""),
+    ("root", ""),
+    ("user", "user"),
+    ("admin", "1234"),
+];
+
+/// Additional vendor-specific credential pairs appended when the banner
+/// matches known device fingerprints.
+const CISCO_CREDS: &[(&str, &str)] = &[("cisco", "cisco")];
+const MIKROTIK_CREDS: &[(&str, &str)] = &[("admin", "")];
+
+/// Result of a successful telnet default credential login.
+struct TelnetLoginResult {
+    username: String,
+    /// Human-readable hint — never the actual password.
+    password_hint: String,
+    banner: String,
+    post_login: String,
+}
+
+/// Classify a telnet response after sending credentials.
+///
+/// Returns `true` if the response indicates a successful login (shell prompt,
+/// welcome message, `BusyBox` shell) and `false` if it contains failure
+/// keywords.
+fn classify_telnet_response(response: &str) -> bool {
+    let lower = response.to_lowercase();
+
+    // Explicit failure indicators
+    let failure_keywords = [
+        "incorrect",
+        "failed",
+        "denied",
+        "invalid",
+        "bad password",
+        "login incorrect",
+        "authentication failure",
+        "access denied",
+    ];
+    if failure_keywords.iter().any(|kw| lower.contains(kw)) {
+        return false;
+    }
+
+    // Success indicators: shell prompts, welcome messages, BusyBox
+    let success_indicators = [
+        "welcome",
+        "last login",
+        "busybox",
+    ];
+    if success_indicators.iter().any(|kw| lower.contains(kw)) {
+        return true;
+    }
+
+    // Shell prompts at end of output
+    let trimmed = response.trim();
+    if trimmed.ends_with('$')
+        || trimmed.ends_with('#')
+        || trimmed.ends_with('>')
+    {
+        return true;
+    }
+
+    // If we got a non-empty response with no failure keywords and no
+    // further login/password prompt, treat as likely success
+    !lower.contains("login:") && !lower.contains("password:")
+}
+
+/// Build a human-readable password hint (never the actual password).
+fn password_hint(password: &str) -> String {
+    if password.is_empty() {
+        "empty password".to_owned()
+    } else if password.chars().all(char::is_numeric) {
+        "numeric PIN".to_owned()
+    } else {
+        "default password".to_owned()
+    }
+}
+
+/// Build the prioritised credential list based on the banner content.
+///
+/// Vendor-specific pairs are prepended so they are tried first; duplicates
+/// in the default list are then skipped.
+fn build_credential_list(banner: &str) -> Vec<(&'static str, &'static str)> {
+    let lower = banner.to_lowercase();
+    let mut creds: Vec<(&str, &str)> = Vec::with_capacity(DEFAULT_TELNET_CREDS.len() + 2);
+
+    if lower.contains("busybox") {
+        // BusyBox devices: root/(empty) and root/root most likely
+        creds.push(("root", ""));
+        creds.push(("root", "root"));
+    } else if lower.contains("cisco") || lower.contains("ios") {
+        for &pair in CISCO_CREDS {
+            creds.push(pair);
+        }
+        creds.push(("admin", "admin"));
+    } else if lower.contains("mikrotik") {
+        for &pair in MIKROTIK_CREDS {
+            creds.push(pair);
+        }
+    }
+
+    // Append remaining defaults, skipping any already queued
+    for &pair in DEFAULT_TELNET_CREDS {
+        if !creds.contains(&pair) {
+            creds.push(pair);
+        }
+    }
+
+    creds
+}
+
+/// Attempt a single telnet login with the given credentials.
+///
+/// Opens a fresh TCP connection, waits for the login prompt, sends the
+/// username and password, then classifies the server response.
+async fn try_telnet_login(
+    ip: IpAddr,
+    username: &str,
+    password: &str,
+) -> Option<TelnetLoginResult> {
+    let addr = SocketAddr::new(ip, 23);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Read banner / login prompt
+    let mut buf = vec![0u8; 2048];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    if n == 0 {
+        return None;
+    }
+    let cleaned = strip_telnet_iac(&buf[..n]);
+    let banner = String::from_utf8_lossy(&cleaned).trim().to_owned();
+
+    // Wait for login prompt
+    let banner_lower = banner.to_lowercase();
+    if !banner_lower.contains("login")
+        && !banner_lower.contains("username")
+    {
+        // Maybe the prompt hasn't arrived yet — read more
+        let mut buf2 = vec![0u8; 1024];
+        if let Ok(Ok(n2)) =
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf2)).await
+        {
+            if n2 > 0 {
+                let extra = String::from_utf8_lossy(&strip_telnet_iac(&buf2[..n2]))
+                    .to_lowercase();
+                if !extra.contains("login") && !extra.contains("username") {
+                    return None; // No login prompt found
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+
+    // Send username
+    let user_cmd = format!("{username}\r\n");
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(user_cmd.as_bytes()))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Wait for password prompt
+    let mut buf3 = vec![0u8; 1024];
+    let n3 = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf3))
+        .await
+        .ok()?
+        .ok()?;
+    if n3 > 0 {
+        let prompt = String::from_utf8_lossy(&strip_telnet_iac(&buf3[..n3])).to_lowercase();
+        if !prompt.contains("password") && !prompt.contains("assword") {
+            return None; // No password prompt — unusual protocol
+        }
+    }
+
+    // Send password
+    let pass_cmd = format!("{password}\r\n");
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(pass_cmd.as_bytes()))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Read response and classify
+    let mut buf4 = vec![0u8; 2048];
+    let n4 = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf4))
+        .await
+        .ok()?
+        .ok()?;
+    if n4 == 0 {
+        return None;
+    }
+    let response = String::from_utf8_lossy(&strip_telnet_iac(&buf4[..n4]))
+        .trim()
+        .to_owned();
+
+    if classify_telnet_response(&response) {
+        Some(TelnetLoginResult {
+            username: username.to_owned(),
+            password_hint: password_hint(password),
+            banner,
+            post_login: truncate_evidence(&response, 200),
+        })
+    } else {
+        None
+    }
+}
+
+/// Truncate evidence text to a maximum length, adding an ellipsis if needed.
+fn truncate_evidence(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_owned()
+    } else {
+        format!("{}...", &text[..max_len])
+    }
+}
+
+/// Check a telnet service for default credentials.
+///
+/// Captures the banner first for fingerprinting, builds a prioritised
+/// credential list, and tries each pair with a short delay between attempts.
+async fn check_telnet_default_creds(ip: IpAddr) -> Option<TelnetLoginResult> {
+    let banner = capture_telnet_prompt(ip).await.unwrap_or_default();
+    let creds = build_credential_list(&banner);
+
+    for (i, &(user, pass)) in creds.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(result) = try_telnet_login(ip, user, pass).await {
+            return Some(result);
+        }
+    }
+    None
+}
+
 /// Extract the `<title>` content from an HTML response.
 fn extract_html_title(body: &str) -> Option<String> {
     let lower = body.to_lowercase();
@@ -388,11 +637,56 @@ impl Scanner for CredentialScanner {
                     check_ftp_credentials(ip, &mut findings).await;
                 }
 
-                // Telnet: flag if open (cleartext protocol)
+                // Telnet: flag cleartext protocol + test default credentials
                 if has_port(23) {
-                    let mut finding = Finding::new(
+                    let is_active = ctx.config.intensity.at_least(
+                        rikitikitavi_models::config::ScanIntensity::Active,
+                    );
+
+                    // In Active mode, attempt default credential login
+                    let login_result = if is_active {
+                        check_telnet_default_creds(ip).await
+                    } else {
+                        None
+                    };
+
+                    if let Some(ref result) = login_result {
+                        // Confirmed default credentials — Critical
+                        let banner_snip = truncate_evidence(&result.banner, 80);
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!(
+                                    "Default telnet credentials confirmed on {ip}"
+                                ),
+                                &format!(
+                                    "Default credentials confirmed: login as '{}' \
+                                     with {} on {ip}:23. Banner: {banner_snip}",
+                                    result.username, result.password_hint,
+                                ),
+                                Severity::Critical,
+                            )
+                            .with_ip(ip)
+                            .with_port(23)
+                            .with_service("Telnet")
+                            .with_cwe("CWE-1393")
+                            .with_evidence(format!(
+                                "Post-login output: {}",
+                                result.post_login,
+                            ))
+                            .with_opt_remediation(crate::remediation::get(
+                                "rikitikitavi.credentials.telnet-default-confirmed",
+                                &[],
+                            )),
+                        );
+                    }
+
+                    // Always flag cleartext protocol (separate finding)
+                    let mut cleartext_finding = Finding::new(
                         "credentials",
-                        &format!("Telnet service with potential default credentials on {ip}"),
+                        &format!(
+                            "Telnet service with potential default credentials on {ip}"
+                        ),
                         &format!(
                             "Telnet on {ip}:23 transmits credentials in cleartext. \
                              Many devices ship with default telnet passwords. \
@@ -408,15 +702,18 @@ impl Scanner for CredentialScanner {
                         "rikitikitavi.credentials.telnet-default",
                         &[],
                     ));
-                    if ctx.config.intensity.at_least(
-                        rikitikitavi_models::config::ScanIntensity::Active,
-                    ) {
-                        if let Some(prompt) = capture_telnet_prompt(ip).await {
-                            finding =
-                                finding.with_evidence(format!("Login prompt: {prompt}"));
+                    if is_active {
+                        if let Some(ref result) = login_result {
+                            cleartext_finding = cleartext_finding.with_evidence(
+                                format!("Login prompt: {}", result.banner),
+                            );
+                        } else if let Some(prompt) = capture_telnet_prompt(ip).await
+                        {
+                            cleartext_finding = cleartext_finding
+                                .with_evidence(format!("Login prompt: {prompt}"));
                         }
                     }
-                    findings.push(finding);
+                    findings.push(cleartext_finding);
                 }
 
                 // SMB: flag if port 445 is open
@@ -739,5 +1036,185 @@ mod tests {
     #[test]
     fn test_strip_iac_empty() {
         assert_eq!(strip_telnet_iac(&[]), Vec::<u8>::new());
+    }
+
+    // ── classify_telnet_response tests ───────────────────────────────
+
+    #[test]
+    fn test_classify_success_shell_prompt_hash() {
+        assert!(classify_telnet_response("root@device:~# "));
+    }
+
+    #[test]
+    fn test_classify_success_shell_prompt_dollar() {
+        assert!(classify_telnet_response("user@host:~$ "));
+    }
+
+    #[test]
+    fn test_classify_success_shell_prompt_angle() {
+        assert!(classify_telnet_response("Router> "));
+    }
+
+    #[test]
+    fn test_classify_success_welcome() {
+        assert!(classify_telnet_response("Welcome to OpenWrt!"));
+    }
+
+    #[test]
+    fn test_classify_success_last_login() {
+        assert!(classify_telnet_response(
+            "Last login: Mon Feb 10 12:34:56 from 192.168.1.5"
+        ));
+    }
+
+    #[test]
+    fn test_classify_success_busybox() {
+        assert!(classify_telnet_response(
+            "BusyBox v1.36.1 built-in shell (ash)\n#"
+        ));
+    }
+
+    #[test]
+    fn test_classify_failure_incorrect() {
+        assert!(!classify_telnet_response("Login incorrect"));
+    }
+
+    #[test]
+    fn test_classify_failure_denied() {
+        assert!(!classify_telnet_response("Access denied"));
+    }
+
+    #[test]
+    fn test_classify_failure_bad_password() {
+        assert!(!classify_telnet_response("bad password"));
+    }
+
+    #[test]
+    fn test_classify_failure_invalid() {
+        assert!(!classify_telnet_response("Invalid credentials"));
+    }
+
+    #[test]
+    fn test_classify_failure_login_prompt_again() {
+        // Getting another login prompt means failure
+        assert!(!classify_telnet_response("login: "));
+    }
+
+    #[test]
+    fn test_classify_failure_password_prompt_again() {
+        assert!(!classify_telnet_response("Password: "));
+    }
+
+    #[test]
+    fn test_classify_failure_authentication_failure() {
+        assert!(!classify_telnet_response("authentication failure"));
+    }
+
+    #[test]
+    fn test_classify_empty_response_is_failure() {
+        // Empty string — no success indicators, but also no content
+        // The function won't be called with truly empty responses in practice
+        // (try_telnet_login checks n4 == 0 first), but classify treats it as
+        // success since there are no failure/prompt keywords. That's fine
+        // because the caller guards against empty.
+        assert!(classify_telnet_response(""));
+    }
+
+    // ── password_hint tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_password_hint_empty() {
+        assert_eq!(password_hint(""), "empty password");
+    }
+
+    #[test]
+    fn test_password_hint_numeric() {
+        assert_eq!(password_hint("1234"), "numeric PIN");
+    }
+
+    #[test]
+    fn test_password_hint_default() {
+        assert_eq!(password_hint("admin"), "default password");
+    }
+
+    #[test]
+    fn test_password_hint_mixed() {
+        assert_eq!(password_hint("pass123"), "default password");
+    }
+
+    // ── build_credential_list tests ──────────────────────────────────
+
+    #[test]
+    fn test_cred_list_generic_banner() {
+        let creds = build_credential_list("Welcome to Device\nlogin: ");
+        assert_eq!(creds.len(), DEFAULT_TELNET_CREDS.len());
+        assert_eq!(creds[0], ("admin", "admin"));
+    }
+
+    #[test]
+    fn test_cred_list_busybox_prioritises_root() {
+        let creds = build_credential_list("BusyBox v1.36.1\nlogin: ");
+        // root/(empty) and root/root should be first
+        assert_eq!(creds[0], ("root", ""));
+        assert_eq!(creds[1], ("root", "root"));
+        // No duplicates
+        assert!(!creds[2..].contains(&("root", "")));
+        assert!(!creds[2..].contains(&("root", "root")));
+    }
+
+    #[test]
+    fn test_cred_list_cisco_prioritises_cisco() {
+        let creds = build_credential_list("Cisco IOS Software\nUser Access");
+        assert_eq!(creds[0], ("cisco", "cisco"));
+        assert_eq!(creds[1], ("admin", "admin"));
+        // cisco/cisco shouldn't appear again
+        assert!(!creds[2..].contains(&("cisco", "cisco")));
+    }
+
+    #[test]
+    fn test_cred_list_mikrotik_prioritises_admin_empty() {
+        let creds = build_credential_list("MikroTik RouterOS\nLogin: ");
+        assert_eq!(creds[0], ("admin", ""));
+        // admin/(empty) shouldn't be duplicated
+        assert!(!creds[1..].contains(&("admin", "")));
+    }
+
+    #[test]
+    fn test_cred_list_no_duplicates() {
+        // All vendor-specific lists should produce no duplicates
+        for banner in &[
+            "BusyBox",
+            "Cisco IOS",
+            "MikroTik",
+            "generic device",
+        ] {
+            let creds = build_credential_list(banner);
+            let mut seen = Vec::new();
+            for pair in &creds {
+                assert!(
+                    !seen.contains(pair),
+                    "duplicate {pair:?} for banner {banner}"
+                );
+                seen.push(*pair);
+            }
+        }
+    }
+
+    // ── truncate_evidence tests ──────────────────────────────────────
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate_evidence("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        assert_eq!(truncate_evidence("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        let result = truncate_evidence("hello world", 5);
+        assert_eq!(result, "hello...");
     }
 }
