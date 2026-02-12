@@ -10,7 +10,7 @@ name = "rikitikitavi"
 path = "src/main.rs"
 
 [features]
-default = ["tui", "unifi", "monitor"]
+default = ["tui", "unifi"]
 tui = ["dep:rikitikitavi-tui", "dep:ratatui", "dep:crossterm"]
 unifi = ["dep:rikitikitavi-unifi"]
 monitor = ["rikitikitavi-scanners/monitor", "rikitikitavi-network/monitor"]

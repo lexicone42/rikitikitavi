@@ -444,13 +444,146 @@ something fails.
 
 ---
 
+## 13. Newtype Pattern for Type Safety
+
+**File**: `crates/rikitikitavi-models/src/finding.rs`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FindingFingerprint(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceFingerprint(pub u64);
+```
+
+**Why it's interesting**: Both are wrappers around `u64`, but Rust treats them
+as completely different types. You can't accidentally pass a `DeviceFingerprint`
+where a `FindingFingerprint` is expected — the compiler catches it.
+
+This is zero-cost: `FindingFingerprint(42)` has the same memory layout as
+`42_u64`. The wrapping only exists at compile time.
+
+The `Copy` derive means these are passed by value (like integers), not moved.
+Small types (up to ~128 bits) should usually be `Copy` to avoid unnecessary
+references.
+
+**When to use**: Any time you have a raw `u64`, `String`, or `Vec<u8>` that
+represents a specific concept. Wrap it to prevent mixing up semantically
+different values.
+
+---
+
+## 14. Custom Serde Serialization
+
+**File**: `crates/rikitikitavi-models/src/ocsf.rs`
+
+```rust
+fn serialize_epoch_ms<S: Serializer>(dt: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_i64(dt.timestamp_millis())
+}
+
+#[derive(Serialize)]
+pub struct OcsfFinding {
+    #[serde(serialize_with = "serialize_epoch_ms")]
+    pub time: DateTime<Utc>,
+}
+```
+
+**Why it's interesting**: The field type stays `DateTime<Utc>` (ergonomic in
+Rust), but the JSON output is epoch milliseconds (what OCSF requires). You get
+type safety in Rust code AND protocol compliance in the output.
+
+The `S: Serializer` generic means this works with any serde format (JSON,
+MessagePack, CBOR). You write the function once.
+
+**When to use**: When an external schema requires a different representation
+than what's natural in Rust. Common cases: epoch timestamps, base64 blobs,
+enum-to-integer mappings.
+
+---
+
+## 15. Feature-Gated Optional Dependencies
+
+**File**: `crates/rikitikitavi/Cargo.toml`
+
+```toml
+[features]
+default = ["tui", "unifi"]
+monitor = ["rikitikitavi-scanners/monitor", "rikitikitavi-network/monitor"]
+
+[dependencies]
+rikitikitavi-tui = { path = "../rikitikitavi-tui", optional = true }
+```
+
+And in code:
+```rust
+#[cfg(feature = "monitor")]
+pub mod passive_wifi;
+```
+
+**Why it's interesting**: The `monitor` feature requires `libpcap-dev` at build
+time. By making it non-default, `cargo install` just works on any system. Users
+who want WiFi monitoring opt in explicitly.
+
+Features propagate through dependencies: enabling `monitor` on the binary
+automatically enables `monitor` on the scanners crate, which enables it on the
+network crate, which pulls in the `pcap` dependency. One flag controls the
+entire feature tree.
+
+**When to use**: When a feature has system dependencies (C libraries, hardware
+access) or adds significant binary size. Keep `cargo install` simple by
+default.
+
+---
+
+## 16. The `From` Trait for Type Conversion
+
+**File**: `crates/rikitikitavi-models/src/ocsf.rs`
+
+```rust
+impl From<&Finding> for OcsfFinding {
+    fn from(f: &Finding) -> Self {
+        Self {
+            class_uid: 2002,
+            severity_id: f.severity.ocsf_id(),
+            time: f.discovered_at,
+            finding_info: OcsfFindingInfo {
+                title: f.title.clone(),
+                // ...
+            },
+            // ...
+        }
+    }
+}
+
+// Usage:
+let ocsf = OcsfFinding::from(&finding);
+// or equivalently:
+let ocsf: OcsfFinding = (&finding).into();
+```
+
+**Why it's interesting**: `From` is Rust's standard conversion trait.
+Implementing `From<&Finding>` also gives you `Into<OcsfFinding>` for free
+(blanket implementation in the standard library). This convention makes
+conversions discoverable and composable.
+
+Using `&Finding` (reference) means we don't consume the original — important
+when converting a list of findings where we still need the originals.
+
+**When to use**: Any structured type conversion. Prefer `From` over custom
+`to_foo()` methods for conversions between your own types.
+
+---
+
 ## Summary: Principles at Work
 
 | Principle | Pattern | Benefit |
 |-----------|---------|---------|
 | Separation of concerns | Pure parse fn + I/O wrapper | Testability |
 | Make illegal states unrepresentable | Enum variants with different data | Compiler checks exhaustiveness |
-| Zero-cost abstractions | `const fn`, consuming builders | No runtime overhead |
+| Zero-cost abstractions | `const fn`, consuming builders, newtypes | No runtime overhead |
 | Fail fast, fail loud | `#[must_use]`, `-D warnings` | Catches bugs at compile time |
 | Test the properties, not examples | proptest invariants | Hundreds of auto-generated test cases |
 | Borrow, don't clone | Deferred mutation, slices | No unnecessary allocations |
+| Type safety at zero cost | Newtype pattern, `From` trait | Compiler prevents mixing up types |
+| Optional complexity | Feature flags, `#[cfg]` | Users only pay for what they use |
