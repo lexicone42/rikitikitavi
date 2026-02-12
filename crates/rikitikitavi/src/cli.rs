@@ -50,6 +50,10 @@ pub enum Command {
     /// Validate configuration.
     Config(ConfigArgs),
 
+    /// Passive `WiFi` monitoring — listen for 802.11 management frames.
+    #[cfg(feature = "monitor")]
+    Monitor(MonitorArgs),
+
     /// Update vulnerability databases.
     UpdateDb,
 
@@ -297,6 +301,42 @@ pub enum ConfigCommand {
     Validate,
     /// Show current configuration (secrets redacted).
     Show,
+}
+
+#[cfg(feature = "monitor")]
+#[derive(Args)]
+pub struct MonitorArgs {
+    /// `WiFi` interface to monitor (auto-detected if omitted).
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Monitoring duration in seconds.
+    #[arg(long, default_value = "60")]
+    pub duration: u64,
+
+    /// Known BSSID(s) to exclude from rogue AP detection (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub known_bssids: Vec<String>,
+
+    /// Home network SSID for rogue AP detection.
+    #[arg(long)]
+    pub home_ssid: Option<String>,
+
+    /// Output file path.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Output format.
+    #[arg(long, default_value = "json")]
+    pub format: ReportFormatArg,
+
+    /// Save results to scan history.
+    #[arg(long)]
+    pub save: bool,
+
+    /// Skip confirmation prompts (e.g. macOS connection-drop warning).
+    #[arg(long)]
+    pub yes: bool,
 }
 
 // ── Value enums for clap ────────────────────────────────────────────────

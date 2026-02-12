@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = []
 bluetooth = []
+monitor = ["pcap", "rikitikitavi-network/monitor"]
 
 [dependencies]
 rikitikitavi-core = { path = "../rikitikitavi-core" }
@@ -26,6 +27,7 @@ serde_yaml_ng.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+pcap = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

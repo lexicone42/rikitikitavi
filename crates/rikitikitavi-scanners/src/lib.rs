@@ -19,5 +19,7 @@ pub mod services;
 pub mod smb;
 pub mod ssl;
 pub mod wifi;
+#[cfg(feature = "monitor")]
+pub mod passive_wifi;
 
 pub use traits::{Scanner, ScannerRegistry};

@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Config(args) => cmd_config(&args, &app_config),
+        #[cfg(feature = "monitor")]
+        Command::Monitor(args) => cmd_monitor(args).await,
         Command::UpdateDb => cmd_update_db().await,
         Command::Version { verbose } => {
             cmd_version(verbose);
@@ -782,6 +784,184 @@ async fn cmd_update_db() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "monitor")]
+#[allow(clippy::too_many_lines, clippy::unused_async)]
+async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
+    use std::collections::HashSet;
+    use std::io::Write as _;
+
+    use rikitikitavi_network::wifi_monitor;
+    use rikitikitavi_scanners::passive_wifi;
+
+    println!("Passive WiFi Monitor");
+    println!("====================");
+    println!();
+
+    // ── Detect or use specified interface ────────────────────────
+    let interface = if let Some(ref iface) = args.interface {
+        iface.clone()
+    } else {
+        println!("Auto-detecting WiFi interface...");
+        wifi_monitor::find_wifi_interface()?
+    };
+    println!("Interface: {interface}");
+
+    // ── Check capability ────────────────────────────────────────
+    match wifi_monitor::detect_capability() {
+        wifi_monitor::MonitorCapability::Supported { ref phy, .. } => {
+            println!("Monitor mode: supported (phy: {phy})");
+        }
+        wifi_monitor::MonitorCapability::NotSupported(reason) => {
+            println!();
+            println!("Monitor mode is not available: {reason}");
+            println!();
+            println!("Requirements:");
+            println!("  - Linux: WiFi adapter with monitor mode support + iw installed");
+            println!("  - macOS: Built-in WiFi adapter (will disconnect WiFi)");
+            println!("  - Must be run as root (sudo)");
+            return Ok(());
+        }
+    }
+
+    // ── macOS warning ───────────────────────────────────────────
+    if cfg!(target_os = "macos") && !args.yes {
+        println!();
+        println!("WARNING: On macOS, enabling monitor mode will disconnect your WiFi.");
+        println!("Use --yes to skip this prompt.");
+        println!();
+        print!("Continue? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // ── Set up monitor mode ─────────────────────────────────────
+    println!();
+    println!("Setting up monitor mode...");
+    let session = wifi_monitor::setup_monitor(&interface)?;
+    println!("Monitor interface: {}", session.monitor_interface);
+
+    // ── Run capture ─────────────────────────────────────────────
+    let duration = std::time::Duration::from_secs(args.duration);
+    println!();
+    println!(
+        "Capturing management frames for {}s on {}...",
+        args.duration, session.monitor_interface,
+    );
+    println!("(Press Ctrl+C to stop early)");
+    println!();
+
+    let results = passive_wifi::capture_frames(&session.monitor_interface, duration)?;
+
+    println!(
+        "Capture complete: {} frames in {}s",
+        results.frame_count,
+        results.capture_duration.as_secs(),
+    );
+    println!(
+        "  APs: {}, Probes: {}, Deauths: {}, Disassocs: {}",
+        results.beacons.len(),
+        results.probe_requests.len(),
+        results.deauth_events.len(),
+        results.disassoc_events.len(),
+    );
+    println!();
+
+    // ── Parse known BSSIDs ──────────────────────────────────────
+    let known_bssids: HashSet<_> = args
+        .known_bssids
+        .iter()
+        .filter_map(|s| rikitikitavi_network::wifi_frames::parse_mac(s))
+        .collect();
+
+    // ── Analyse ─────────────────────────────────────────────────
+    let findings = passive_wifi::analyse_results(
+        &results,
+        &known_bssids,
+        args.home_ssid.as_deref(),
+    );
+
+    // ── Print report ────────────────────────────────────────────
+    if findings.is_empty() {
+        println!("No findings.");
+    } else {
+        println!("{} finding(s):", findings.len());
+        println!();
+        for f in &findings {
+            println!("  [{:8}] {}", f.severity, f.title);
+            println!("             {}", f.description);
+            if let Some(ref evidence) = f.evidence {
+                println!("             Evidence: {evidence}");
+            }
+            println!();
+        }
+    }
+
+    // ── Save to history if requested ────────────────────────────
+    if args.save {
+        let scan_results = rikitikitavi_models::ScanResults {
+            findings,
+            risk_score: 0.0,
+            scanned_at: chrono::Utc::now(),
+            ..Default::default()
+        };
+
+        if let Some(ref output) = args.output {
+            match args.format {
+                cli::ReportFormatArg::Json => {
+                    rikitikitavi_export::export_json(&scan_results, output)?;
+                }
+                cli::ReportFormatArg::Html => {
+                    rikitikitavi_export::export_html(&scan_results, output)?;
+                }
+                cli::ReportFormatArg::Csv => {
+                    rikitikitavi_export::export_csv(&scan_results, output)?;
+                }
+            }
+            println!("Results written to {}", output.display());
+        }
+
+        let history = rikitikitavi_analysis::ScanHistory::new();
+        if let Some(h) = history {
+            match h.save(&scan_results) {
+                Ok(path) => println!("Saved to history: {}", path.display()),
+                Err(e) => tracing::warn!("failed to save: {e}"),
+            }
+        }
+    } else if let Some(ref output) = args.output {
+        // Even without --save, write to output file if specified
+        let scan_results = rikitikitavi_models::ScanResults {
+            findings,
+            risk_score: 0.0,
+            scanned_at: chrono::Utc::now(),
+            ..Default::default()
+        };
+
+        match args.format {
+            cli::ReportFormatArg::Json => {
+                rikitikitavi_export::export_json(&scan_results, output)?;
+            }
+            cli::ReportFormatArg::Html => {
+                rikitikitavi_export::export_html(&scan_results, output)?;
+            }
+            cli::ReportFormatArg::Csv => {
+                rikitikitavi_export::export_csv(&scan_results, output)?;
+            }
+        }
+        println!("Results written to {}", output.display());
+    }
+
+    // MonitorSession Drop will clean up the monitor interface
+    drop(session);
+    println!("Monitor mode cleaned up.");
+
+    Ok(())
+}
+
 fn cmd_version(verbose: bool) {
     println!("rikitikitavi {}", env!("CARGO_PKG_VERSION"));
     if verbose {
@@ -789,9 +969,10 @@ fn cmd_version(verbose: bool) {
         println!("target: {}", std::env::consts::ARCH);
         println!("os: {}", std::env::consts::OS);
         println!(
-            "features: tui={}, unifi={}",
+            "features: tui={}, unifi={}, monitor={}",
             cfg!(feature = "tui"),
             cfg!(feature = "unifi"),
+            cfg!(feature = "monitor"),
         );
     }
 }

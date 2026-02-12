@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+monitor = ["pcap"]
+
 [dependencies]
 rikitikitavi-core = { path = "../rikitikitavi-core" }
 rikitikitavi-models = { path = "../rikitikitavi-models" }
@@ -15,6 +19,7 @@ tracing.workspace = true
 anyhow.workspace = true
 ipnetwork.workspace = true
 reqwest.workspace = true
+pcap = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
