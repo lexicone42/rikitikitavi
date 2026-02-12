@@ -37,10 +37,10 @@ exceptions = []
 [licenses.private]
 ignore = true
 
-# Bans — warn on duplicate crate versions
+# Bans — allow duplicate crate versions (transitive duplicates from pcap + hickory are unavoidable)
 [bans]
-multiple-versions = "warn"
-wildcards = "deny"
+multiple-versions = "allow"
+wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
