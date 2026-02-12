@@ -7,8 +7,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::theme::Palette;
 
-/// Animated spinner frames for scanning indicator.
-const SPINNER: &[&str] = &["◐", "◓", "◑", "◒"];
+/// Animated snake spinner for scanning indicator — the mongoose hunts!
+const SNAKE_SPINNER: &[&str] = &["~§>", "§~>", "~>§", ">§~"];
 
 /// Render a scan progress bar into the given area.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -18,8 +18,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         // Animate the spinner based on progress
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let spinner_idx =
-            ((app.scan_progress * 20.0).max(0.0) as usize) % SPINNER.len();
-        let spinner = SPINNER[spinner_idx];
+            ((app.scan_progress * 20.0).max(0.0) as usize) % SNAKE_SPINNER.len();
+        let spinner = SNAKE_SPINNER[spinner_idx];
 
         let gauge = Gauge::default()
             .block(
@@ -48,12 +48,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             ));
         frame.render_widget(gauge, area);
     } else {
+        #[allow(clippy::cast_possible_truncation)]
+        let idle_idx = (app.tick / 4 % 4) as usize;
+        let idle_snake = SNAKE_SPINNER[idle_idx];
+
         let idle = Paragraph::new(Line::from(vec![
             Span::styled("  ● ", Style::default().fg(palette.low)),
             Span::styled("Ready", Style::default().fg(palette.fg)),
             Span::styled(
-                "  ─  Press [S] to start a scan",
+                "  ─  Press [S] to hunt for snakes  ",
                 Style::default().fg(palette.border),
+            ),
+            Span::styled(
+                idle_snake,
+                Style::default()
+                    .fg(palette.low)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]))
         .block(

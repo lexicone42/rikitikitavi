@@ -9,14 +9,24 @@ use rikitikitavi_models::Finding;
 use crate::app::App;
 use crate::theme::Palette;
 
-/// The Rikki-Tikki-Tavi mascot — a brave little mongoose.
-const MONGOOSE_ART: &[&str] = &[
+/// The Rikki-Tikki-Tavi mascot — proud mongoose with a cobra in its jaws!
+/// Lines above the animated snake chin line.
+const MONGOOSE_TOP: &[&str] = &[
     r"             ,,,,,      ",
     r"           ,:::::::,    ",
     r"          ,::/^\:::::,  ",
-    r"         ,::( o  o)::,  ",
-    r"         `:::\ =  /::;  ",
-    r"           ';:`. .':;'  ",
+    r"         ,::( ^  ^)::,  ",
+    r"         `:::\ w  /::;  ",
+];
+
+/// The mongoose's chin/face line (before the dangling snake).
+const SNAKE_FACE: &str = "           ';:`. .':;'";
+
+/// Animated snake dangling from the mongoose's jaws — 4 wiggle frames.
+const SNAKE_DANGLE: &[&str] = &["~§>", "§~>", "~>§", ">§~"];
+
+/// Mongoose body below the face — shared across all animation frames.
+const MONGOOSE_BOTTOM: &[&str] = &[
     r"             / `'` \    ",
     r"            / .---. \   ",
     r"           / /     \ \  ",
@@ -53,7 +63,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(28), Constraint::Min(30)])
         .split(chunks[1]);
 
-    render_mascot(frame, top_chunks[0], &palette);
+    render_mascot(frame, top_chunks[0], &palette, app.tick);
     render_risk_summary(frame, top_chunks[1], app, &palette);
 
     // ── Recent Findings ─────────────────────────────────────────────────
@@ -116,8 +126,12 @@ fn render_header(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
     frame.render_widget(header, area);
 }
 
-fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette) {
-    let lines: Vec<Line> = MONGOOSE_ART
+fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let snake_frame = (tick / 3 % 4) as usize;
+
+    // Top lines: mongoose head with proud eyes and biting mouth
+    let mut lines: Vec<Line> = MONGOOSE_TOP
         .iter()
         .map(|line| {
             Line::from(Span::styled(
@@ -126,6 +140,28 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette) {
             ))
         })
         .collect();
+
+    // Animated chin line: face in accent color + dangling snake in green
+    lines.push(Line::from(vec![
+        Span::styled(
+            SNAKE_FACE.to_owned(),
+            Style::default().fg(palette.accent),
+        ),
+        Span::styled(
+            SNAKE_DANGLE[snake_frame].to_owned(),
+            Style::default()
+                .fg(palette.low)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Bottom lines: mongoose body
+    lines.extend(MONGOOSE_BOTTOM.iter().map(|line| {
+        Line::from(Span::styled(
+            (*line).to_owned(),
+            Style::default().fg(palette.accent),
+        ))
+    }));
 
     let mascot = Paragraph::new(lines).block(
         Block::default()
@@ -317,20 +353,32 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
     let mut sorted_findings: Vec<&Finding> = findings.iter().collect();
     sorted_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
+    #[allow(clippy::cast_possible_truncation)]
+    let snake_frame = (app.tick / 4 % 4) as usize;
+    let idle_snake = SNAKE_DANGLE[snake_frame];
+
     let recent: Vec<Line> = if sorted_findings.is_empty() {
         vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  No findings yet. Press [S] to start a scan.",
+                "  No findings yet. Press [S] to hunt for cobras!",
                 Style::default().fg(palette.fg),
             )),
             Line::from(""),
-            Line::from(Span::styled(
-                "  The mongoose is watching your network...",
-                Style::default()
-                    .fg(palette.border)
-                    .add_modifier(Modifier::ITALIC),
-            )),
+            Line::from(vec![
+                Span::styled(
+                    "  The mongoose stalks through your network",
+                    Style::default()
+                        .fg(palette.border)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+                Span::styled(
+                    format!("  {idle_snake}"),
+                    Style::default()
+                        .fg(palette.low)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
         ]
     } else {
         sorted_findings

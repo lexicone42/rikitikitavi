@@ -86,6 +86,8 @@ pub struct App {
     pub findings_table_state: TableState,
     /// Stateful table state for device lists (dashboard / network map).
     pub devices_table_state: TableState,
+    /// Animation tick counter — incremented each event loop iteration (~100ms).
+    pub tick: u64,
 }
 
 impl App {
@@ -110,6 +112,7 @@ impl App {
             severity_filter: SeverityFilter::default(),
             findings_table_state,
             devices_table_state,
+            tick: 0,
         }
     }
 

@@ -322,6 +322,7 @@ async fn cmd_tui(
             app.status_message = Some("Re-scan complete".to_owned());
         }
 
+        app.tick = app.tick.wrapping_add(1);
         terminal.draw(|frame| rikitikitavi_tui::ui::draw(frame, &mut app))?;
 
         if let Some(event) =

@@ -44,8 +44,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let devices = app.devices();
 
+    // Animated threat snake skulking near the internet gateway
+    #[allow(clippy::cast_possible_truncation)]
+    let snake_pos = (app.tick / 5 % 10) as usize;
+    let snake_padding = if snake_pos < 5 {
+        " ".repeat(14 + snake_pos)
+    } else {
+        " ".repeat(14 + 10 - snake_pos)
+    };
+
     let mut lines: Vec<Line> = vec![
-        Line::from(""),
+        Line::from(vec![
+            Span::raw(snake_padding),
+            Span::styled(
+                "~§>",
+                Style::default()
+                    .fg(palette.critical)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::from(vec![
             Span::raw("                     "),
             Span::styled(
@@ -223,5 +240,5 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Lines before first device: border(1) + empty(1) + internet box(3) + pipe(1)
     //   + router box(3) + pipe(1) + backbone(1) = 11
     app.hit_regions.list_area = Some(map_area);
-    app.hit_regions.list_header_offset = 12;
+    app.hit_regions.list_header_offset = 13; // +1 for the threat snake line
 }
