@@ -173,12 +173,11 @@ impl Scanner for DeviceScanner {
         tracing::info!("running device fingerprinting scan");
         let mut findings = Vec::new();
 
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "device".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let entries: Vec<_> = ctx.target_network.as_ref().map_or_else(
             || arp_entries.clone(),

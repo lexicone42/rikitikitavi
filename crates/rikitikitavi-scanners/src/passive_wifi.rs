@@ -74,7 +74,7 @@ pub fn capture_frames(interface: &str, duration: Duration) -> anyhow::Result<Mon
                     accumulate_frame(&mut results, frame_type);
                 }
             }
-            Err(pcap::Error::TimeoutExpired) => {},
+            Err(pcap::Error::TimeoutExpired) => {}
             Err(e) => {
                 tracing::warn!("pcap read error: {e}");
                 break;
@@ -184,19 +184,15 @@ pub fn analyse_results<S: ::std::hash::BuildHasher>(
 }
 
 /// Detect open or WEP-encrypted networks.
-fn detect_weak_encryption(
-    beacons: &HashMap<MacAddress, BeaconFrame>,
-    findings: &mut Vec<Finding>,
-) {
+fn detect_weak_encryption(beacons: &HashMap<MacAddress, BeaconFrame>, findings: &mut Vec<Finding>) {
     for beacon in beacons.values() {
-        let ssid_display = beacon
-            .ssid
-            .as_deref()
-            .unwrap_or("<hidden>");
+        let ssid_display = beacon.ssid.as_deref().unwrap_or("<hidden>");
 
         match beacon.encryption {
             EncryptionType::Open => {
-                let signal = beacon.signal_dbm.map_or(String::new(), |s| format!(" ({s} dBm)"));
+                let signal = beacon
+                    .signal_dbm
+                    .map_or(String::new(), |s| format!(" ({s} dBm)"));
                 findings.push(
                     Finding::new(
                         SCANNER_ID,
@@ -253,10 +249,7 @@ fn detect_deauth_flood(
             findings.push(
                 Finding::new(
                     SCANNER_ID,
-                    &format!(
-                        "Deauth flood from {}",
-                        wifi_frames::format_mac(source),
-                    ),
+                    &format!("Deauth flood from {}", wifi_frames::format_mac(source),),
                     &format!(
                         "Detected {count} deauthentication/disassociation frames from {}. \
                          This may indicate a WiFi deauthentication attack attempting to \
@@ -281,13 +274,12 @@ fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
     findings: &mut Vec<Finding>,
 ) {
     for beacon in beacons.values() {
-        let ssid_matches = beacon
-            .ssid
-            .as_deref()
-            .is_some_and(|s| s == home_ssid);
+        let ssid_matches = beacon.ssid.as_deref().is_some_and(|s| s == home_ssid);
 
         if ssid_matches && !known_bssids.contains(&beacon.bssid) {
-            let signal = beacon.signal_dbm.map_or(String::new(), |s| format!(" ({s} dBm)"));
+            let signal = beacon
+                .signal_dbm
+                .map_or(String::new(), |s| format!(" ({s} dBm)"));
             findings.push(
                 Finding::new(
                     SCANNER_ID,
@@ -314,10 +306,7 @@ fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
 }
 
 /// Detect device tracking via probe requests and MAC address analysis.
-fn detect_device_tracking(
-    probes: &[ProbeRequestFrame],
-    findings: &mut Vec<Finding>,
-) {
+fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Finding>) {
     // Group probes by source MAC
     let mut by_mac: HashMap<MacAddress, Vec<&ProbeRequestFrame>> = HashMap::new();
     for pr in probes {
@@ -442,7 +431,10 @@ mod tests {
     fn test_detect_open_network() {
         let mut beacons = HashMap::new();
         let bssid = [0xAA; 6];
-        beacons.insert(bssid, make_beacon(bssid, Some("OpenCafe"), EncryptionType::Open));
+        beacons.insert(
+            bssid,
+            make_beacon(bssid, Some("OpenCafe"), EncryptionType::Open),
+        );
 
         let mut findings = Vec::new();
         detect_weak_encryption(&beacons, &mut findings);
@@ -456,7 +448,10 @@ mod tests {
     fn test_detect_wep_network() {
         let mut beacons = HashMap::new();
         let bssid = [0xBB; 6];
-        beacons.insert(bssid, make_beacon(bssid, Some("LegacyNet"), EncryptionType::Wep));
+        beacons.insert(
+            bssid,
+            make_beacon(bssid, Some("LegacyNet"), EncryptionType::Wep),
+        );
 
         let mut findings = Vec::new();
         detect_weak_encryption(&beacons, &mut findings);
@@ -470,7 +465,10 @@ mod tests {
     fn test_no_finding_for_wpa2() {
         let mut beacons = HashMap::new();
         let bssid = [0xCC; 6];
-        beacons.insert(bssid, make_beacon(bssid, Some("SecureNet"), EncryptionType::Wpa2));
+        beacons.insert(
+            bssid,
+            make_beacon(bssid, Some("SecureNet"), EncryptionType::Wpa2),
+        );
 
         let mut findings = Vec::new();
         detect_weak_encryption(&beacons, &mut findings);
@@ -546,7 +544,10 @@ mod tests {
     fn test_no_rogue_for_known_bssid() {
         let bssid = [0xAA; 6];
         let mut beacons = HashMap::new();
-        beacons.insert(bssid, make_beacon(bssid, Some("HomeNet"), EncryptionType::Wpa2));
+        beacons.insert(
+            bssid,
+            make_beacon(bssid, Some("HomeNet"), EncryptionType::Wpa2),
+        );
 
         let mut known = HashSet::new();
         known.insert(bssid);

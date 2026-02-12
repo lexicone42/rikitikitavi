@@ -48,9 +48,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),  // Header
             Constraint::Length(15), // Mascot + Risk overview
-            Constraint::Min(6),    // Recent findings
-            Constraint::Length(3), // Scan status
-            Constraint::Length(3), // Footer
+            Constraint::Min(6),     // Recent findings
+            Constraint::Length(3),  // Scan status
+            Constraint::Length(3),  // Footer
         ])
         .split(frame.area());
 
@@ -102,17 +102,14 @@ fn render_header(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
     ];
 
     // Show status message on the right if available
-    let status = app
-        .status_message
-        .as_deref()
-        .map_or_else(Vec::new, |msg| {
-            vec![Span::styled(
-                format!("  [{msg}]"),
-                Style::default()
-                    .fg(palette.low)
-                    .add_modifier(Modifier::ITALIC),
-            )]
-        });
+    let status = app.status_message.as_deref().map_or_else(Vec::new, |msg| {
+        vec![Span::styled(
+            format!("  [{msg}]"),
+            Style::default()
+                .fg(palette.low)
+                .add_modifier(Modifier::ITALIC),
+        )]
+    });
 
     let mut spans = title_spans;
     spans.extend(status);
@@ -143,10 +140,7 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
 
     // Animated chin line: face in accent color + dangling snake in green
     lines.push(Line::from(vec![
-        Span::styled(
-            SNAKE_FACE.to_owned(),
-            Style::default().fg(palette.accent),
-        ),
+        Span::styled(SNAKE_FACE.to_owned(), Style::default().fg(palette.accent)),
         Span::styled(
             SNAKE_DANGLE[snake_frame].to_owned(),
             Style::default()
@@ -214,7 +208,13 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
 
     let mut lines = vec![
         Line::from(""),
-        severity_bar_line("  CRITICAL ", critical, max_count, bar_width, palette.critical),
+        severity_bar_line(
+            "  CRITICAL ",
+            critical,
+            max_count,
+            bar_width,
+            palette.critical,
+        ),
         severity_bar_line("  HIGH     ", high, max_count, bar_width, palette.high),
         severity_bar_line("  MEDIUM   ", medium, max_count, bar_width, palette.medium),
         Line::from(Span::styled(
@@ -226,14 +226,12 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
 
     // Action required callout
     if critical + high > 0 {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  Action Required: {} findings", critical + high),
-                Style::default()
-                    .fg(palette.critical)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  Action Required: {} findings", critical + high),
+            Style::default()
+                .fg(palette.critical)
+                .add_modifier(Modifier::BOLD),
+        )]));
     }
 
     lines.push(Line::from(vec![
@@ -278,9 +276,7 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         Span::styled("  Risk Grade: ", Style::default().fg(palette.fg)),
         Span::styled(
             grade.0,
-            Style::default()
-                .fg(grade.1)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(grade.1).add_modifier(Modifier::BOLD),
         ),
     ]));
 
@@ -340,14 +336,17 @@ fn severity_bar_line(
         Span::styled(bar, Style::default().fg(color)),
         Span::styled(
             format!(" {count}"),
-            Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ])
 }
 
-fn map_risk_grade(critical: usize, high: usize, medium: usize, palette: &Palette) -> (&'static str, ratatui::style::Color) {
+fn map_risk_grade(
+    critical: usize,
+    high: usize,
+    medium: usize,
+    palette: &Palette,
+) -> (&'static str, ratatui::style::Color) {
     let (label, color_hint) = rikitikitavi_analysis::risk_grade(critical, high, medium);
     let color = match color_hint {
         "critical" => palette.critical,
@@ -416,10 +415,7 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" "),
-                    Span::styled(
-                        truncate_str(&f.title, 60),
-                        Style::default().fg(palette.fg),
-                    ),
+                    Span::styled(truncate_str(&f.title, 60), Style::default().fg(palette.fg)),
                     Span::styled(
                         format!("  ({})", f.scanner),
                         Style::default().fg(palette.border),

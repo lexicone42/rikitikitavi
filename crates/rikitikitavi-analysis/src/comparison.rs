@@ -65,17 +65,11 @@ impl ScanDiff {
 /// Devices are matched by MAC address (preferred) or IP.
 pub fn diff_scan_results(old: &ScanResults, new: &ScanResults) -> ScanDiff {
     // ── Finding diff ────────────────────────────────────────────────
-    let old_map: HashMap<FindingFingerprint, &Finding> = old
-        .findings
-        .iter()
-        .map(|f| (f.fingerprint(), f))
-        .collect();
+    let old_map: HashMap<FindingFingerprint, &Finding> =
+        old.findings.iter().map(|f| (f.fingerprint(), f)).collect();
 
-    let new_map: HashMap<FindingFingerprint, &Finding> = new
-        .findings
-        .iter()
-        .map(|f| (f.fingerprint(), f))
-        .collect();
+    let new_map: HashMap<FindingFingerprint, &Finding> =
+        new.findings.iter().map(|f| (f.fingerprint(), f)).collect();
 
     let mut new_findings = Vec::new();
     let mut unchanged_findings = Vec::new();
@@ -104,17 +98,11 @@ pub fn diff_scan_results(old: &ScanResults, new: &ScanResults) -> ScanDiff {
         .collect();
 
     // ── Device diff ─────────────────────────────────────────────────
-    let old_device_map: HashMap<_, &Device> = old
-        .devices
-        .iter()
-        .map(|d| (d.fingerprint(), d))
-        .collect();
+    let old_device_map: HashMap<_, &Device> =
+        old.devices.iter().map(|d| (d.fingerprint(), d)).collect();
 
-    let new_device_map: HashMap<_, &Device> = new
-        .devices
-        .iter()
-        .map(|d| (d.fingerprint(), d))
-        .collect();
+    let new_device_map: HashMap<_, &Device> =
+        new.devices.iter().map(|d| (d.fingerprint(), d)).collect();
 
     let new_devices: Vec<Device> = new_device_map
         .iter()
@@ -198,7 +186,13 @@ mod tests {
     fn all_new_findings() {
         let old = make_results(vec![], vec![]);
         let new = make_results(
-            vec![make_finding("ports", "SSH open", Severity::Medium, "10.0.0.1", 22)],
+            vec![make_finding(
+                "ports",
+                "SSH open",
+                Severity::Medium,
+                "10.0.0.1",
+                22,
+            )],
             vec![],
         );
         let diff = diff_scan_results(&old, &new);
@@ -210,7 +204,13 @@ mod tests {
     #[test]
     fn all_resolved() {
         let old = make_results(
-            vec![make_finding("ports", "SSH open", Severity::Medium, "10.0.0.1", 22)],
+            vec![make_finding(
+                "ports",
+                "SSH open",
+                Severity::Medium,
+                "10.0.0.1",
+                22,
+            )],
             vec![],
         );
         let new = make_results(vec![], vec![]);
@@ -223,11 +223,23 @@ mod tests {
     #[test]
     fn disjoint_scans() {
         let old = make_results(
-            vec![make_finding("ports", "SSH open", Severity::Medium, "10.0.0.1", 22)],
+            vec![make_finding(
+                "ports",
+                "SSH open",
+                Severity::Medium,
+                "10.0.0.1",
+                22,
+            )],
             vec![],
         );
         let new = make_results(
-            vec![make_finding("ssl", "Expired cert", Severity::High, "10.0.0.1", 443)],
+            vec![make_finding(
+                "ssl",
+                "Expired cert",
+                Severity::High,
+                "10.0.0.1",
+                443,
+            )],
             vec![],
         );
         let diff = diff_scan_results(&old, &new);
@@ -255,11 +267,23 @@ mod tests {
     #[test]
     fn severity_change_detection() {
         let old = make_results(
-            vec![make_finding("ports", "SSH open", Severity::Low, "10.0.0.1", 22)],
+            vec![make_finding(
+                "ports",
+                "SSH open",
+                Severity::Low,
+                "10.0.0.1",
+                22,
+            )],
             vec![],
         );
         let new = make_results(
-            vec![make_finding("ports", "SSH open", Severity::High, "10.0.0.1", 22)],
+            vec![make_finding(
+                "ports",
+                "SSH open",
+                Severity::High,
+                "10.0.0.1",
+                22,
+            )],
             vec![],
         );
         let diff = diff_scan_results(&old, &new);
@@ -297,7 +321,10 @@ mod tests {
             new_devices: vec![Device::new(ip("10.0.0.2"))],
             ..Default::default()
         };
-        assert_eq!(diff.summary_line(), "+1 new, -0 resolved, 0 changed, +1 devices, -0 devices");
+        assert_eq!(
+            diff.summary_line(),
+            "+1 new, -0 resolved, 0 changed, +1 devices, -0 devices"
+        );
     }
 
     // ── Property-based tests ────────────────────────────────────────

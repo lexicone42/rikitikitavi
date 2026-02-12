@@ -27,8 +27,8 @@ struct RouteEntry {
 
 /// Parse a little-endian hex IP from `/proc/net/route` into an `Ipv4Addr`.
 fn parse_hex_ip(hex: &str) -> Result<Ipv4Addr> {
-    let val = u32::from_str_radix(hex.trim(), 16)
-        .with_context(|| format!("invalid hex IP: {hex}"))?;
+    let val =
+        u32::from_str_radix(hex.trim(), 16).with_context(|| format!("invalid hex IP: {hex}"))?;
     // /proc/net/route stores IPs in native (little-endian on x86) byte order
     Ok(Ipv4Addr::from(val.to_be()))
 }
@@ -268,7 +268,10 @@ fn detect_gateway_platform() -> Result<Option<IpAddr>> {
             Ok(detect_gateway_from_macos_route(&contents))
         }
         Ok(out) => {
-            tracing::warn!("route command failed: {}", String::from_utf8_lossy(&out.stderr));
+            tracing::warn!(
+                "route command failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             Ok(None)
         }
         Err(e) => {
@@ -312,9 +315,7 @@ fn detect_network_platform() -> Result<Option<IpNetwork>> {
     };
 
     // Then get IP/netmask from ifconfig for that interface
-    let output = std::process::Command::new("ifconfig")
-        .arg(&iface)
-        .output();
+    let output = std::process::Command::new("ifconfig").arg(&iface).output();
     match output {
         Ok(out) if out.status.success() => {
             let contents = String::from_utf8_lossy(&out.stdout);
@@ -404,8 +405,8 @@ fn list_interfaces_platform() -> Result<Vec<NetworkInterface>> {
             .map(|s| s.trim().to_owned())
             .filter(|m| m != "00:00:00:00:00:00");
 
-        let is_up = read_sysfs_file(&entry.path().join("operstate"))
-            .is_some_and(|s| s.trim() == "up");
+        let is_up =
+            read_sysfs_file(&entry.path().join("operstate")).is_some_and(|s| s.trim() == "up");
 
         // Type 772 = loopback in Linux
         let if_type = read_sysfs_file(&entry.path().join("type"))
@@ -428,9 +429,7 @@ fn list_interfaces_platform() -> Result<Vec<NetworkInterface>> {
 
 #[cfg(target_os = "macos")]
 fn list_interfaces_platform() -> Result<Vec<NetworkInterface>> {
-    let output = std::process::Command::new("ifconfig")
-        .arg("-a")
-        .output();
+    let output = std::process::Command::new("ifconfig").arg("-a").output();
     match output {
         Ok(out) if out.status.success() => {
             let contents = String::from_utf8_lossy(&out.stdout);
@@ -473,7 +472,10 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
 
     #[test]
     fn test_parse_hex_ip() {
-        assert_eq!(parse_hex_ip("0101A8C0").unwrap(), Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(
+            parse_hex_ip("0101A8C0").unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1)
+        );
         assert_eq!(parse_hex_ip("00000000").unwrap(), Ipv4Addr::UNSPECIFIED);
     }
 

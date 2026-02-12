@@ -17,13 +17,9 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
     );
 
     for f in &sorted_findings {
-        let ip = f
-            .affected_ip
-            .map_or_else(String::new, |ip| ip.to_string());
+        let ip = f.affected_ip.map_or_else(String::new, |ip| ip.to_string());
         let hostname = f.affected_hostname.as_deref().unwrap_or("");
-        let port = f
-            .affected_port
-            .map_or_else(String::new, |p| p.to_string());
+        let port = f.affected_port.map_or_else(String::new, |p| p.to_string());
         let service = f.affected_service.as_deref().unwrap_or("");
         let cwe = f.cwe_id.as_deref().unwrap_or("");
         let cve_ids = f.cve_ids.join(";");
@@ -129,9 +125,12 @@ mod tests {
 
     #[test]
     fn test_csv_includes_description() {
-        let findings = vec![
-            Finding::new("test", "Title", "A detailed description", Severity::High),
-        ];
+        let findings = vec![Finding::new(
+            "test",
+            "Title",
+            "A detailed description",
+            Severity::High,
+        )];
         let results = make_results(findings);
         let tmp = std::env::temp_dir().join("rikitikitavi_csv_test_desc.csv");
         export_csv(&results, &tmp).unwrap();
@@ -144,12 +143,11 @@ mod tests {
     #[test]
     fn test_csv_includes_remediation() {
         let findings = vec![
-            Finding::new("test", "Vuln", "desc", Severity::High)
-                .with_remediation(Remediation {
-                    description: "Fix this vulnerability".to_owned(),
-                    steps: vec!["Step 1".to_owned()],
-                    effort: Some("5 minutes".to_owned()),
-                }),
+            Finding::new("test", "Vuln", "desc", Severity::High).with_remediation(Remediation {
+                description: "Fix this vulnerability".to_owned(),
+                steps: vec!["Step 1".to_owned()],
+                effort: Some("5 minutes".to_owned()),
+            }),
         ];
         let results = make_results(findings);
         let tmp = std::env::temp_dir().join("rikitikitavi_csv_test_remed.csv");

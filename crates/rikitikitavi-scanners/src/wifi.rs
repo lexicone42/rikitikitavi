@@ -14,8 +14,10 @@ const fn encryption_severity(encryption: WifiEncryption) -> Severity {
     match encryption {
         WifiEncryption::Open | WifiEncryption::Wep => Severity::Critical,
         WifiEncryption::WpaPsk => Severity::High,
-        WifiEncryption::Wpa2Psk | WifiEncryption::Wpa2Enterprise
-        | WifiEncryption::Wpa3Sae | WifiEncryption::Wpa3Enterprise => Severity::Info,
+        WifiEncryption::Wpa2Psk
+        | WifiEncryption::Wpa2Enterprise
+        | WifiEncryption::Wpa3Sae
+        | WifiEncryption::Wpa3Enterprise => Severity::Info,
         WifiEncryption::Unknown => Severity::Low,
     }
 }
@@ -58,12 +60,12 @@ impl Scanner for WifiScanner {
         tracing::info!("running WiFi security scan");
         let mut findings = Vec::new();
 
-        let networks = rikitikitavi_network::scan_wifi_networks().await.map_err(|e| {
-            ScanError::ScannerFailed {
+        let networks = rikitikitavi_network::scan_wifi_networks()
+            .await
+            .map_err(|e| ScanError::ScannerFailed {
                 scanner: "wifi".to_owned(),
                 message: format!("WiFi scan failed: {e}"),
-            }
-        })?;
+            })?;
 
         if networks.is_empty() {
             findings.push(Finding::new(
@@ -100,13 +102,18 @@ impl Scanner for WifiScanner {
                                 "Network \"{}\" (BSSID: {}) uses no encryption. All traffic \
                                  is transmitted in cleartext and can be intercepted by anyone \
                                  in range. Signal: {} dBm, Channel: {}",
-                                network.ssid, network.bssid,
-                                network.signal_strength_dbm, network.channel
+                                network.ssid,
+                                network.bssid,
+                                network.signal_strength_dbm,
+                                network.channel
                             ),
                             severity,
                         )
                         .with_cwe("CWE-319")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.open-network", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.wifi.open-network",
+                            &[],
+                        )),
                     );
                 }
                 WifiEncryption::Wep => {
@@ -123,7 +130,10 @@ impl Scanner for WifiScanner {
                             severity,
                         )
                         .with_cwe("CWE-327")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wep-encryption", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.wifi.wep-encryption",
+                            &[],
+                        )),
                     );
                 }
                 WifiEncryption::WpaPsk => {
@@ -139,17 +149,17 @@ impl Scanner for WifiScanner {
                             severity,
                         )
                         .with_cwe("CWE-327")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wpa1-weak", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.wifi.wpa1-weak",
+                            &[],
+                        )),
                     );
                 }
                 _ => {
                     // WPA2/WPA3 are fine — just report as info
                     findings.push(Finding::new(
                         "wifi",
-                        &format!(
-                            "WiFi \"{}\": {enc_name}",
-                            network.ssid
-                        ),
+                        &format!("WiFi \"{}\": {enc_name}", network.ssid),
                         &format!(
                             "Network \"{}\" uses {enc_name}. \
                              Signal: {} dBm, Channel: {}",
@@ -174,7 +184,10 @@ impl Scanner for WifiScanner {
                         Severity::Medium,
                     )
                     .with_cwe("CWE-330")
-                    .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.wps-enabled", &[])),
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.wifi.wps-enabled",
+                        &[],
+                    )),
                 );
             }
 
@@ -209,7 +222,10 @@ mod tests {
 
     #[test]
     fn test_encryption_severity_critical() {
-        assert_eq!(encryption_severity(WifiEncryption::Open), Severity::Critical);
+        assert_eq!(
+            encryption_severity(WifiEncryption::Open),
+            Severity::Critical
+        );
         assert_eq!(encryption_severity(WifiEncryption::Wep), Severity::Critical);
     }
 
@@ -226,7 +242,10 @@ mod tests {
 
     #[test]
     fn test_encryption_name() {
-        assert_eq!(encryption_name(WifiEncryption::Open), "Open (no encryption)");
+        assert_eq!(
+            encryption_name(WifiEncryption::Open),
+            "Open (no encryption)"
+        );
         assert_eq!(encryption_name(WifiEncryption::Wpa2Psk), "WPA2-PSK (AES)");
         assert_eq!(encryption_name(WifiEncryption::Wpa3Sae), "WPA3-SAE");
     }

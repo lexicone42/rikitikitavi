@@ -114,8 +114,8 @@ impl ScanIntensity {
 
 /// Top 20 most security-relevant ports for quick (Passive) scans.
 pub const TOP_20_PORTS: [u16; 20] = [
-    22, 23, 53, 80, 443, 445, 993, 995, 1883, 3306,
-    3389, 5353, 5432, 5900, 6379, 8080, 8443, 8883, 9200, 27017,
+    22, 23, 53, 80, 443, 445, 993, 995, 1883, 3306, 3389, 5353, 5432, 5900, 6379, 8080, 8443, 8883,
+    9200, 27017,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

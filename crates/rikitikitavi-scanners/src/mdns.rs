@@ -51,11 +51,7 @@ pub fn parse_upnp_device_xml(xml: &str) -> UpnpDeviceInfo {
 }
 
 /// Classify a `UPnP` device description into findings.
-pub fn classify_upnp_device(
-    ip: IpAddr,
-    location: &str,
-    info: &UpnpDeviceInfo,
-) -> Vec<Finding> {
+pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let name = info.friendly_name.as_deref().unwrap_or("Unknown device");
@@ -64,7 +60,9 @@ pub fn classify_upnp_device(
 
     // Detailed device info finding
     let mut desc_parts = vec![format!("UPnP device at {ip} ({location})")];
-    desc_parts.push(format!("Name: {name}, Manufacturer: {manufacturer}, Model: {model}"));
+    desc_parts.push(format!(
+        "Name: {name}, Manufacturer: {manufacturer}, Model: {model}"
+    ));
 
     if let Some(model_num) = &info.model_number {
         desc_parts.push(format!("Model #: {model_num}"));
@@ -122,10 +120,7 @@ async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
     let info = parse_upnp_device_xml(&body);
 
     // Only return if we actually got useful data
-    if info.friendly_name.is_some()
-        || info.manufacturer.is_some()
-        || info.model_name.is_some()
-    {
+    if info.friendly_name.is_some() || info.manufacturer.is_some() || info.model_name.is_some() {
         Some(info)
     } else {
         None
@@ -312,10 +307,8 @@ async fn discover_mdns() -> Vec<(IpAddr, Vec<String>)> {
         0x00, 0x00, // Authority: 0
         0x00, 0x00, // Additional: 0
         // _services._dns-sd._udp.local
-        0x09, b'_', b's', b'e', b'r', b'v', b'i', b'c', b'e', b's',
-        0x07, b'_', b'd', b'n', b's', b'-', b's', b'd',
-        0x04, b'_', b'u', b'd', b'p',
-        0x05, b'l', b'o', b'c', b'a', b'l',
+        0x09, b'_', b's', b'e', b'r', b'v', b'i', b'c', b'e', b's', 0x07, b'_', b'd', b'n', b's',
+        b'-', b's', b'd', 0x04, b'_', b'u', b'd', b'p', 0x05, b'l', b'o', b'c', b'a', b'l',
         0x00, // Root label
         0x00, 0x0C, // Type: PTR
         0x00, 0x01, // Class: IN
@@ -368,9 +361,11 @@ impl Scanner for MdnsScanner {
 
             // Fetch UPnP device description if a LOCATION URL is available
             // (skipped in Passive mode — HTTP fetches slow down quick scans)
-            if ctx.config.intensity.at_least(
-                rikitikitavi_models::config::ScanIntensity::Active,
-            ) {
+            if ctx
+                .config
+                .intensity
+                .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+            {
                 if let Some(location) = &service.location {
                     if let Some(device_info) = fetch_upnp_description(location).await {
                         tracing::debug!(
@@ -544,10 +539,7 @@ mod tests {
         assert_eq!(info.model_name.as_deref(), Some("RT-AC68U"));
         assert_eq!(info.model_number.as_deref(), Some("3.0.0.4"));
         assert_eq!(info.serial_number.as_deref(), Some("ABC123456"));
-        assert_eq!(
-            info.firmware_version.as_deref(),
-            Some("3.0.0.4.386_51685")
-        );
+        assert_eq!(info.firmware_version.as_deref(), Some("3.0.0.4.386_51685"));
     }
 
     #[test]

@@ -17,8 +17,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if app.scanning {
         // Animate the spinner based on progress
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let spinner_idx =
-            ((app.scan_progress * 20.0).max(0.0) as usize) % SNAKE_SPINNER.len();
+        let spinner_idx = ((app.scan_progress * 20.0).max(0.0) as usize) % SNAKE_SPINNER.len();
         let spinner = SNAKE_SPINNER[spinner_idx];
 
         let gauge = Gauge::default()
@@ -37,14 +36,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .gauge_style(Style::default().fg(palette.accent).bg(palette.bg))
             .ratio(app.scan_progress.clamp(0.0, 1.0))
             .label(Span::styled(
-                format!(
-                    "{:.0}% ─ {}",
-                    app.scan_progress * 100.0,
-                    app.scan_status
-                ),
-                Style::default()
-                    .fg(palette.fg)
-                    .add_modifier(Modifier::BOLD),
+                format!("{:.0}% ─ {}", app.scan_progress * 100.0, app.scan_status),
+                Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
             ));
         frame.render_widget(gauge, area);
     } else {

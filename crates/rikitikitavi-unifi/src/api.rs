@@ -227,10 +227,7 @@ impl UniFiClient {
     pub async fn get_ids_events(&self, limit: u32) -> Result<Vec<IdsEvent>> {
         tracing::debug!(site = %self.site, limit, "fetching IDS events");
         // The IDS endpoint uses a POST with query parameters
-        let url = format!(
-            "{}/api/s/{}/stat/ips/event",
-            self.base_url, self.site
-        );
+        let url = format!("{}/api/s/{}/stat/ips/event", self.base_url, self.site);
         let body = serde_json::json!({
             "_limit": limit,
             "_sort": "-time",
@@ -244,10 +241,7 @@ impl UniFiClient {
             req = req.header("x-csrf-token", csrf.as_str());
         }
 
-        let resp = req
-            .send()
-            .await
-            .context("failed to fetch IDS events")?;
+        let resp = req.send().await.context("failed to fetch IDS events")?;
 
         if !resp.status().is_success() {
             bail!("IDS events request failed: {}", resp.status());
@@ -255,10 +249,7 @@ impl UniFiClient {
 
         let envelope: ApiResponse<IdsEvent> = resp.json().await?;
         if envelope.meta.rc != "ok" {
-            bail!(
-                "IDS events API returned rc={}",
-                envelope.meta.rc
-            );
+            bail!("IDS events API returned rc={}", envelope.meta.rc);
         }
 
         Ok(envelope.data)

@@ -66,8 +66,12 @@ fn try_system_profiler_scan() -> Option<Vec<WifiNetwork>> {
 /// Try scanning with the deprecated `airport -s` utility.
 #[cfg(target_os = "macos")]
 fn try_airport_scan() -> Option<Vec<WifiNetwork>> {
-    let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-    let output = std::process::Command::new(airport).arg("-s").output().ok()?;
+    let airport =
+        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    let output = std::process::Command::new(airport)
+        .arg("-s")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -139,7 +143,8 @@ fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
     }
 
     // Fallback: deprecated airport -I
-    let airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    let airport =
+        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
     let output = std::process::Command::new(airport).arg("-I").output();
     match output {
         Ok(out) if out.status.success() => {
@@ -210,7 +215,9 @@ fn parse_system_profiler_wifi(contents: &str) -> Vec<WifiNetwork> {
 #[cfg(any(target_os = "macos", test))]
 fn parse_system_profiler_current(contents: &str) -> Option<WifiNetwork> {
     let section = extract_section(contents, "Current Network Information:")?;
-    parse_profiler_network_entries(&section, false).into_iter().next()
+    parse_profiler_network_entries(&section, false)
+        .into_iter()
+        .next()
 }
 
 /// Extract the text block for a named section from `system_profiler` output.
@@ -286,11 +293,7 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
             let encryption = classify_profiler_security(security);
             let hidden = ssid.is_empty();
             nets.push(WifiNetwork {
-                ssid: if hidden {
-                    "<hidden>".to_owned()
-                } else {
-                    ssid
-                },
+                ssid: if hidden { "<hidden>".to_owned() } else { ssid },
                 bssid: std::mem::take(bssid),
                 channel: *channel,
                 frequency_mhz: channel_to_frequency(*channel),
@@ -468,11 +471,7 @@ fn parse_airport_output(contents: &str) -> Vec<WifiNetwork> {
         let hidden = ssid.is_empty();
 
         networks.push(WifiNetwork {
-            ssid: if hidden {
-                "<hidden>".to_owned()
-            } else {
-                ssid
-            },
+            ssid: if hidden { "<hidden>".to_owned() } else { ssid },
             bssid,
             channel,
             frequency_mhz: channel_to_frequency(channel),
@@ -603,9 +602,10 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
         // Frequency: "Frequency:2.437 GHz"
         if let Some(idx) = line.find("Frequency:") {
             let rest = &line[idx + 10..];
-            if let Some(ghz) = rest.strip_suffix(" GHz").or_else(|| {
-                rest.find(" GHz").map(|i| &rest[..i])
-            }) {
+            if let Some(ghz) = rest
+                .strip_suffix(" GHz")
+                .or_else(|| rest.find(" GHz").map(|i| &rest[..i]))
+            {
                 if let Ok(freq_ghz) = ghz.trim().parse::<f64>() {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     {

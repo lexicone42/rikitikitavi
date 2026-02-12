@@ -66,11 +66,7 @@ async fn grab_banner(ip: IpAddr, port: u16) -> Option<Vec<u8>> {
 /// Detect hairpin NAT by comparing banners from the public IP and an internal
 /// device on the same port. If any internal device returns an identical banner,
 /// the public IP connection is likely hairpin NAT, not true external exposure.
-async fn is_hairpin_nat(
-    public_ip: IpAddr,
-    port: u16,
-    internal_devices: &[IpAddr],
-) -> bool {
+async fn is_hairpin_nat(public_ip: IpAddr, port: u16, internal_devices: &[IpAddr]) -> bool {
     // Grab banner from public IP
     let public_banner = match grab_banner(public_ip, port).await {
         Some(b) if !b.is_empty() => b,
@@ -215,7 +211,8 @@ impl Scanner for ExposureScanner {
                     .map(|(ip, _)| *ip)
                     .collect();
 
-                if behind_nat && !candidates.is_empty()
+                if behind_nat
+                    && !candidates.is_empty()
                     && is_hairpin_nat(public_ip, port, &candidates).await
                 {
                     // Hairpin NAT detected — downgrade to Info

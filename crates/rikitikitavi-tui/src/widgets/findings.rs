@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),   // Table
+            Constraint::Min(10),    // Table
             Constraint::Length(15), // Detail pane with remediation steps
             Constraint::Length(3),  // Footer
         ])
@@ -55,15 +55,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     rikitikitavi_core::Severity::Info => " INFO ",
                 };
 
-                let mut cells = vec![
-                    Line::from(Span::styled(
-                        sev_badge,
-                        Style::default()
-                            .fg(palette.bg)
-                            .bg(sev_color)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                ];
+                let mut cells = vec![Line::from(Span::styled(
+                    sev_badge,
+                    Style::default()
+                        .fg(palette.bg)
+                        .bg(sev_color)
+                        .add_modifier(Modifier::BOLD),
+                ))];
 
                 // DIFF badge column (only when comparison data is available)
                 if has_diff {
@@ -82,10 +80,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                                 .bg(palette.medium)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Some(DiffStatus::Unchanged) | None => Span::styled(
-                            "     ",
-                            Style::default(),
-                        ),
+                        Some(DiffStatus::Unchanged) | None => {
+                            Span::styled("     ", Style::default())
+                        }
                     };
                     cells.push(Line::from(diff_cell));
                 }
@@ -137,9 +134,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         ),
                         Span::styled(
                             format!("  {}", f.title),
-                            Style::default()
-                                .fg(palette.fg)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(""),
@@ -152,10 +147,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 // Metadata line: CWE + Device + Port
                 let mut meta_spans = Vec::new();
                 if let Some(ip) = f.affected_ip {
-                    meta_spans.push(Span::styled("  Device: ", Style::default().fg(palette.border)));
-                    meta_spans.push(Span::styled(ip.to_string(), Style::default().fg(palette.fg)));
+                    meta_spans.push(Span::styled(
+                        "  Device: ",
+                        Style::default().fg(palette.border),
+                    ));
+                    meta_spans.push(Span::styled(
+                        ip.to_string(),
+                        Style::default().fg(palette.fg),
+                    ));
                     if let Some(port) = f.affected_port {
-                        meta_spans.push(Span::styled(format!(":{port}"), Style::default().fg(palette.fg)));
+                        meta_spans.push(Span::styled(
+                            format!(":{port}"),
+                            Style::default().fg(palette.fg),
+                        ));
                     }
                 }
                 if let Some(cwe) = &f.cwe_id {
@@ -223,10 +227,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                                     .fg(palette.accent)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(
-                                step.clone(),
-                                Style::default().fg(palette.fg),
-                            ),
+                            Span::styled(step.clone(), Style::default().fg(palette.fg)),
                         ]));
                     }
                     if let Some(effort) = &remediation.effort {
@@ -245,9 +246,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     };
     // `filtered` is now dropped — safe to mutably borrow app.findings_table_state
 
-    let mut header_cells = vec![
-        Line::from(Span::styled("SEV", palette.header_style)),
-    ];
+    let mut header_cells = vec![Line::from(Span::styled("SEV", palette.header_style))];
     let mut widths: Vec<Constraint> = vec![Constraint::Length(8)];
 
     if has_diff {
@@ -260,25 +259,29 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Line::from(Span::styled("DEVICE", palette.header_style)),
         Line::from(Span::styled("MODULE", palette.header_style)),
     ]);
-    widths.extend([Constraint::Min(30), Constraint::Length(16), Constraint::Length(14)]);
+    widths.extend([
+        Constraint::Min(30),
+        Constraint::Length(16),
+        Constraint::Length(14),
+    ]);
 
     let header_row = Row::new(header_cells).style(palette.header_style);
 
     let table = Table::new(rows, widths)
-    .header(header_row)
-    .row_highlight_style(palette.selected_style)
-    .block(
-        Block::default()
-            .title(Span::styled(
-                scroll_info,
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.border))
-            .border_type(ratatui::widgets::BorderType::Rounded),
-    );
+        .header(header_row)
+        .row_highlight_style(palette.selected_style)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    scroll_info,
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border))
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        );
     let table_area = chunks[0];
     // Sync TableState selection before render so the widget auto-scrolls
     app.findings_table_state

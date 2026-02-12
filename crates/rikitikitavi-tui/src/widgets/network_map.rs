@@ -13,11 +13,8 @@ const fn device_icon(device: &rikitikitavi_models::Device) -> &'static str {
         rikitikitavi_models::DeviceType::Router => "🌐",
         rikitikitavi_models::DeviceType::Switch => "🔀",
         rikitikitavi_models::DeviceType::AccessPoint => "📡",
-        rikitikitavi_models::DeviceType::Desktop | rikitikitavi_models::DeviceType::Laptop => {
-            "💻"
-        }
-        rikitikitavi_models::DeviceType::Tablet
-        | rikitikitavi_models::DeviceType::Phone => "📱",
+        rikitikitavi_models::DeviceType::Desktop | rikitikitavi_models::DeviceType::Laptop => "💻",
+        rikitikitavi_models::DeviceType::Tablet | rikitikitavi_models::DeviceType::Phone => "📱",
         rikitikitavi_models::DeviceType::Server => "🖥",
         rikitikitavi_models::DeviceType::Nas => "💾",
         rikitikitavi_models::DeviceType::Printer => "🖨",
@@ -37,7 +34,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),  // Map
+            Constraint::Min(10),   // Map
             Constraint::Length(3), // Footer
         ])
         .split(frame.area());
@@ -170,14 +167,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             lines.push(Line::from(vec![
                 Span::raw("           "),
                 Span::styled(connector, Style::default().fg(palette.border)),
-                Span::styled(
-                    format!(" {icon} {label}"),
-                    style,
-                ),
-                Span::styled(
-                    ports_info,
-                    Style::default().fg(palette.border),
-                ),
+                Span::styled(format!(" {icon} {label}"), style),
+                Span::styled(ports_info, Style::default().fg(palette.border)),
             ]));
         }
 

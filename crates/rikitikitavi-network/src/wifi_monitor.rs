@@ -12,10 +12,7 @@ use std::process::Command;
 #[derive(Debug)]
 pub enum MonitorCapability {
     /// Monitor mode is supported on this interface.
-    Supported {
-        interface: String,
-        phy: String,
-    },
+    Supported { interface: String, phy: String },
     /// Monitor mode is not available; reason explains why.
     NotSupported(String),
 }
@@ -88,8 +85,7 @@ pub fn setup_monitor(interface: &str) -> Result<MonitorSession> {
 #[cfg(target_os = "linux")]
 fn find_wifi_interface_platform() -> Result<String> {
     // Check /sys/class/net/*/wireless — any interface with this dir is wireless
-    let entries = std::fs::read_dir("/sys/class/net")
-        .context("failed to read /sys/class/net")?;
+    let entries = std::fs::read_dir("/sys/class/net").context("failed to read /sys/class/net")?;
 
     for entry in entries {
         let entry = entry?;
@@ -115,9 +111,7 @@ fn detect_capability_platform() -> MonitorCapability {
 
     // Get the phy for this interface
     let Some(phy) = get_phy_for_interface(&interface) else {
-        return MonitorCapability::NotSupported(format!(
-            "could not determine phy for {interface}"
-        ));
+        return MonitorCapability::NotSupported(format!("could not determine phy for {interface}"));
     };
 
     // Check if monitor mode is supported
@@ -145,7 +139,15 @@ fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
     // Create virtual monitor interface
     run_command(
         "iw",
-        &["dev", interface, "interface", "add", mon_name, "type", "monitor"],
+        &[
+            "dev",
+            interface,
+            "interface",
+            "add",
+            mon_name,
+            "type",
+            "monitor",
+        ],
     )
     .with_context(|| format!("failed to create monitor interface from {interface}"))?;
 
@@ -153,7 +155,11 @@ fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
     run_command("ip", &["link", "set", mon_name, "up"])
         .with_context(|| format!("failed to bring up {mon_name}"))?;
 
-    tracing::info!(monitor = mon_name, original = interface, "monitor mode active");
+    tracing::info!(
+        monitor = mon_name,
+        original = interface,
+        "monitor mode active"
+    );
 
     Ok(MonitorSession {
         monitor_interface: mon_name.to_owned(),
@@ -248,7 +254,9 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
 fn get_phy_for_interface(interface: &str) -> Option<String> {
     // Try /sys/class/net/<iface>/phy80211/name
     let path = format!("/sys/class/net/{interface}/phy80211/name");
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_owned())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_owned())
 }
 
 // ── Parsing functions (take &str for testability) ───────────────────────
@@ -336,10 +344,7 @@ phy#0
 \t\tchannel 6 (2437 MHz), width: 20 MHz, center1: 2437 MHz
 \t\ttxpower 20.00 dBm
 ";
-        assert_eq!(
-            parse_iw_dev_interface(output),
-            Some("wlan0".to_owned())
-        );
+        assert_eq!(parse_iw_dev_interface(output), Some("wlan0".to_owned()));
     }
 
     #[test]

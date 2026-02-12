@@ -215,9 +215,7 @@ mod tests {
     }
 
     fn arb_ip() -> impl Strategy<Value = IpAddr> {
-        prop_oneof![
-            (0_u32..=u32::MAX).prop_map(|n| IpAddr::V4(std::net::Ipv4Addr::from(n))),
-        ]
+        prop_oneof![(0_u32..=u32::MAX).prop_map(|n| IpAddr::V4(std::net::Ipv4Addr::from(n))),]
     }
 
     fn arb_finding() -> impl Strategy<Value = Finding> {
@@ -231,24 +229,22 @@ mod tests {
             proptest::option::of("[A-Z]{3,4}-[0-9]{1,5}"),
             proptest::option::of("[a-zA-Z0-9 ._:-]{1,100}"),
         )
-            .prop_map(
-                |(scanner, title, desc, sev, ip, port, cwe, evidence)| {
-                    let mut f = Finding::new(&scanner, &title, &desc, sev);
-                    if let Some(ip) = ip {
-                        f = f.with_ip(ip);
-                    }
-                    if let Some(port) = port {
-                        f = f.with_port(port);
-                    }
-                    if let Some(cwe) = cwe {
-                        f = f.with_cwe(cwe);
-                    }
-                    if let Some(evidence) = evidence {
-                        f = f.with_evidence(evidence);
-                    }
-                    f
-                },
-            )
+            .prop_map(|(scanner, title, desc, sev, ip, port, cwe, evidence)| {
+                let mut f = Finding::new(&scanner, &title, &desc, sev);
+                if let Some(ip) = ip {
+                    f = f.with_ip(ip);
+                }
+                if let Some(port) = port {
+                    f = f.with_port(port);
+                }
+                if let Some(cwe) = cwe {
+                    f = f.with_cwe(cwe);
+                }
+                if let Some(evidence) = evidence {
+                    f = f.with_evidence(evidence);
+                }
+                f
+            })
     }
 
     #[test]

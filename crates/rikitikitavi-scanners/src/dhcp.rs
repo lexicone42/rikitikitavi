@@ -124,7 +124,10 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
         .with_port(*port)
         .with_service("DHCP")
         .with_cwe("CWE-923")
-        .with_opt_remediation(crate::remediation::get("rikitikitavi.dhcp.rogue-server", &[])),
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.dhcp.rogue-server",
+            &[],
+        )),
 
         DhcpAnomaly::NoGateway { interface } => Finding::new(
             "dhcp",
@@ -195,12 +198,11 @@ impl Scanner for DhcpScanner {
         // ── Check for rogue DHCP servers via discovered devices ─────
         if ctx.discovered_devices.is_empty() {
             // Fallback: probe DHCP ports on all ARP cache hosts
-            let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-                ScanError::ScannerFailed {
+            let arp_entries =
+                rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "dhcp".to_owned(),
                     message: format!("failed to read ARP cache: {e}"),
-                }
-            })?;
+                })?;
 
             for entry in &arp_entries {
                 // Skip gateway
@@ -248,7 +250,10 @@ impl Scanner for DhcpScanner {
             findings.push(anomaly_to_finding(anomaly));
         }
 
-        tracing::info!(findings_count = findings.len(), "DHCP security scan complete");
+        tracing::info!(
+            findings_count = findings.len(),
+            "DHCP security scan complete"
+        );
         Ok(findings)
     }
 
@@ -362,7 +367,10 @@ mod tests {
     fn test_loopback_ignored() {
         let interfaces = vec![iface("lo", Some("127.0.0.1"), false, true)];
         let anomalies = analyze_interface_config(&interfaces, None);
-        assert!(anomalies.is_empty(), "loopback should not generate anomalies");
+        assert!(
+            anomalies.is_empty(),
+            "loopback should not generate anomalies"
+        );
     }
 
     // ── Finding generation tests ────────────────────────────────────

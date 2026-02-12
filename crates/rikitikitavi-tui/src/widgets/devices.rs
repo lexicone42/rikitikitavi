@@ -15,7 +15,7 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),  // Detail
+            Constraint::Min(10),   // Detail
             Constraint::Length(3), // Footer
         ])
         .split(frame.area());
@@ -53,20 +53,13 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
             };
 
             let ip_str = device.ip.to_string();
-            let display_name = device
-                .hostname
-                .as_deref()
-                .unwrap_or(&ip_str)
-                .to_owned();
+            let display_name = device.hostname.as_deref().unwrap_or(&ip_str).to_owned();
             let type_str = format!("{:?}", device.device_type);
 
             let mut lines = vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(
-                        format!("  {icon}  "),
-                        Style::default().fg(palette.accent),
-                    ),
+                    Span::styled(format!("  {icon}  "), Style::default().fg(palette.accent)),
                     Span::styled(
                         display_name,
                         Style::default()
@@ -106,9 +99,7 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
             } else {
                 lines.push(Line::from(Span::styled(
                     format!("  Open Ports ({}):", device.open_ports.len()),
-                    Style::default()
-                        .fg(palette.fg)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
                 )));
                 for op in &device.open_ports {
                     let service = op
@@ -123,10 +114,7 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                                 .fg(palette.accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  {service}"),
-                            Style::default().fg(palette.border),
-                        ),
+                        Span::styled(format!("  {service}"), Style::default().fg(palette.border)),
                     ]));
                 }
             }
@@ -177,10 +165,7 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
 
 fn detail_line(label: &str, value: &str, palette: &Palette) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label}:  "),
-            Style::default().fg(palette.border),
-        ),
+        Span::styled(format!("{label}:  "), Style::default().fg(palette.border)),
         Span::styled(value.to_owned(), Style::default().fg(palette.fg)),
     ])
 }

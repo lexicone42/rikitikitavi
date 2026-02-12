@@ -152,10 +152,7 @@ fn parse_mysql_version(packet: &[u8]) -> Option<String> {
 
     // Version string starts at byte 5 and is null-terminated
     let version_start = 5;
-    let version_end = packet[version_start..]
-        .iter()
-        .position(|&b| b == 0)?
-        + version_start;
+    let version_end = packet[version_start..].iter().position(|&b| b == 0)? + version_start;
 
     String::from_utf8(packet[version_start..version_end].to_vec()).ok()
 }
@@ -251,7 +248,11 @@ impl Scanner for DatabaseScanner {
         let mut findings = Vec::new();
 
         // Skip in Passive mode — database probes can be slow and intrusive
-        if !ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+        if !ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+        {
             tracing::info!("skipping database scan in quick scan mode");
             return Ok(findings);
         }
@@ -259,21 +260,15 @@ impl Scanner for DatabaseScanner {
         // Collect targets: use discovered devices if available, else ARP cache
         let targets: Vec<(IpAddr, Vec<u16>)> = if ctx.discovered_devices.is_empty() {
             // Fallback: check all ARP cache IPs for common database ports
-            let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-                ScanError::ScannerFailed {
+            let arp_entries =
+                rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "database".to_owned(),
                     message: format!("failed to read ARP cache: {e}"),
-                }
-            })?;
+                })?;
 
             arp_entries
                 .iter()
-                .map(|e| {
-                    (
-                        e.ip,
-                        DATABASE_PORTS.iter().map(|(port, _)| *port).collect(),
-                    )
-                })
+                .map(|e| (e.ip, DATABASE_PORTS.iter().map(|(port, _)| *port).collect()))
                 .collect()
         } else {
             ctx.discovered_devices
@@ -296,10 +291,7 @@ impl Scanner for DatabaseScanner {
             return Ok(findings);
         }
 
-        tracing::info!(
-            target_count = targets.len(),
-            "checking database security"
-        );
+        tracing::info!(target_count = targets.len(), "checking database security");
 
         for (ip, ports) in &targets {
             for &port in ports {
@@ -315,7 +307,10 @@ impl Scanner for DatabaseScanner {
             }
         }
 
-        tracing::info!(findings_count = findings.len(), "database security scan complete");
+        tracing::info!(
+            findings_count = findings.len(),
+            "database security scan complete"
+        );
         Ok(findings)
     }
 
@@ -358,9 +353,7 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     Finding::new(
                         "database",
                         &format!("Redis requires authentication on {ip}:{port}"),
-                        &format!(
-                            "Redis at {ip}:{port} correctly requires authentication."
-                        ),
+                        &format!("Redis at {ip}:{port} correctly requires authentication."),
                         Severity::Info,
                     )
                     .with_ip(*ip)

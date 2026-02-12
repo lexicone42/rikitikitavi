@@ -30,11 +30,7 @@ const ADMIN_PATHS: &[&str] = &[
 ];
 
 /// Classify missing security headers into findings.
-pub fn classify_missing_headers(
-    ip: IpAddr,
-    port: u16,
-    headers: &HeaderSet,
-) -> Vec<Finding> {
+pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     if !headers.has_hsts {
@@ -51,7 +47,10 @@ pub fn classify_missing_headers(
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-319")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.missing-hsts", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.http_audit.missing-hsts",
+                &[],
+            )),
         );
     }
 
@@ -308,7 +307,9 @@ pub fn detect_framework(
         Some("Drupal")
     } else if body_lower.contains("joomla") || body_lower.contains("/media/system/") {
         Some("Joomla")
-    } else if body_lower.contains("laravel") || body_lower.contains("csrf-token") && body_lower.contains("laravel") {
+    } else if body_lower.contains("laravel")
+        || body_lower.contains("csrf-token") && body_lower.contains("laravel")
+    {
         Some("Laravel")
     } else if body_lower.contains("x-django") || body_lower.contains("csrfmiddlewaretoken") {
         Some("Django")
@@ -360,12 +361,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         let headers = HeaderSet {
             has_hsts: resp.headers().contains_key("strict-transport-security"),
             has_x_frame_options: resp.headers().contains_key("x-frame-options"),
-            has_content_security_policy: resp
-                .headers()
-                .contains_key("content-security-policy"),
-            has_x_content_type_options: resp
-                .headers()
-                .contains_key("x-content-type-options"),
+            has_content_security_policy: resp.headers().contains_key("content-security-policy"),
+            has_x_content_type_options: resp.headers().contains_key("x-content-type-options"),
             server: resp
                 .headers()
                 .get("server")
@@ -434,30 +431,23 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_port(port)
                     .with_service("HTTP")
                     .with_cwe("CWE-548")
-                    .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.directory-listing", &[])),
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.http_audit.directory-listing",
+                        &[],
+                    )),
                 );
             }
 
             // Framework fingerprinting from body + X-Powered-By
-            if let Some(fw_finding) =
-                detect_framework(ip, port, powered_by.as_deref(), &body)
-            {
+            if let Some(fw_finding) = detect_framework(ip, port, powered_by.as_deref(), &body) {
                 findings.push(fw_finding);
             }
         }
     }
 
     // OPTIONS method enumeration
-    if let Ok(resp) = client
-        .request(reqwest::Method::OPTIONS, &url)
-        .send()
-        .await
-    {
-        if let Some(allow) = resp
-            .headers()
-            .get("allow")
-            .and_then(|v| v.to_str().ok())
-        {
+    if let Ok(resp) = client.request(reqwest::Method::OPTIONS, &url).send().await {
+        if let Some(allow) = resp.headers().get("allow").and_then(|v| v.to_str().ok()) {
             findings.extend(classify_http_methods(ip, port, allow));
         }
     }
@@ -471,7 +461,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             if status == 200 {
                 let body = resp.text().await.unwrap_or_default().to_lowercase();
                 // Skip if the 200 page is actually a login form
-                if !body.contains("login") && !body.contains("password") && !body.contains("sign in") {
+                if !body.contains("login")
+                    && !body.contains("password")
+                    && !body.contains("sign in")
+                {
                     findings.push(
                         Finding::new(
                             "http_audit",
@@ -487,7 +480,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                         .with_port(port)
                         .with_service("HTTP")
                         .with_cwe("CWE-306")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.admin-no-auth", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.http_audit.admin-no-auth",
+                            &[],
+                        )),
                     );
                 }
             }
@@ -520,7 +516,11 @@ impl Scanner for HttpAuditScanner {
         let mut findings = Vec::new();
 
         // Skip entirely in Passive mode — HTTP audit is slow and not essential
-        if !ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+        if !ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+        {
             tracing::info!("skipping HTTP audit in quick scan mode");
             return Ok(findings);
         }

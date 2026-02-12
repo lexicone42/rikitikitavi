@@ -15,14 +15,7 @@ pub struct UniFiScanner;
 
 /// Default common SSIDs that suggest an uncustomized network.
 const DEFAULT_SSIDS: &[&str] = &[
-    "UniFi",
-    "UBNT",
-    "Ubiquiti",
-    "default",
-    "linksys",
-    "netgear",
-    "HOME-",
-    "SETUP",
+    "UniFi", "UBNT", "Ubiquiti", "default", "linksys", "netgear", "HOME-", "SETUP",
 ];
 
 /// Evaluate WLAN security settings for a single WLAN config.
@@ -286,12 +279,11 @@ impl Scanner for UniFiScanner {
             return Ok(findings);
         };
 
-        let client = UniFiClient::new_insecure(&url, "default").map_err(|e| {
-            ScanError::ScannerFailed {
+        let client =
+            UniFiClient::new_insecure(&url, "default").map_err(|e| ScanError::ScannerFailed {
                 scanner: "unifi".to_owned(),
                 message: format!("failed to create UniFi client: {e}"),
-            }
-        })?;
+            })?;
 
         // Attempt unauthenticated detection — can the login page be reached?
         if !client.is_authenticated() {
@@ -336,10 +328,7 @@ impl Scanner for UniFiScanner {
         match client.get_devices().await {
             Ok(devices) => {
                 for device in &devices {
-                    let name = device
-                        .name
-                        .as_deref()
-                        .unwrap_or(&device.model);
+                    let name = device.name.as_deref().unwrap_or(&device.model);
                     findings.push(Finding::new(
                         "unifi",
                         &format!("{name}: firmware {}", device.firmware_version),
@@ -515,16 +504,16 @@ mod tests {
 
     fn arb_wlan() -> impl proptest::strategy::Strategy<Value = WlanConfig> {
         (
-            ".*",                                     // id
-            ".*",                                     // name
-            ".*",                                     // security
-            proptest::option::of(".*"),               // wpa_mode
-            proptest::option::of(".*"),               // pmf_mode
-            proptest::prelude::any::<bool>(),         // is_guest
-            proptest::prelude::any::<bool>(),         // enabled
+            ".*",                             // id
+            ".*",                             // name
+            ".*",                             // security
+            proptest::option::of(".*"),       // wpa_mode
+            proptest::option::of(".*"),       // pmf_mode
+            proptest::prelude::any::<bool>(), // is_guest
+            proptest::prelude::any::<bool>(), // enabled
         )
-            .prop_map(|(id, name, security, wpa_mode, pmf_mode, is_guest, enabled)| {
-                WlanConfig {
+            .prop_map(
+                |(id, name, security, wpa_mode, pmf_mode, is_guest, enabled)| WlanConfig {
                     id,
                     name,
                     security,
@@ -532,28 +521,26 @@ mod tests {
                     pmf_mode,
                     is_guest,
                     enabled,
-                }
-            })
+                },
+            )
     }
 
     fn arb_firewall_rule() -> impl proptest::strategy::Strategy<Value = FirewallRule> {
         (
-            ".*",                                // id
-            proptest::option::of(".*"),          // name
-            ".*",                                // action
-            proptest::option::of(".*"),          // src
-            proptest::option::of(".*"),          // dst
-            proptest::prelude::any::<bool>(),    // enabled
+            ".*",                             // id
+            proptest::option::of(".*"),       // name
+            ".*",                             // action
+            proptest::option::of(".*"),       // src
+            proptest::option::of(".*"),       // dst
+            proptest::prelude::any::<bool>(), // enabled
         )
-            .prop_map(|(id, name, action, src, dst, enabled)| {
-                FirewallRule {
-                    id,
-                    name,
-                    action,
-                    src,
-                    dst,
-                    enabled,
-                }
+            .prop_map(|(id, name, action, src, dst, enabled)| FirewallRule {
+                id,
+                name,
+                action,
+                src,
+                dst,
+                enabled,
             })
     }
 

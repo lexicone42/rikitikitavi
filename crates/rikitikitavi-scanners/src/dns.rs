@@ -107,7 +107,10 @@ async fn check_dns_rebinding(nameservers: &[IpAddr], findings: &mut Vec<Finding>
                         )
                         .with_ip(ip)
                         .with_cwe("CWE-350")
-                        .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.hijacking-detected", &[])),
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.dns.hijacking-detected",
+                            &[],
+                        )),
                     );
                 }
             }
@@ -133,8 +136,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(v6) => {
             // ::1 loopback or fc00::/7 unique local
-            v6.is_loopback()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     }
 }
@@ -200,7 +202,10 @@ async fn check_dns_cross_validation(nameservers: &[IpAddr], findings: &mut Vec<F
                     Severity::Medium,
                 )
                 .with_cwe("CWE-350")
-                .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.cross-validation-mismatch", &[])),
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.dns.cross-validation-mismatch",
+                    &[],
+                )),
             );
         }
     }
@@ -284,35 +289,25 @@ pub fn classify_dmarc(record: &str) -> Option<Finding> {
 }
 
 /// Query TXT records for a domain using the given resolver.
-async fn query_txt_records(
-    resolver: &TokioAsyncResolver,
-    domain: &str,
-) -> Vec<String> {
-    resolver
-        .lookup(domain, RecordType::TXT)
-        .await
-        .map_or_else(
-            |_| Vec::new(),
-            |response| {
-                response
-                    .record_iter()
-                    .filter_map(|r| {
-                        r.data().map(|data| {
-                            let s = data.to_string();
-                            s.trim_matches('"').to_owned()
-                        })
+async fn query_txt_records(resolver: &TokioAsyncResolver, domain: &str) -> Vec<String> {
+    resolver.lookup(domain, RecordType::TXT).await.map_or_else(
+        |_| Vec::new(),
+        |response| {
+            response
+                .record_iter()
+                .filter_map(|r| {
+                    r.data().map(|data| {
+                        let s = data.to_string();
+                        s.trim_matches('"').to_owned()
                     })
-                    .collect()
-            },
-        )
+                })
+                .collect()
+        },
+    )
 }
 
 /// Check email security records (SPF, DKIM, DMARC) for a domain.
-async fn check_email_security(
-    nameservers: &[IpAddr],
-    domain: &str,
-    findings: &mut Vec<Finding>,
-) {
+async fn check_email_security(nameservers: &[IpAddr], domain: &str, findings: &mut Vec<Finding>) {
     if nameservers.is_empty() || domain.is_empty() {
         return;
     }
@@ -349,8 +344,7 @@ async fn check_email_security(
     }
 
     // DMARC — TXT record at _dmarc.domain
-    let dmarc_records =
-        query_txt_records(&resolver, &format!("_dmarc.{domain}.")).await;
+    let dmarc_records = query_txt_records(&resolver, &format!("_dmarc.{domain}.")).await;
     let has_dmarc = dmarc_records
         .iter()
         .any(|r| r.to_lowercase().starts_with("v=dmarc1"));
@@ -375,8 +369,7 @@ async fn check_email_security(
     }
 
     // DKIM — check common selector "default" at default._domainkey.domain
-    let dkim_records =
-        query_txt_records(&resolver, &format!("default._domainkey.{domain}.")).await;
+    let dkim_records = query_txt_records(&resolver, &format!("default._domainkey.{domain}.")).await;
     let has_dkim = dkim_records
         .iter()
         .any(|r| r.to_lowercase().contains("v=dkim1"));
@@ -546,10 +539,11 @@ impl Scanner for DnsScanner {
                         Severity::Medium,
                     )
                     .with_cwe("CWE-350")
-                    .with_references(vec![
-                        "https://dnssec-failed.org/".to_owned(),
-                    ])
-                    .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.dnssec-not-enforced", &[])),
+                    .with_references(vec!["https://dnssec-failed.org/".to_owned()])
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.dns.dnssec-not-enforced",
+                        &[],
+                    )),
                 );
             }
             None => {

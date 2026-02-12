@@ -26,10 +26,7 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
     // same IP+MAC pair on multiple interfaces (en0, en1, awdl0).
     let mut ip_to_macs: HashMap<IpAddr, HashSet<&str>> = HashMap::new();
     for entry in entries {
-        ip_to_macs
-            .entry(entry.ip)
-            .or_default()
-            .insert(&entry.mac);
+        ip_to_macs.entry(entry.ip).or_default().insert(&entry.mac);
     }
 
     for (ip, macs) in &ip_to_macs {
@@ -232,12 +229,11 @@ impl Scanner for ArpScanner {
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running ARP security scan");
 
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "arp".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let entries: Vec<ArpEntryData> = arp_entries
             .iter()
@@ -365,7 +361,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, ArpAnomaly::DuplicateIp { .. }))
             .count();
-        assert_eq!(dup_ip_count, 0, "identical MACs should not trigger spoofing");
+        assert_eq!(
+            dup_ip_count, 0,
+            "identical MACs should not trigger spoofing"
+        );
     }
 
     #[test]
@@ -383,7 +382,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, ArpAnomaly::DuplicateMac { .. }))
             .count();
-        assert_eq!(dup_mac_count, 0, "2 unique IPs should not trigger DuplicateMac");
+        assert_eq!(
+            dup_mac_count, 0,
+            "2 unique IPs should not trigger DuplicateMac"
+        );
     }
 
     #[test]
@@ -452,7 +454,10 @@ mod tests {
     fn test_anomaly_to_finding_has_cwe() {
         let anomaly = ArpAnomaly::DuplicateIp {
             ip: "192.168.1.1".parse().unwrap(),
-            macs: vec!["aa:bb:cc:dd:ee:01".to_owned(), "ff:ee:dd:cc:bb:aa".to_owned()],
+            macs: vec![
+                "aa:bb:cc:dd:ee:01".to_owned(),
+                "ff:ee:dd:cc:bb:aa".to_owned(),
+            ],
             is_gateway: false,
         };
         let finding = anomaly_to_finding(&anomaly);

@@ -51,7 +51,10 @@ pub struct OcsfFinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_score: Option<f64>,
     /// Finding timestamp as epoch milliseconds.
-    #[serde(serialize_with = "serialize_epoch_ms", deserialize_with = "deserialize_epoch_ms")]
+    #[serde(
+        serialize_with = "serialize_epoch_ms",
+        deserialize_with = "deserialize_epoch_ms"
+    )]
     pub time: DateTime<Utc>,
 }
 
@@ -59,7 +62,10 @@ pub struct OcsfFinding {
 pub struct OcsfMetadata {
     pub version: String,
     pub product: OcsfProduct,
-    #[serde(serialize_with = "serialize_epoch_ms", deserialize_with = "deserialize_epoch_ms")]
+    #[serde(
+        serialize_with = "serialize_epoch_ms",
+        deserialize_with = "deserialize_epoch_ms"
+    )]
     pub logged_time: DateTime<Utc>,
     pub uid: Uuid,
 }
@@ -78,7 +84,10 @@ pub struct OcsfFindingInfo {
     pub desc: String,
     /// Scanner that produced this finding.
     pub product_uid: String,
-    #[serde(serialize_with = "serialize_epoch_ms", deserialize_with = "deserialize_epoch_ms")]
+    #[serde(
+        serialize_with = "serialize_epoch_ms",
+        deserialize_with = "deserialize_epoch_ms"
+    )]
     pub created_time: DateTime<Utc>,
     /// CWE analytic mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,9 +167,7 @@ impl From<&Finding> for OcsfFinding {
             .map(|cve| OcsfVulnerability {
                 uid: cve.clone(),
                 desc: None,
-                cve: Some(OcsfCve {
-                    uid: cve.clone(),
-                }),
+                cve: Some(OcsfCve { uid: cve.clone() }),
             })
             .collect();
 
@@ -256,12 +263,13 @@ mod tests {
 
     #[test]
     fn test_ocsf_with_remediation() {
-        let finding = Finding::new("test", "Test", "Desc", Severity::High)
-            .with_remediation(crate::Remediation {
+        let finding = Finding::new("test", "Test", "Desc", Severity::High).with_remediation(
+            crate::Remediation {
                 description: "Fix it".to_owned(),
                 steps: vec!["step 1".to_owned()],
                 effort: Some("5 min".to_owned()),
-            });
+            },
+        );
 
         let ocsf = OcsfFinding::from(&finding);
         assert!(ocsf.remediation.is_some());
@@ -287,8 +295,8 @@ mod tests {
 
     #[test]
     fn test_ocsf_cwe_analytic_mapping() {
-        let finding = Finding::new("ssl", "Weak Cipher", "desc", Severity::High)
-            .with_cwe("CWE-327");
+        let finding =
+            Finding::new("ssl", "Weak Cipher", "desc", Severity::High).with_cwe("CWE-327");
         let ocsf = OcsfFinding::from(&finding);
 
         let analytic = ocsf.finding_info.analytic.unwrap();

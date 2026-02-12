@@ -219,8 +219,7 @@ fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
 /// Returns true if the server responds with a valid `SMBv2` negotiate response.
 async fn check_smbv2_support(ip: IpAddr, port: u16) -> bool {
     let addr = SocketAddr::new(ip, port);
-    let Ok(Ok(mut stream)) =
-        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
+    let Ok(Ok(mut stream)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
     else {
         return false;
     };
@@ -270,9 +269,8 @@ fn build_smb2_negotiate() -> Vec<u8> {
         0x00, 0x00, // Reserved
         0x00, 0x00, 0x00, 0x00, // Capabilities
         // ClientGuid (16 bytes of zeros)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, // ClientStartTime (or NegotiateContextOffset for 3.1.1)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, // ClientStartTime (or NegotiateContextOffset for 3.1.1)
         // Dialects
         0x02, 0x02, // SMB 2.0.2
         0x10, 0x02, // SMB 2.1
@@ -315,8 +313,8 @@ fn build_smb2_session_setup_anonymous() -> Vec<u8> {
     // Session Setup request body with empty security buffer (anonymous)
     let session_body = vec![
         0x19, 0x00, // StructureSize: 25
-        0x00,       // Flags: 0
-        0x01,       // SecurityMode: signing enabled
+        0x00, // Flags: 0
+        0x01, // SecurityMode: signing enabled
         0x00, 0x00, 0x00, 0x00, // Capabilities
         0x00, 0x00, 0x00, 0x00, // Channel
         0x58, 0x00, // SecurityBufferOffset: 88 (64 header + 24 body so far)
@@ -464,21 +462,16 @@ impl Scanner for SmbScanner {
         // Collect targets with port 445 or 139 open
         let targets: Vec<IpAddr> = if ctx.discovered_devices.is_empty() {
             // Fallback: probe all ARP cache IPs
-            let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-                ScanError::ScannerFailed {
+            let arp_entries =
+                rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "smb".to_owned(),
                     message: format!("failed to read ARP cache: {e}"),
-                }
-            })?;
+                })?;
             arp_entries.iter().map(|e| e.ip).collect()
         } else {
             ctx.discovered_devices
                 .iter()
-                .filter(|d| {
-                    d.open_ports
-                        .iter()
-                        .any(|p| p.port == 445 || p.port == 139)
-                })
+                .filter(|d| d.open_ports.iter().any(|p| p.port == 445 || p.port == 139))
                 .map(|d| d.ip)
                 .collect()
         };
@@ -522,10 +515,12 @@ impl Scanner for SmbScanner {
                                     .with_port(445)
                                     .with_service("SMB")
                                     .with_cwe("CWE-327")
-                                    .with_opt_remediation(crate::remediation::get(
-                                        "rikitikitavi.smb.smbv1-enabled",
-                                        &[],
-                                    )),
+                                    .with_opt_remediation(
+                                        crate::remediation::get(
+                                            "rikitikitavi.smb.smbv1-enabled",
+                                            &[],
+                                        ),
+                                    ),
                                 );
                             } else {
                                 // Server only supports SMBv1 — legacy system, most dangerous
@@ -547,10 +542,12 @@ impl Scanner for SmbScanner {
                                     .with_port(445)
                                     .with_service("SMB")
                                     .with_cwe("CWE-327")
-                                    .with_opt_remediation(crate::remediation::get(
-                                        "rikitikitavi.smb.smbv1-enabled",
-                                        &[],
-                                    )),
+                                    .with_opt_remediation(
+                                        crate::remediation::get(
+                                            "rikitikitavi.smb.smbv1-enabled",
+                                            &[],
+                                        ),
+                                    ),
                                 );
                             }
                         } else {
@@ -672,7 +669,10 @@ impl Scanner for SmbScanner {
             }
         }
 
-        tracing::info!(findings_count = findings.len(), "SMB security scan complete");
+        tracing::info!(
+            findings_count = findings.len(),
+            "SMB security scan complete"
+        );
         Ok(findings)
     }
 

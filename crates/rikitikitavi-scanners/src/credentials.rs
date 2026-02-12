@@ -38,13 +38,10 @@ async fn check_anonymous_ftp(ip: IpAddr) -> Option<FtpCheckResult> {
         .ok()?;
 
     // Send anonymous login
-    tokio::time::timeout(
-        READ_TIMEOUT,
-        stream.write_all(b"USER anonymous\r\n"),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"USER anonymous\r\n"))
+        .await
+        .ok()?
+        .ok()?;
 
     let mut buf = vec![0u8; 1024];
     let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
@@ -102,11 +99,10 @@ async fn try_ftp_listing(stream: &mut TcpStream, _ip: IpAddr) -> Option<String> 
     let data_addr = parse_pasv_response(&pasv_resp)?;
 
     // Connect to data port
-    let mut data_stream =
-        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(data_addr))
-            .await
-            .ok()?
-            .ok()?;
+    let mut data_stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(data_addr))
+        .await
+        .ok()?
+        .ok()?;
 
     // Send LIST command on control connection
     tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"LIST\r\n"))
@@ -116,11 +112,10 @@ async fn try_ftp_listing(stream: &mut TcpStream, _ip: IpAddr) -> Option<String> 
 
     // Read listing from data connection
     let mut listing_buf = vec![0u8; 2048];
-    let listing_n =
-        tokio::time::timeout(READ_TIMEOUT, data_stream.read(&mut listing_buf))
-            .await
-            .ok()?
-            .ok()?;
+    let listing_n = tokio::time::timeout(READ_TIMEOUT, data_stream.read(&mut listing_buf))
+        .await
+        .ok()?
+        .ok()?;
 
     if listing_n == 0 {
         return None;
@@ -129,7 +124,11 @@ async fn try_ftp_listing(stream: &mut TcpStream, _ip: IpAddr) -> Option<String> 
     let listing = String::from_utf8_lossy(&listing_buf[..listing_n])
         .trim()
         .to_owned();
-    if listing.is_empty() { None } else { Some(listing) }
+    if listing.is_empty() {
+        None
+    } else {
+        Some(listing)
+    }
 }
 
 /// Extract the 3-digit FTP response code from a response line.
@@ -236,7 +235,11 @@ async fn capture_telnet_prompt(ip: IpAddr) -> Option<String> {
     let cleaned = strip_telnet_iac(&buf[..n]);
     let text = String::from_utf8_lossy(&cleaned);
     let trimmed = text.trim().to_owned();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Strip telnet IAC (Interpret As Command) sequences from raw bytes.
@@ -317,21 +320,14 @@ fn classify_telnet_response(response: &str) -> bool {
     }
 
     // Success indicators: shell prompts, welcome messages, BusyBox
-    let success_indicators = [
-        "welcome",
-        "last login",
-        "busybox",
-    ];
+    let success_indicators = ["welcome", "last login", "busybox"];
     if success_indicators.iter().any(|kw| lower.contains(kw)) {
         return true;
     }
 
     // Shell prompts at end of output
     let trimmed = response.trim();
-    if trimmed.ends_with('$')
-        || trimmed.ends_with('#')
-        || trimmed.ends_with('>')
-    {
+    if trimmed.ends_with('$') || trimmed.ends_with('#') || trimmed.ends_with('>') {
         return true;
     }
 
@@ -388,11 +384,7 @@ fn build_credential_list(banner: &str) -> Vec<(&'static str, &'static str)> {
 ///
 /// Opens a fresh TCP connection, waits for the login prompt, sends the
 /// username and password, then classifies the server response.
-async fn try_telnet_login(
-    ip: IpAddr,
-    username: &str,
-    password: &str,
-) -> Option<TelnetLoginResult> {
+async fn try_telnet_login(ip: IpAddr, username: &str, password: &str) -> Option<TelnetLoginResult> {
     let addr = SocketAddr::new(ip, 23);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -413,17 +405,14 @@ async fn try_telnet_login(
 
     // Wait for login prompt
     let banner_lower = banner.to_lowercase();
-    if !banner_lower.contains("login")
-        && !banner_lower.contains("username")
-    {
+    if !banner_lower.contains("login") && !banner_lower.contains("username") {
         // Maybe the prompt hasn't arrived yet — read more
         let mut buf2 = vec![0u8; 1024];
         if let Ok(Ok(n2)) =
             tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf2)).await
         {
             if n2 > 0 {
-                let extra = String::from_utf8_lossy(&strip_telnet_iac(&buf2[..n2]))
-                    .to_lowercase();
+                let extra = String::from_utf8_lossy(&strip_telnet_iac(&buf2[..n2])).to_lowercase();
                 if !extra.contains("login") && !extra.contains("username") {
                     return None; // No login prompt found
                 }
@@ -519,7 +508,11 @@ fn extract_html_title(body: &str) -> Option<String> {
     let start = lower.find("<title>")? + 7;
     let end = lower[start..].find("</title>")? + start;
     let title = body[start..end].trim().to_owned();
-    if title.is_empty() { None } else { Some(title) }
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 /// Parse an FTP PASV response to extract the data port address.
@@ -573,9 +566,7 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
                 Finding::new(
                     "credentials",
                     &format!("FTP rejects anonymous login on {ip}"),
-                    &format!(
-                        "FTP at {ip}:21 correctly rejects anonymous login (code 530)."
-                    ),
+                    &format!("FTP at {ip}:21 correctly rejects anonymous login (code 530)."),
                     Severity::Info,
                 )
                 .with_ip(ip)
@@ -612,9 +603,11 @@ impl Scanner for CredentialScanner {
         // ── Adaptive mode: use Phase 1 discovered devices ───────────
         if !ctx.discovered_devices.is_empty() {
             // In Passive mode, only check the gateway/router
-            let target_devices: Vec<_> = if ctx.config.intensity.at_least(
-                rikitikitavi_models::config::ScanIntensity::Active,
-            ) {
+            let target_devices: Vec<_> = if ctx
+                .config
+                .intensity
+                .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+            {
                 ctx.discovered_devices.iter().collect()
             } else {
                 ctx.discovered_devices
@@ -639,9 +632,10 @@ impl Scanner for CredentialScanner {
 
                 // Telnet: flag cleartext protocol + test default credentials
                 if has_port(23) {
-                    let is_active = ctx.config.intensity.at_least(
-                        rikitikitavi_models::config::ScanIntensity::Active,
-                    );
+                    let is_active = ctx
+                        .config
+                        .intensity
+                        .at_least(rikitikitavi_models::config::ScanIntensity::Active);
 
                     // In Active mode, attempt default credential login
                     let login_result = if is_active {
@@ -656,9 +650,7 @@ impl Scanner for CredentialScanner {
                         findings.push(
                             Finding::new(
                                 "credentials",
-                                &format!(
-                                    "Default telnet credentials confirmed on {ip}"
-                                ),
+                                &format!("Default telnet credentials confirmed on {ip}"),
                                 &format!(
                                     "Default credentials confirmed: login as '{}' \
                                      with {} on {ip}:23. Banner: {banner_snip}",
@@ -670,23 +662,20 @@ impl Scanner for CredentialScanner {
                             .with_port(23)
                             .with_service("Telnet")
                             .with_cwe("CWE-1393")
-                            .with_evidence(format!(
-                                "Post-login output: {}",
-                                result.post_login,
-                            ))
-                            .with_opt_remediation(crate::remediation::get(
-                                "rikitikitavi.credentials.telnet-default-confirmed",
-                                &[],
-                            )),
+                            .with_evidence(format!("Post-login output: {}", result.post_login,))
+                            .with_opt_remediation(
+                                crate::remediation::get(
+                                    "rikitikitavi.credentials.telnet-default-confirmed",
+                                    &[],
+                                ),
+                            ),
                         );
                     }
 
                     // Always flag cleartext protocol (separate finding)
                     let mut cleartext_finding = Finding::new(
                         "credentials",
-                        &format!(
-                            "Telnet service with potential default credentials on {ip}"
-                        ),
+                        &format!("Telnet service with potential default credentials on {ip}"),
                         &format!(
                             "Telnet on {ip}:23 transmits credentials in cleartext. \
                              Many devices ship with default telnet passwords. \
@@ -704,13 +693,11 @@ impl Scanner for CredentialScanner {
                     ));
                     if is_active {
                         if let Some(ref result) = login_result {
-                            cleartext_finding = cleartext_finding.with_evidence(
-                                format!("Login prompt: {}", result.banner),
-                            );
-                        } else if let Some(prompt) = capture_telnet_prompt(ip).await
-                        {
                             cleartext_finding = cleartext_finding
-                                .with_evidence(format!("Login prompt: {prompt}"));
+                                .with_evidence(format!("Login prompt: {}", result.banner));
+                        } else if let Some(prompt) = capture_telnet_prompt(ip).await {
+                            cleartext_finding =
+                                cleartext_finding.with_evidence(format!("Login prompt: {prompt}"));
                         }
                     }
                     findings.push(cleartext_finding);
@@ -793,10 +780,12 @@ impl Scanner for CredentialScanner {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
-                            .with_opt_remediation(crate::remediation::get(
-                                "rikitikitavi.credentials.http-no-auth",
-                                &[],
-                            ));
+                            .with_opt_remediation(
+                                crate::remediation::get(
+                                    "rikitikitavi.credentials.http-no-auth",
+                                    &[],
+                                ),
+                            );
                             if let Some(evidence) = result.evidence {
                                 finding = finding.with_evidence(evidence);
                             }
@@ -806,17 +795,19 @@ impl Scanner for CredentialScanner {
                 }
             }
 
-            tracing::info!(findings_count = findings.len(), "adaptive credential scan complete");
+            tracing::info!(
+                findings_count = findings.len(),
+                "adaptive credential scan complete"
+            );
             return Ok(findings);
         }
 
         // ── Fallback: classic mode using ARP cache ──────────────────
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "credentials".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
             || arp_entries.iter().map(|e| e.ip).collect(),
@@ -838,9 +829,7 @@ impl Scanner for CredentialScanner {
                         if result.no_auth {
                             let mut finding = Finding::new(
                                 "credentials",
-                                &format!(
-                                    "Router admin panel without auth on {ip}:{port}"
-                                ),
+                                &format!("Router admin panel without auth on {ip}:{port}"),
                                 &format!(
                                     "The router admin panel at {ip}:{port} returned \
                                      HTTP 200 without requiring authentication."
@@ -851,10 +840,12 @@ impl Scanner for CredentialScanner {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
-                            .with_opt_remediation(crate::remediation::get(
-                                "rikitikitavi.credentials.http-no-auth",
-                                &[],
-                            ));
+                            .with_opt_remediation(
+                                crate::remediation::get(
+                                    "rikitikitavi.credentials.http-no-auth",
+                                    &[],
+                                ),
+                            );
                             if let Some(evidence) = result.evidence {
                                 finding = finding.with_evidence(evidence);
                             }
@@ -892,7 +883,10 @@ impl Scanner for CredentialScanner {
             }
         }
 
-        tracing::info!(findings_count = findings.len(), "credential hygiene scan complete");
+        tracing::info!(
+            findings_count = findings.len(),
+            "credential hygiene scan complete"
+        );
         Ok(findings)
     }
 
@@ -1182,12 +1176,7 @@ mod tests {
     #[test]
     fn test_cred_list_no_duplicates() {
         // All vendor-specific lists should produce no duplicates
-        for banner in &[
-            "BusyBox",
-            "Cisco IOS",
-            "MikroTik",
-            "generic device",
-        ] {
+        for banner in &["BusyBox", "Cisco IOS", "MikroTik", "generic device"] {
             let creds = build_credential_list(banner);
             let mut seen = Vec::new();
             for pair in &creds {

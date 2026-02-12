@@ -37,7 +37,11 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
 /// - **C**: Any high findings
 /// - **B**: More than 3 medium findings
 /// - **A**: Otherwise
-pub const fn risk_grade(critical: usize, high: usize, medium: usize) -> (&'static str, &'static str) {
+pub const fn risk_grade(
+    critical: usize,
+    high: usize,
+    medium: usize,
+) -> (&'static str, &'static str) {
     if critical > 0 {
         ("F  CRITICAL ISSUES", "critical")
     } else if high > 2 {

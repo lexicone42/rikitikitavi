@@ -99,7 +99,8 @@ mod tests {
             ..Default::default()
         };
         let ndjson = to_ocsf_ndjson(&results).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
         let score = parsed["risk_score"].as_f64().unwrap();
         assert!((score - 75.0).abs() < f64::EPSILON);
     }
@@ -112,7 +113,8 @@ mod tests {
             ..Default::default()
         };
         let ndjson = to_ocsf_ndjson(&results).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
         assert!(parsed.get("risk_score").is_none());
     }
 
@@ -120,7 +122,8 @@ mod tests {
     fn test_ocsf_class_fields_in_json() {
         let results = make_results(vec![make_finding("test", "T", Severity::Low)]);
         let ndjson = to_ocsf_ndjson(&results).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
 
         assert_eq!(parsed["class_uid"], 2002);
         assert_eq!(parsed["class_name"], "Vulnerability Finding");
@@ -135,7 +138,8 @@ mod tests {
     fn test_epoch_ms_in_json_output() {
         let results = make_results(vec![make_finding("test", "T", Severity::Low)]);
         let ndjson = to_ocsf_ndjson(&results).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(ndjson.lines().next().unwrap()).unwrap();
 
         // `time` should be an integer (epoch ms), not a string
         assert!(parsed["time"].is_i64(), "time should be epoch ms integer");

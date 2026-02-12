@@ -46,11 +46,31 @@ pub fn render_html_report(results: &ScanResults) -> String {
     let mut html = String::with_capacity(16384);
 
     // Count findings by severity
-    let critical = results.findings.iter().filter(|f| f.severity == Severity::Critical).count();
-    let high = results.findings.iter().filter(|f| f.severity == Severity::High).count();
-    let medium = results.findings.iter().filter(|f| f.severity == Severity::Medium).count();
-    let low = results.findings.iter().filter(|f| f.severity == Severity::Low).count();
-    let info = results.findings.iter().filter(|f| f.severity == Severity::Info).count();
+    let critical = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let high = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
+    let medium = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Medium)
+        .count();
+    let low = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Low)
+        .count();
+    let info = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Info)
+        .count();
 
     let (grade_label, grade_color) = rikitikitavi_analysis::risk_grade(critical, high, medium);
 
@@ -154,7 +174,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
 "#);
 
     // ── Executive Summary ────────────────────────────────────────────
-    let _ = write!(html,
+    let _ = write!(
+        html,
         r#"<div class="header">
   <h1>Rikitikitavi Security Report</h1>
   <div class="grade" style="color: var(--{grade_color});">{grade_label}</div>
@@ -165,7 +186,10 @@ pub fn render_html_report(results: &ScanResults) -> String {
     );
 
     if critical > 0 {
-        let _ = write!(html, r#"<span class="badge critical">{critical} Critical</span>"#);
+        let _ = write!(
+            html,
+            r#"<span class="badge critical">{critical} Critical</span>"#
+        );
     }
     if high > 0 {
         let _ = write!(html, r#"<span class="badge high">{high} High</span>"#);
@@ -182,14 +206,19 @@ pub fn render_html_report(results: &ScanResults) -> String {
     html.push_str("</div>\n");
 
     // Critical + High bullet list
-    let urgent: Vec<_> = results.findings.iter()
+    let urgent: Vec<_> = results
+        .findings
+        .iter()
         .filter(|f| f.severity == Severity::Critical || f.severity == Severity::High)
         .collect();
     if !urgent.is_empty() {
         html.push_str(r#"<h3>Urgent Findings</h3><ul class="bullets">"#);
         for f in &urgent {
-            let ip = f.affected_ip.map_or_else(|| "-".to_owned(), |ip| ip.to_string());
-            let _ = writeln!(html,
+            let ip = f
+                .affected_ip
+                .map_or_else(|| "-".to_owned(), |ip| ip.to_string());
+            let _ = writeln!(
+                html,
                 "<li><span class=\"badge {cls}\">{sev}</span> {title} ({ip})</li>",
                 cls = severity_class(f.severity),
                 sev = html_escape(&f.severity.to_string()),
@@ -205,13 +234,15 @@ pub fn render_html_report(results: &ScanResults) -> String {
         html.push_str("<h2>Top 5 Priority Actions</h2>\n");
         for action in &results.priority_actions {
             let cls = severity_class(action.severity);
-            let _ = write!(html,
+            let _ = write!(
+                html,
                 r#"<div class="finding-card {cls}"><div class="title">#{rank} {title}</div>"#,
                 rank = action.rank,
                 title = html_escape(&action.title),
             );
 
-            let _ = write!(html,
+            let _ = write!(
+                html,
                 r#"<div class="meta"><span class="badge {cls}">{sev}</span> {devices} device(s), {findings} finding(s)</div>"#,
                 sev = html_escape(&action.severity.to_string()),
                 devices = action.affected_device_count,
@@ -225,7 +256,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
                 }
                 html.push_str("</ol>");
                 if let Some(effort) = &action.effort {
-                    let _ = write!(html,
+                    let _ = write!(
+                        html,
                         r#"<div class="effort">Estimated effort: {}</div>"#,
                         html_escape(effort),
                     );
@@ -247,27 +279,47 @@ pub fn render_html_report(results: &ScanResults) -> String {
         (Severity::Low, "Low"),
         (Severity::Info, "Informational"),
     ] {
-        let sev_findings: Vec<_> = results.findings.iter()
+        let sev_findings: Vec<_> = results
+            .findings
+            .iter()
             .filter(|f| f.severity == sev)
             .collect();
         if sev_findings.is_empty() {
             continue;
         }
 
-        let open_attr = if sev == Severity::Critical || sev == Severity::High { " open" } else { "" };
-        let _ = write!(html,
+        let open_attr = if sev == Severity::Critical || sev == Severity::High {
+            " open"
+        } else {
+            ""
+        };
+        let _ = write!(
+            html,
             r#"<details{open_attr}><summary><span class="badge {cls}">{label}</span> {count} finding(s)</summary>"#,
             cls = severity_class(sev),
             count = sev_findings.len(),
         );
 
         for f in &sev_findings {
-            let _ = write!(html, r#"<div class="finding-card {cls}">"#, cls = severity_class(f.severity));
-            let _ = write!(html, r#"<div class="title">{}</div>"#, html_escape(&f.title));
-            let _ = write!(html, r#"<div class="desc">{}</div>"#, html_escape(&f.description));
+            let _ = write!(
+                html,
+                r#"<div class="finding-card {cls}">"#,
+                cls = severity_class(f.severity)
+            );
+            let _ = write!(
+                html,
+                r#"<div class="title">{}</div>"#,
+                html_escape(&f.title)
+            );
+            let _ = write!(
+                html,
+                r#"<div class="desc">{}</div>"#,
+                html_escape(&f.description)
+            );
 
             if let Some(evidence) = &f.evidence {
-                let _ = write!(html,
+                let _ = write!(
+                    html,
                     r#"<div style="font-family:monospace;background:rgba(237,137,54,0.1);padding:0.4rem 0.6rem;border-radius:4px;margin-bottom:0.5rem;font-size:0.9rem;white-space:pre-wrap;">Evidence: {}</div>"#,
                     html_escape(evidence),
                 );
@@ -275,7 +327,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
 
             html.push_str(r#"<div class="meta">"#);
             if let Some(cwe) = &f.cwe_id {
-                let _ = write!(html,
+                let _ = write!(
+                    html,
                     r#"<a href="https://cwe.mitre.org/data/definitions/{num}.html">{cwe}</a> "#,
                     num = cwe.trim_start_matches("CWE-"),
                     cwe = html_escape(cwe),
@@ -295,7 +348,11 @@ pub fn render_html_report(results: &ScanResults) -> String {
 
             if let Some(remediation) = &f.remediation {
                 html.push_str(r#"<div class="remediation">"#);
-                let _ = write!(html, "<strong>Fix:</strong> {}", html_escape(&remediation.description));
+                let _ = write!(
+                    html,
+                    "<strong>Fix:</strong> {}",
+                    html_escape(&remediation.description)
+                );
                 if !remediation.steps.is_empty() {
                     html.push_str("<ol>");
                     for step in &remediation.steps {
@@ -304,7 +361,11 @@ pub fn render_html_report(results: &ScanResults) -> String {
                     html.push_str("</ol>");
                 }
                 if let Some(effort) = &remediation.effort {
-                    let _ = write!(html, r#"<div class="effort">Estimated effort: {}</div>"#, html_escape(effort));
+                    let _ = write!(
+                        html,
+                        r#"<div class="effort">Estimated effort: {}</div>"#,
+                        html_escape(effort)
+                    );
                 }
                 html.push_str("</div>\n");
             }
@@ -322,8 +383,16 @@ pub fn render_html_report(results: &ScanResults) -> String {
         // Sort by finding count per device (most-affected first)
         let mut devices = results.devices.clone();
         devices.sort_by(|a, b| {
-            let a_findings = results.findings.iter().filter(|f| f.affected_ip == Some(a.ip)).count();
-            let b_findings = results.findings.iter().filter(|f| f.affected_ip == Some(b.ip)).count();
+            let a_findings = results
+                .findings
+                .iter()
+                .filter(|f| f.affected_ip == Some(a.ip))
+                .count();
+            let b_findings = results
+                .findings
+                .iter()
+                .filter(|f| f.affected_ip == Some(b.ip))
+                .count();
             b_findings.cmp(&a_findings)
         });
 
@@ -347,7 +416,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
     if !results.attack_paths.is_empty() {
         html.push_str("<h2>Attack Paths</h2>\n");
         for path in &results.attack_paths {
-            let _ = write!(html,
+            let _ = write!(
+                html,
                 r#"<div class="finding-card {cls}"><div class="title">{name}</div><div class="desc">{desc}</div>"#,
                 cls = severity_class(path.severity),
                 name = html_escape(&path.name),
@@ -363,7 +433,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
                     } else {
                         format!(" <span class=\"meta\">[{}]</span>", html_escape(technique))
                     };
-                    let _ = write!(html,
+                    let _ = write!(
+                        html,
                         "<li><strong>{title}</strong>{tech} — {desc}</li>",
                         title = html_escape(&step.title),
                         tech = technique_label,
@@ -377,7 +448,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
     }
 
     // ── Footer ───────────────────────────────────────────────────────
-    let _ = write!(html,
+    let _ = write!(
+        html,
         r#"<div class="footer">
   Scanned in {duration}s | Risk score: {score:.0}/100 | {total} findings across {devices} devices |
   Generated by <strong>rikitikitavi</strong>
@@ -467,12 +539,11 @@ mod tests {
     #[test]
     fn test_html_remediation_included() {
         let findings = vec![
-            Finding::new("test", "Vuln", "Desc", Severity::High)
-                .with_remediation(Remediation {
-                    description: "Fix it now".to_owned(),
-                    steps: vec!["Step one".to_owned(), "Step two".to_owned()],
-                    effort: Some("5 minutes".to_owned()),
-                }),
+            Finding::new("test", "Vuln", "Desc", Severity::High).with_remediation(Remediation {
+                description: "Fix it now".to_owned(),
+                steps: vec!["Step one".to_owned(), "Step two".to_owned()],
+                effort: Some("5 minutes".to_owned()),
+            }),
         ];
         let results = make_results(findings, 30.0);
         let html = render_html_report(&results);

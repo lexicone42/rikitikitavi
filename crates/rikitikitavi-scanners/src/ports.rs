@@ -74,9 +74,9 @@ const fn port_to_service(port: u16) -> &'static str {
 /// Common ports for a home network scan (~40 ports).
 fn common_ports() -> Vec<u16> {
     vec![
-        21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 465, 548, 554, 587, 631,
-        993, 995, 1080, 1433, 1883, 1900, 2049, 3306, 3389, 5000, 5060, 5353, 5432, 5900,
-        6379, 6667, 8080, 8443, 8883, 8888, 9100, 9200, 27017, 49152,
+        21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 465, 548, 554, 587, 631, 993,
+        995, 1080, 1433, 1883, 1900, 2049, 3306, 3389, 5000, 5060, 5353, 5432, 5900, 6379, 6667,
+        8080, 8443, 8883, 8888, 9100, 9200, 27017, 49152,
     ]
 }
 
@@ -84,12 +84,11 @@ fn common_ports() -> Vec<u16> {
 fn extended_ports() -> Vec<u16> {
     let mut ports = common_ports();
     ports.extend_from_slice(&[
-        20, 69, 88, 113, 119, 123, 137, 138, 161, 162, 179, 389, 427, 500, 514, 515, 520,
-        523, 546, 547, 636, 873, 902, 990, 992, 1194, 1701, 1723, 1812, 1813, 2000, 2082,
-        2083, 2086, 2087, 2222, 3000, 3128, 3268, 3269, 3690, 4443, 4444, 4567, 5001, 5004,
-        5005, 5050, 5051, 5222, 5269, 5357, 5800, 5901, 5938, 6000, 6001, 6443, 6881, 7070,
-        7443, 7547, 8000, 8008, 8081, 8090, 8291, 8444, 8880, 8889, 9000, 9001, 9090, 9091,
-        9443, 10000, 11211, 27018, 50000,
+        20, 69, 88, 113, 119, 123, 137, 138, 161, 162, 179, 389, 427, 500, 514, 515, 520, 523, 546,
+        547, 636, 873, 902, 990, 992, 1194, 1701, 1723, 1812, 1813, 2000, 2082, 2083, 2086, 2087,
+        2222, 3000, 3128, 3268, 3269, 3690, 4443, 4444, 4567, 5001, 5004, 5005, 5050, 5051, 5222,
+        5269, 5357, 5800, 5901, 5938, 6000, 6001, 6443, 6881, 7070, 7443, 7547, 8000, 8008, 8081,
+        8090, 8291, 8444, 8880, 8889, 9000, 9001, 9090, 9091, 9443, 10000, 11211, 27018, 50000,
     ]);
     ports.sort_unstable();
     ports.dedup();
@@ -201,17 +200,18 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-319")
-        .with_opt_remediation(crate::remediation::get(
-            "rikitikitavi.ports.ftp-open",
-            &[],
-        )),
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.ftp-open", &[])),
 
         110 | 143 => Finding::new(
             "ports",
             &format!("{service} open on {ip}:{port}"),
             &format!(
                 "{service} is an unencrypted mail protocol. Use {}/TLS instead.",
-                if port == 110 { "POP3S (995)" } else { "IMAPS (993)" }
+                if port == 110 {
+                    "POP3S (995)"
+                } else {
+                    "IMAPS (993)"
+                }
             ),
             Severity::Medium,
         )
@@ -235,10 +235,7 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_opt_remediation(crate::remediation::get(
-            "rikitikitavi.ports.rdp-open",
-            &[],
-        )),
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.rdp-open", &[])),
 
         5900 => Finding::new(
             "ports",
@@ -251,10 +248,7 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_opt_remediation(crate::remediation::get(
-            "rikitikitavi.ports.vnc-open",
-            &[],
-        )),
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.vnc-open", &[])),
 
         3306 | 5432 | 27017 | 6379 => Finding::new(
             "ports",
@@ -372,12 +366,11 @@ impl Scanner for PortScanner {
         tracing::info!("running port scan");
 
         // Collect target IPs from ARP cache, filtered to target network
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "ports".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
             || arp_entries.iter().map(|e| e.ip).collect(),
@@ -397,9 +390,17 @@ impl Scanner for PortScanner {
 
         let ports = get_ports(&ctx.config.port_scan_range);
         // Adapt timeout based on scan intensity
-        let timeout = if ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Aggressive) {
+        let timeout = if ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Aggressive)
+        {
             Duration::from_secs(5)
-        } else if ctx.config.intensity.at_least(rikitikitavi_models::config::ScanIntensity::Active) {
+        } else if ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+        {
             Duration::from_secs(2)
         } else {
             Duration::from_secs(1)
@@ -414,9 +415,10 @@ impl Scanner for PortScanner {
             "starting TCP connect scan"
         );
 
-        let do_banner = ctx.config.intensity.at_least(
-            rikitikitavi_models::config::ScanIntensity::Active,
-        );
+        let do_banner = ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active);
 
         // Build all probe tasks
         let mut tasks = Vec::new();
@@ -432,7 +434,12 @@ impl Scanner for PortScanner {
                     } else {
                         None
                     };
-                    PortResult { ip, port, open, banner }
+                    PortResult {
+                        ip,
+                        port,
+                        open,
+                        banner,
+                    }
                 });
                 tasks.push(task);
             }

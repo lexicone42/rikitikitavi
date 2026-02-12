@@ -210,7 +210,8 @@ impl App {
                 // Check list area clicks (select row)
                 if let Some(list_area) = self.hit_regions.list_area {
                     if list_area.contains((col, row).into()) {
-                        let clicked_row = row.saturating_sub(list_area.y)
+                        let clicked_row = row
+                            .saturating_sub(list_area.y)
                             .saturating_sub(self.hit_regions.list_header_offset);
                         let visual_row = clicked_row as usize;
 
@@ -317,8 +318,9 @@ impl App {
                         .selected_finding_index
                         .saturating_sub(delta.unsigned_abs() as usize);
                 } else {
-                    self.selected_finding_index =
-                        (self.selected_finding_index + usize::try_from(delta).unwrap_or(0)).min(max);
+                    self.selected_finding_index = (self.selected_finding_index
+                        + usize::try_from(delta).unwrap_or(0))
+                    .min(max);
                 }
                 self.findings_table_state
                     .select(Some(self.selected_finding_index));
@@ -373,10 +375,15 @@ impl App {
     /// Get findings filtered and sorted by severity (Critical first).
     /// In `ActionableOnly` mode, excludes Low and Info findings.
     pub fn filtered_findings(&self) -> Vec<&Finding> {
-        let mut filtered: Vec<&Finding> = self.findings().iter()
+        let mut filtered: Vec<&Finding> = self
+            .findings()
+            .iter()
             .filter(|f| match self.severity_filter {
                 SeverityFilter::ActionableOnly => {
-                    matches!(f.severity, Severity::Critical | Severity::High | Severity::Medium)
+                    matches!(
+                        f.severity,
+                        Severity::Critical | Severity::High | Severity::Medium
+                    )
                 }
                 SeverityFilter::All => true,
             })

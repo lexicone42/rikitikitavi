@@ -131,8 +131,8 @@ fn init_registry() -> RemediationRegistry {
     let mut templates = HashMap::new();
     for source in yaml_sources {
         for document in serde_yaml_ng::Deserializer::from_str(source) {
-            let template: OvrsTemplate =
-                serde::Deserialize::deserialize(document).expect("embedded OVRS YAML must be valid");
+            let template: OvrsTemplate = serde::Deserialize::deserialize(document)
+                .expect("embedded OVRS YAML must be valid");
             let id = template.id.clone();
             assert!(
                 templates.insert(id.clone(), template).is_none(),

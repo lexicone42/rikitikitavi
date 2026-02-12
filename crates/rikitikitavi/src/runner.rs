@@ -1,7 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
 use futures::future::join_all;
-use rikitikitavi_analysis::{calculate_risk_score, generate_attack_paths, generate_priority_actions};
+use rikitikitavi_analysis::{
+    calculate_risk_score, generate_attack_paths, generate_priority_actions,
+};
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
 use rikitikitavi_models::{Device, DeviceType, Finding, ScanContext, ScanResults};
 use rikitikitavi_scanners::ScannerRegistry;
@@ -161,7 +163,13 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     // Essential scanners that always run in Passive mode (they don't
     // depend on open ports and check fundamental network hygiene).
     let passive_essential: &[&str] = &[
-        "credentials", "router", "wifi", "dns", "arp", "dhcp", "exposure",
+        "credentials",
+        "router",
+        "wifi",
+        "dns",
+        "arp",
+        "dhcp",
+        "exposure",
     ];
 
     let phase2_filtered: Vec<_> = phase2
@@ -416,10 +424,9 @@ mod tests {
     #[test]
     fn test_dedup_prefers_phase2() {
         // Same detail score, but prefer non-ports scanner
-        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 21)
-            .with_cwe("CWE-319");
-        let f2 = basic_finding("credentials", Severity::Medium, ip("10.0.0.1"), 21)
-            .with_cwe("CWE-287");
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 21).with_cwe("CWE-319");
+        let f2 =
+            basic_finding("credentials", Severity::Medium, ip("10.0.0.1"), 21).with_cwe("CWE-287");
         let result = deduplicate_findings(vec![f1, f2]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].scanner, "credentials");
@@ -443,8 +450,7 @@ mod tests {
 
     #[test]
     fn test_dedup_evidence_wins() {
-        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23)
-            .with_cwe("CWE-319");
+        let f1 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23).with_cwe("CWE-319");
         let f2 = basic_finding("services", Severity::Medium, ip("10.0.0.1"), 23)
             .with_evidence("SSH-2.0-OpenSSH_8.9p1");
         let result = deduplicate_findings(vec![f1, f2]);
@@ -478,7 +484,12 @@ mod tests {
 
     fn arb_finding_for_dedup() -> impl Strategy<Value = Finding> {
         (
-            prop_oneof![Just("ports"), Just("services"), Just("credentials"), Just("smb")],
+            prop_oneof![
+                Just("ports"),
+                Just("services"),
+                Just("credentials"),
+                Just("smb")
+            ],
             arb_severity(),
             (0_u8..5_u8),
             (1_u16..100_u16),

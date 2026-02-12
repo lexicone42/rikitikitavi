@@ -32,9 +32,7 @@ pub async fn get_public_ip() -> Result<IpAddr> {
         }
     }
 
-    Err(anyhow!(
-        "failed to detect public IP from any provider"
-    ))
+    Err(anyhow!("failed to detect public IP from any provider"))
 }
 
 /// Try to get the public IP from a single provider.

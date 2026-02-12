@@ -29,7 +29,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Finding> {
     let version_lower = version.to_lowercase();
 
-    if version_lower.contains("tls 1.0") || version_lower.contains("tlsv1.0")
+    if version_lower.contains("tls 1.0")
+        || version_lower.contains("tlsv1.0")
         || version_lower.contains("tls1.0")
     {
         return Some(
@@ -44,11 +45,15 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-326")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.tls10-enabled", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.tls10-enabled",
+                &[],
+            )),
         );
     }
 
-    if version_lower.contains("tls 1.1") || version_lower.contains("tlsv1.1")
+    if version_lower.contains("tls 1.1")
+        || version_lower.contains("tlsv1.1")
         || version_lower.contains("tls1.1")
     {
         return Some(
@@ -62,7 +67,10 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-326")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.tls11-enabled", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.tls11-enabled",
+                &[],
+            )),
         );
     }
 
@@ -78,7 +86,10 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-326")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.sslv2v3-enabled", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.sslv2v3-enabled",
+                &[],
+            )),
         );
     }
 
@@ -102,7 +113,10 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_port(port)
         .with_service("TLS")
         .with_cwe("CWE-295")
-        .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.cert-expired", &[]));
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ssl.cert-expired",
+            &[],
+        ));
     }
 
     if issue_lower.contains("self-signed") || issue_lower.contains("self signed") {
@@ -118,7 +132,10 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_port(port)
         .with_service("TLS")
         .with_cwe("CWE-295")
-        .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.cert-self-signed", &[]));
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ssl.cert-self-signed",
+            &[],
+        ));
     }
 
     if issue_lower.contains("weak key") || issue_lower.contains("1024") {
@@ -133,7 +150,10 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_port(port)
         .with_service("TLS")
         .with_cwe("CWE-326")
-        .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.cert-weak-key", &[]));
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ssl.cert-weak-key",
+            &[],
+        ));
     }
 
     if issue_lower.contains("hostname mismatch") || issue_lower.contains("name mismatch") {
@@ -265,29 +285,22 @@ async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> 
     .with_no_client_auth();
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-    let server_name = rustls::pki_types::ServerName::IpAddress(
-        rustls::pki_types::IpAddr::from(ip),
-    );
+    let server_name = rustls::pki_types::ServerName::IpAddress(rustls::pki_types::IpAddr::from(ip));
 
-    let tls_stream = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        connector.connect(server_name, tcp),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let tls_stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
+        .await
+        .ok()?
+        .ok()?;
 
     let conn = tls_stream.get_ref().1;
 
-    let protocol_version = conn.protocol_version().map_or_else(
-        || "unknown".to_owned(),
-        |v| format!("{v:?}"),
-    );
+    let protocol_version = conn
+        .protocol_version()
+        .map_or_else(|| "unknown".to_owned(), |v| format!("{v:?}"));
 
-    let cipher_suite = conn.negotiated_cipher_suite().map_or_else(
-        || "unknown".to_owned(),
-        |cs| format!("{:?}", cs.suite()),
-    );
+    let cipher_suite = conn
+        .negotiated_cipher_suite()
+        .map_or_else(|| "unknown".to_owned(), |cs| format!("{:?}", cs.suite()));
 
     let cert_chain_length = conn.peer_certificates().map_or(0, <[_]>::len);
 
@@ -362,7 +375,8 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                     &format!(
                         "Server at {ip}:{port} negotiated TLS 1.2. While still secure, \
                          TLS 1.3 offers improved performance and stronger security \
-                         guarantees. Cipher: {}", info.cipher_suite
+                         guarantees. Cipher: {}",
+                        info.cipher_suite
                     ),
                     Severity::Info,
                 )
@@ -377,7 +391,8 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                     &format!("TLS 1.3 on {ip}:{port}"),
                     &format!(
                         "Server at {ip}:{port} supports TLS 1.3 — the latest and most \
-                         secure protocol version. Cipher: {}", info.cipher_suite
+                         secure protocol version. Cipher: {}",
+                        info.cipher_suite
                     ),
                     Severity::Info,
                 )
@@ -458,9 +473,11 @@ impl Scanner for SslScanner {
         }
 
         // In Passive mode, only check port 443 (fastest)
-        let allowed_tls_ports: &[u16] = if ctx.config.intensity.at_least(
-            rikitikitavi_models::config::ScanIntensity::Active,
-        ) {
+        let allowed_tls_ports: &[u16] = if ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+        {
             TLS_PORTS
         } else {
             &[443]

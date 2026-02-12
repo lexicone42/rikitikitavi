@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),  // Content
+            Constraint::Min(10),   // Content
             Constraint::Length(3), // Footer
         ])
         .split(frame.area());
@@ -65,9 +65,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 ),
                 Span::styled(
                     format!("  {}", action.title),
-                    Style::default()
-                        .fg(palette.fg)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
                 ),
             ]));
 
@@ -110,10 +108,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                                 .fg(palette.accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            step.clone(),
-                            Style::default().fg(palette.fg),
-                        ),
+                        Span::styled(step.clone(), Style::default().fg(palette.fg)),
                     ]));
                 }
             }

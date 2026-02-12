@@ -128,7 +128,9 @@ async fn cmd_scan(
     // ── History: load previous before saving current ────────────────
     let history = rikitikitavi_analysis::ScanHistory::new();
     let previous = if args.compare_previous {
-        history.as_ref().and_then(|h| h.load_latest().ok().flatten())
+        history
+            .as_ref()
+            .and_then(|h| h.load_latest().ok().flatten())
     } else {
         None
     };
@@ -175,11 +177,31 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
     use rikitikitavi_core::Severity;
 
     let total = results.findings.len();
-    let critical = results.findings.iter().filter(|f| f.severity == Severity::Critical).count();
-    let high = results.findings.iter().filter(|f| f.severity == Severity::High).count();
-    let medium = results.findings.iter().filter(|f| f.severity == Severity::Medium).count();
-    let low = results.findings.iter().filter(|f| f.severity == Severity::Low).count();
-    let info = results.findings.iter().filter(|f| f.severity == Severity::Info).count();
+    let critical = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let high = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
+    let medium = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Medium)
+        .count();
+    let low = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Low)
+        .count();
+    let info = results
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Info)
+        .count();
 
     let (grade, _) = rikitikitavi_analysis::risk_grade(critical, high, medium);
 
@@ -190,18 +212,33 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
 
     // ── Severity breakdown ──────────────────────────────────────
     println!("  Severity breakdown:");
-    if critical > 0 { println!("    CRITICAL  {critical}"); }
-    if high > 0     { println!("    HIGH      {high}"); }
-    if medium > 0   { println!("    MEDIUM    {medium}"); }
-    if low > 0      { println!("    LOW       {low}"); }
-    if info > 0     { println!("    INFO      {info}"); }
+    if critical > 0 {
+        println!("    CRITICAL  {critical}");
+    }
+    if high > 0 {
+        println!("    HIGH      {high}");
+    }
+    if medium > 0 {
+        println!("    MEDIUM    {medium}");
+    }
+    if low > 0 {
+        println!("    LOW       {low}");
+    }
+    if info > 0 {
+        println!("    INFO      {info}");
+    }
     println!();
 
     // ── Actionable findings (Critical/High/Medium) with detail ─
     let actionable: Vec<_> = results
         .findings
         .iter()
-        .filter(|f| matches!(f.severity, Severity::Critical | Severity::High | Severity::Medium))
+        .filter(|f| {
+            matches!(
+                f.severity,
+                Severity::Critical | Severity::High | Severity::Medium
+            )
+        })
         .collect();
 
     if !actionable.is_empty() {
@@ -269,10 +306,7 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
 
 fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) {
     if let Some(baseline) = diff.baseline_time {
-        println!(
-            "Since last scan ({}):",
-            baseline.format("%Y-%m-%d %H:%M")
-        );
+        println!("Since last scan ({}):", baseline.format("%Y-%m-%d %H:%M"));
     } else {
         println!("Comparison with previous scan:");
     }
@@ -415,8 +449,7 @@ async fn cmd_tui(
     let mut terminal = Terminal::new(backend)?;
 
     // Channel for background re-scan results
-    let (scan_tx, mut scan_rx) =
-        tokio::sync::mpsc::channel::<rikitikitavi_models::ScanResults>(1);
+    let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel::<rikitikitavi_models::ScanResults>(1);
 
     // Main loop
     loop {
@@ -446,14 +479,14 @@ async fn cmd_tui(
         if let Some(event) =
             rikitikitavi_tui::events::poll_event(std::time::Duration::from_millis(100))?
         {
-            let rescan_requested =
-                if let Some(key) = rikitikitavi_tui::events::as_key_press(&event) {
-                    app.handle_key(key.code)
-                } else if let Some(mouse) = rikitikitavi_tui::events::as_mouse_event(&event) {
-                    app.handle_mouse(*mouse)
-                } else {
-                    false
-                };
+            let rescan_requested = if let Some(key) = rikitikitavi_tui::events::as_key_press(&event)
+            {
+                app.handle_key(key.code)
+            } else if let Some(mouse) = rikitikitavi_tui::events::as_mouse_event(&event) {
+                app.handle_mouse(*mouse)
+            } else {
+                false
+            };
             if rescan_requested {
                 // Spawn background re-scan
                 let tx = scan_tx.clone();
@@ -493,10 +526,7 @@ async fn cmd_tui(
     Ok(())
 }
 
-fn cmd_report(
-    args: &cli::ReportArgs,
-    _app_config: &rikitikitavi_models::config::AppConfig,
-) {
+fn cmd_report(args: &cli::ReportArgs, _app_config: &rikitikitavi_models::config::AppConfig) {
     if args.latest {
         let Some(history) = rikitikitavi_analysis::ScanHistory::new() else {
             println!("Could not determine data directory.");
@@ -597,16 +627,12 @@ async fn cmd_unifi_scan(
             }
             "https://localhost".to_owned()
         } else {
-            anyhow::bail!(
-                "Not running on a UniFi device. Use --controller for remote mode."
-            );
+            anyhow::bail!("Not running on a UniFi device. Use --controller for remote mode.");
         }
     } else if let Some(ctrl) = controller {
         ctrl
     } else {
-        anyhow::bail!(
-            "Specify --local (on-device) or --controller <url> for remote scanning."
-        );
+        anyhow::bail!("Specify --local (on-device) or --controller <url> for remote scanning.");
     };
 
     println!("Connecting to UniFi controller at {url}...");
@@ -621,9 +647,7 @@ async fn cmd_unifi_scan(
         client.login(&u, &p).await?;
         println!("Authenticated with username/password.");
     } else {
-        anyhow::bail!(
-            "Provide --token <api-token> or --user <username> --password <password>."
-        );
+        anyhow::bail!("Provide --token <api-token> or --user <username> --password <password>.");
     }
 
     println!("Running UniFi security audit...\n");
@@ -636,10 +660,7 @@ async fn cmd_unifi_scan(
             println!("WLANs: {} configured", wlans.len());
             for wlan in &wlans {
                 let status = if wlan.enabled { "enabled" } else { "disabled" };
-                println!(
-                    "  {} ({}, {})",
-                    wlan.name, wlan.security, status
-                );
+                println!("  {} ({}, {})", wlan.name, wlan.security, status);
             }
             for wlan in &wlans {
                 all_findings.extend(rikitikitavi_unifi::scanner::audit_wlan(wlan));
@@ -880,11 +901,8 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         .collect();
 
     // ── Analyse ─────────────────────────────────────────────────
-    let findings = passive_wifi::analyse_results(
-        &results,
-        &known_bssids,
-        args.home_ssid.as_deref(),
-    );
+    let findings =
+        passive_wifi::analyse_results(&results, &known_bssids, args.home_ssid.as_deref());
 
     // ── Print report ────────────────────────────────────────────
     if findings.is_empty() {

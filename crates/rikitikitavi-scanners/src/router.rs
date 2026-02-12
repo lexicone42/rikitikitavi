@@ -36,12 +36,7 @@ async fn check_http_redirect(ip: IpAddr) -> Option<bool> {
         if resp.status().is_redirection() {
             resp.headers()
                 .get("location")
-                .is_some_and(|location| {
-                    location
-                        .to_str()
-                        .unwrap_or("")
-                        .starts_with("https://")
-                })
+                .is_some_and(|location| location.to_str().unwrap_or("").starts_with("https://"))
         } else {
             // Got a response but no redirect — HTTP is served directly
             false
@@ -249,9 +244,7 @@ impl Scanner for RouterScanner {
                 .with_ip(gateway)
                 .with_service("UPnP")
                 .with_cwe("CWE-284")
-                .with_references(vec![
-                    "https://www.upnp-hacks.org/".to_owned(),
-                ])
+                .with_references(vec!["https://www.upnp-hacks.org/".to_owned()])
                 .with_opt_remediation(crate::remediation::get(
                     "rikitikitavi.router.upnp-enabled",
                     &[],

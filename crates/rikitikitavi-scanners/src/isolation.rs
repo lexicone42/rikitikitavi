@@ -70,12 +70,11 @@ impl Scanner for IsolationScanner {
         tracing::info!("running network isolation scan");
         let mut findings = Vec::new();
 
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "isolation".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         // Detect unique /24 subnets in ARP cache
         let subnets: HashSet<[u8; 3]> = arp_entries
@@ -91,19 +90,22 @@ impl Scanner for IsolationScanner {
                 .map(|s| format!("{}.{}.{}.0/24", s[0], s[1], s[2]))
                 .collect();
 
-            findings.push(Finding::new(
-                "isolation",
-                &format!("Multiple subnets detected ({})", subnets.len()),
-                &format!(
-                    "ARP cache contains devices from {} different /24 subnets: {}. \
+            findings.push(
+                Finding::new(
+                    "isolation",
+                    &format!("Multiple subnets detected ({})", subnets.len()),
+                    &format!(
+                        "ARP cache contains devices from {} different /24 subnets: {}. \
                      Multiple subnets visible from a single host may indicate a flat \
                      network without proper VLAN segmentation, or that inter-VLAN \
                      routing is enabled without restrictions.",
-                    subnets.len(),
-                    subnet_list.join(", ")
-                ),
-                Severity::Low,
-            ).with_cwe("CWE-653"));
+                        subnets.len(),
+                        subnet_list.join(", ")
+                    ),
+                    Severity::Low,
+                )
+                .with_cwe("CWE-653"),
+            );
         } else if subnets.len() == 1 {
             findings.push(Finding::new(
                 "isolation",
@@ -151,7 +153,10 @@ impl Scanner for IsolationScanner {
                     Severity::Medium,
                 )
                 .with_cwe("CWE-653")
-                .with_opt_remediation(crate::remediation::get("rikitikitavi.isolation.inter-vlan-routing", &[])),
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.isolation.inter-vlan-routing",
+                    &[],
+                )),
             );
         }
 
@@ -170,7 +175,10 @@ impl Scanner for IsolationScanner {
                     Severity::Medium,
                 )
                 .with_cwe("CWE-653")
-                .with_opt_remediation(crate::remediation::get("rikitikitavi.isolation.large-flat-network", &[])),
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.isolation.large-flat-network",
+                    &[],
+                )),
             );
         }
 

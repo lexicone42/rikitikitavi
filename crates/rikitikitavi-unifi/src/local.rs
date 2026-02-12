@@ -114,7 +114,8 @@ fn detect_device_type() -> UniFiDevice {
     // Try hostname as last resort (some devices set hostname to model)
     if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
         let hostname = hostname.trim().to_lowercase();
-        if hostname.starts_with("udm") || hostname.starts_with("ucg") || hostname.starts_with("udr") {
+        if hostname.starts_with("udm") || hostname.starts_with("ucg") || hostname.starts_with("udr")
+        {
             return classify_board(&hostname);
         }
     }

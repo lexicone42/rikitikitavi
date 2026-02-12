@@ -32,13 +32,9 @@ impl ScanHistory {
         std::fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("creating scan history dir: {}", self.data_dir.display()))?;
 
-        let filename = format!(
-            "scan-{}.json",
-            results.scanned_at.format("%Y%m%d-%H%M%S")
-        );
+        let filename = format!("scan-{}.json", results.scanned_at.format("%Y%m%d-%H%M%S"));
         let path = self.data_dir.join(filename);
-        let json = serde_json::to_string_pretty(results)
-            .context("serializing scan results")?;
+        let json = serde_json::to_string_pretty(results).context("serializing scan results")?;
         std::fs::write(&path, json)
             .with_context(|| format!("writing scan file: {}", path.display()))?;
         self.prune()?;
@@ -101,9 +97,7 @@ mod tests {
 
     fn sample_results() -> ScanResults {
         ScanResults {
-            findings: vec![
-                Finding::new("ports", "SSH open", "desc", Severity::Medium),
-            ],
+            findings: vec![Finding::new("ports", "SSH open", "desc", Severity::Medium)],
             risk_score: 42.0,
             scanned_at: Utc::now(),
             ..Default::default()
@@ -146,11 +140,10 @@ mod tests {
         // Save 3 scans with different timestamps
         for i in 0..3 {
             let mut results = sample_results();
-            results.scanned_at = chrono::DateTime::parse_from_rfc3339(
-                &format!("2026-01-0{}T12:00:00Z", i + 1),
-            )
-            .unwrap()
-            .with_timezone(&Utc);
+            results.scanned_at =
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-01-0{}T12:00:00Z", i + 1))
+                    .unwrap()
+                    .with_timezone(&Utc);
             history.save(&results).unwrap();
         }
 
@@ -173,11 +166,10 @@ mod tests {
         // Save 12 scans (exceeds MAX_HISTORY of 10)
         for i in 0..12 {
             let mut results = sample_results();
-            results.scanned_at = chrono::DateTime::parse_from_rfc3339(
-                &format!("2026-01-{:02}T12:00:00Z", i + 1),
-            )
-            .unwrap()
-            .with_timezone(&Utc);
+            results.scanned_at =
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-01-{:02}T12:00:00Z", i + 1))
+                    .unwrap()
+                    .with_timezone(&Utc);
             history.save(&results).unwrap();
         }
 
@@ -200,11 +192,10 @@ mod tests {
         for i in 0..3 {
             let mut results = sample_results();
             results.risk_score = f64::from(i);
-            results.scanned_at = chrono::DateTime::parse_from_rfc3339(
-                &format!("2026-01-0{}T12:00:00Z", i + 1),
-            )
-            .unwrap()
-            .with_timezone(&Utc);
+            results.scanned_at =
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-01-0{}T12:00:00Z", i + 1))
+                    .unwrap()
+                    .with_timezone(&Utc);
             history.save(&results).unwrap();
         }
 

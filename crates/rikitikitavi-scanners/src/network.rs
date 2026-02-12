@@ -82,12 +82,11 @@ impl Scanner for NetworkScanner {
         }
 
         // Read ARP cache for device discovery
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "network".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let device_count = arp_entries.len();
         tracing::info!(device_count, "devices found in ARP cache");

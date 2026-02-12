@@ -39,11 +39,7 @@ const WEAK_SSH_CIPHERS: &[&str] = &[
 ];
 
 /// Weak SSH MAC algorithms.
-const WEAK_SSH_MACS: &[&str] = &[
-    "hmac-md5",
-    "hmac-md5-96",
-    "hmac-sha1-96",
-];
+const WEAK_SSH_MACS: &[&str] = &["hmac-md5", "hmac-md5-96", "hmac-sha1-96"];
 
 /// Parsed SSH `kex_init` algorithm lists.
 #[derive(Debug, Default)]
@@ -174,7 +170,7 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_service("SSH")
             .with_cwe("CWE-327")
             .with_references(vec![
-                "https://nvd.nist.gov/vuln/detail/CVE-2008-5161".to_owned(),
+                "https://nvd.nist.gov/vuln/detail/CVE-2008-5161".to_owned()
             ]),
         );
     }
@@ -388,11 +384,7 @@ async fn probe_smtp_ehlo(ip: IpAddr, port: u16) -> Option<SmtpEhloInfo> {
         .ok()?;
 
     // Send QUIT
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        stream.write_all(b"QUIT\r\n"),
-    )
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"QUIT\r\n")).await;
 
     if en == 0 {
         return None;
@@ -522,11 +514,7 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
         .ok()?;
 
     // Send QUIT
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        stream.write_all(b"QUIT\r\n"),
-    )
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"QUIT\r\n")).await;
 
     if fn_ == 0 {
         return None;
@@ -605,7 +593,8 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     let banner_lower = banner.to_lowercase();
 
     // Redis — check for no-auth
-    if port == 6379 && banner_lower.contains("redis")
+    if port == 6379
+        && banner_lower.contains("redis")
         && !banner_lower.contains("noauth")
         && !banner_lower.contains("err")
     {
@@ -623,7 +612,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_port(port)
             .with_service("Redis")
             .with_cwe("CWE-306")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.services.redis-no-auth", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.redis-no-auth",
+                &[],
+            )),
         );
     }
 
@@ -643,7 +635,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_port(port)
             .with_service("MySQL")
             .with_cwe("CWE-284")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.services.mysql-exposed", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.mysql-exposed",
+                &[],
+            )),
         );
     }
 
@@ -660,7 +655,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             .with_port(port)
             .with_service("PostgreSQL")
             .with_cwe("CWE-284")
-            .with_opt_remediation(crate::remediation::get("rikitikitavi.services.postgresql-exposed", &[])),
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.postgresql-exposed",
+                &[],
+            )),
         );
     }
 
@@ -683,7 +681,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
                 .with_port(port)
                 .with_service("SSH")
                 .with_cwe("CWE-798")
-                .with_opt_remediation(crate::remediation::get("rikitikitavi.services.dropbear-ssh", &[])),
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.services.dropbear-ssh",
+                    &[],
+                )),
             );
         }
 
@@ -720,10 +721,18 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         if severity == Severity::High {
             finding = finding
                 .with_cwe("CWE-200")
-                .with_references(vec!["https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_owned()])
-                .with_opt_remediation(crate::remediation::get("rikitikitavi.services.eol-openssh", &[]));
+                .with_references(vec![
+                    "https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_owned()
+                ])
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.services.eol-openssh",
+                    &[],
+                ));
         } else if severity == Severity::Medium {
-            finding = finding.with_opt_remediation(crate::remediation::get("rikitikitavi.services.outdated-ssh", &[]));
+            finding = finding.with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.outdated-ssh",
+                &[],
+            ));
         }
 
         return Some(finding);
@@ -788,8 +797,20 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
 const fn is_likely_http_port(port: u16) -> bool {
     matches!(
         port,
-        80 | 443 | 3000 | 5000 | 8000 | 8008 | 8080 | 8081 | 8443 | 8444 | 8888 | 8880
-            | 9000 | 9090 | 9443
+        80 | 443
+            | 3000
+            | 5000
+            | 8000
+            | 8008
+            | 8080
+            | 8081
+            | 8443
+            | 8444
+            | 8888
+            | 8880
+            | 9000
+            | 9090
+            | 9443
     )
 }
 
@@ -847,9 +868,11 @@ impl Scanner for ServicesScanner {
                         }
                         // Deep protocol probes for specific services
                         // (skipped in Passive mode for speed)
-                        if ctx.config.intensity.at_least(
-                            rikitikitavi_models::config::ScanIntensity::Active,
-                        ) {
+                        if ctx
+                            .config
+                            .intensity
+                            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+                        {
                             findings.extend(deep_probe(ip, port).await);
                         }
                     } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
@@ -867,17 +890,19 @@ impl Scanner for ServicesScanner {
                 }
             }
 
-            tracing::info!(findings_count = findings.len(), "adaptive banner scan complete");
+            tracing::info!(
+                findings_count = findings.len(),
+                "adaptive banner scan complete"
+            );
             return Ok(findings);
         }
 
         // ── Fallback: classic mode using ARP cache ──────────────────
-        let arp_entries = rikitikitavi_network::read_arp_cache().map_err(|e| {
-            ScanError::ScannerFailed {
+        let arp_entries =
+            rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "services".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
-            }
-        })?;
+            })?;
 
         let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
             || arp_entries.iter().map(|e| e.ip).collect(),
@@ -922,7 +947,9 @@ impl Scanner for ServicesScanner {
     }
 
     fn relevant_ports(&self) -> &[u16] {
-        &[21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1883, 3389, 5900, 8080]
+        &[
+            21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1883, 3389, 5900, 8080,
+        ]
     }
 }
 
@@ -959,8 +986,7 @@ mod tests {
     #[test]
     fn test_classify_redis_no_auth() {
         let ip = "192.168.1.50".parse().unwrap();
-        let finding =
-            classify_banner(ip, 6379, "+PONG\r\nredis_version:7.2.0").unwrap();
+        let finding = classify_banner(ip, 6379, "+PONG\r\nredis_version:7.2.0").unwrap();
         // Contains "redis" and doesn't have "err" or "noauth" → Critical
         assert_eq!(finding.severity, Severity::Critical);
     }
@@ -1067,7 +1093,10 @@ mod tests {
             "hmac-md5,hmac-sha2-256",
         );
         let info = parse_ssh_kex_init(&pkt).unwrap();
-        assert!(info.kex_algorithms.iter().any(|a| a.contains("group1-sha1")));
+        assert!(info
+            .kex_algorithms
+            .iter()
+            .any(|a| a.contains("group1-sha1")));
         assert!(info.ciphers_client.iter().any(|a| a.contains("aes128-cbc")));
         assert!(info.macs_client.iter().any(|a| a.contains("hmac-md5")));
     }
@@ -1084,7 +1113,10 @@ mod tests {
         let info = parse_ssh_kex_init(&pkt).unwrap();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         let findings = classify_ssh_kex(ip, 22, &info);
-        assert!(findings.is_empty(), "strong algorithms should produce no findings");
+        assert!(
+            findings.is_empty(),
+            "strong algorithms should produce no findings"
+        );
     }
 
     #[test]
