@@ -1,0 +1,53 @@
+# cargo-deny configuration for rikitikitavi
+# Run: cargo deny check
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# Advisory database — deny known vulnerabilities
+[advisories]
+ignore = [
+    # paste is unmaintained but pulled in transitively by ratatui — no action possible until ratatui migrates
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep via ratatui; awaiting upstream migration to pastey" },
+]
+
+# License allowlist — common permissive licenses
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+# Bans — warn on duplicate crate versions
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+# Sources — only crates.io
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
