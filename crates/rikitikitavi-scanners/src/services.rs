@@ -1050,6 +1050,7 @@ mod tests {
 
         for list in [kex, host_key, cipher_c2s, cipher_s2c, mac_c2s] {
             let bytes = list.as_bytes();
+            #[allow(clippy::cast_possible_truncation)] // test data, always small
             pkt.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             pkt.extend_from_slice(bytes);
         }

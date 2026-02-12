@@ -154,6 +154,7 @@ async fn cmd_scan(
             cli::ReportFormatArg::Json => rikitikitavi_export::export_json(&results, &output)?,
             cli::ReportFormatArg::Html => rikitikitavi_export::export_html(&results, &output)?,
             cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(&results, &output)?,
+            cli::ReportFormatArg::Ocsf => rikitikitavi_export::export_ocsf_json(&results, &output)?,
         }
         println!("Results written to {}", output.display());
     } else if !args.quiet {
@@ -921,6 +922,9 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
                 cli::ReportFormatArg::Csv => {
                     rikitikitavi_export::export_csv(&scan_results, output)?;
                 }
+                cli::ReportFormatArg::Ocsf => {
+                    rikitikitavi_export::export_ocsf_json(&scan_results, output)?;
+                }
             }
             println!("Results written to {}", output.display());
         }
@@ -950,6 +954,9 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
             }
             cli::ReportFormatArg::Csv => {
                 rikitikitavi_export::export_csv(&scan_results, output)?;
+            }
+            cli::ReportFormatArg::Ocsf => {
+                rikitikitavi_export::export_ocsf_json(&scan_results, output)?;
             }
         }
         println!("Results written to {}", output.display());

@@ -556,6 +556,7 @@ mod tests {
 
     /// Helper: build a minimal radiotap header with specific present flags.
     fn build_radiotap(present: u32, fields: &[u8]) -> Vec<u8> {
+        #[allow(clippy::cast_possible_truncation)] // test helper, lengths are always small
         let length = (8 + fields.len()) as u16;
         let mut data = vec![
             0x00,                              // version
@@ -569,18 +570,19 @@ mod tests {
     }
 
     /// Build a minimal 802.11 management frame header (24 bytes).
-    fn build_mgmt_header(fc0: u8, dest: &MacAddress, src: &MacAddress, bssid: &MacAddress) -> Vec<u8> {
+    fn build_mgmt_header(fc0: u8, dest: MacAddress, src: MacAddress, bssid: MacAddress) -> Vec<u8> {
         let mut frame = vec![fc0, 0x00]; // frame control
         frame.extend_from_slice(&[0x00, 0x00]); // duration
-        frame.extend_from_slice(dest);
-        frame.extend_from_slice(src);
-        frame.extend_from_slice(bssid);
+        frame.extend_from_slice(&dest);
+        frame.extend_from_slice(&src);
+        frame.extend_from_slice(&bssid);
         frame.extend_from_slice(&[0x00, 0x00]); // sequence control
         frame
     }
 
     /// Build a tagged parameter.
     fn build_tag(id: u8, data: &[u8]) -> Vec<u8> {
+        #[allow(clippy::cast_possible_truncation)] // test helper, tag data always < 256
         let mut tag = vec![id, data.len() as u8];
         tag.extend_from_slice(data);
         tag
@@ -617,7 +619,7 @@ mod tests {
         fields.extend_from_slice(&2437u16.to_le_bytes()); // 2437 MHz = channel 6
         fields.extend_from_slice(&[0x00, 0x00]); // channel flags
         // Signal: i8
-        fields.push((-50i8) as u8);
+        fields.push((-50_i8).to_ne_bytes()[0]);
 
         let data = build_radiotap(present, &fields);
         let header = parse_radiotap(&data).unwrap();
@@ -639,12 +641,12 @@ mod tests {
 
     #[test]
     fn test_parse_beacon_frame() {
-        let radiotap = build_radiotap(RADIOTAP_DBM_SIGNAL, &[(-60i8) as u8]);
+        let radiotap = build_radiotap(RADIOTAP_DBM_SIGNAL, &[(-60_i8).to_ne_bytes()[0]]);
 
         let bssid: MacAddress = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
         let dest: MacAddress = [0xFF; 6]; // broadcast
         let src = bssid;
-        let mut frame = build_mgmt_header(FC_BEACON, &dest, &src, &bssid);
+        let mut frame = build_mgmt_header(FC_BEACON, dest, src, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0010)); // privacy bit set
         frame.extend_from_slice(&build_tag(TAG_SSID, b"TestNetwork"));
         frame.extend_from_slice(&build_tag(TAG_DS_PARAMETER, &[6]));
@@ -682,7 +684,7 @@ mod tests {
         let radiotap = build_radiotap(0, &[]);
 
         let bssid: MacAddress = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        let mut frame = build_mgmt_header(FC_BEACON, &[0xFF; 6], &bssid, &bssid);
+        let mut frame = build_mgmt_header(FC_BEACON, [0xFF; 6], bssid, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0010));
         frame.extend_from_slice(&build_tag(TAG_SSID, b"WPA3Net"));
 
@@ -715,7 +717,7 @@ mod tests {
     fn test_parse_beacon_open() {
         let radiotap = build_radiotap(0, &[]);
         let bssid: MacAddress = [0xAA; 6];
-        let mut frame = build_mgmt_header(FC_BEACON, &[0xFF; 6], &bssid, &bssid);
+        let mut frame = build_mgmt_header(FC_BEACON, [0xFF; 6], bssid, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0000)); // no privacy bit
         frame.extend_from_slice(&build_tag(TAG_SSID, b"OpenNet"));
 
@@ -735,7 +737,7 @@ mod tests {
     fn test_parse_beacon_wep() {
         let radiotap = build_radiotap(0, &[]);
         let bssid: MacAddress = [0xBB; 6];
-        let mut frame = build_mgmt_header(FC_BEACON, &[0xFF; 6], &bssid, &bssid);
+        let mut frame = build_mgmt_header(FC_BEACON, [0xFF; 6], bssid, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0010)); // privacy but no RSN/WPA
         frame.extend_from_slice(&build_tag(TAG_SSID, b"WepNet"));
 
@@ -754,7 +756,7 @@ mod tests {
     fn test_parse_beacon_wpa1() {
         let radiotap = build_radiotap(0, &[]);
         let bssid: MacAddress = [0xCC; 6];
-        let mut frame = build_mgmt_header(FC_BEACON, &[0xFF; 6], &bssid, &bssid);
+        let mut frame = build_mgmt_header(FC_BEACON, [0xFF; 6], bssid, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0010));
         frame.extend_from_slice(&build_tag(TAG_SSID, b"WpaNet"));
 
@@ -776,11 +778,11 @@ mod tests {
 
     #[test]
     fn test_parse_probe_request_directed() {
-        let radiotap = build_radiotap(RADIOTAP_DBM_SIGNAL, &[(-70i8) as u8]);
+        let radiotap = build_radiotap(RADIOTAP_DBM_SIGNAL, &[(-70_i8).to_ne_bytes()[0]]);
         let src: MacAddress = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
         let dest: MacAddress = [0xFF; 6];
         let bssid: MacAddress = [0xFF; 6];
-        let mut frame = build_mgmt_header(FC_PROBE_REQUEST, &dest, &src, &bssid);
+        let mut frame = build_mgmt_header(FC_PROBE_REQUEST, dest, src, bssid);
         frame.extend_from_slice(&build_tag(TAG_SSID, b"MyHomeWifi"));
 
         let mut packet = radiotap;
@@ -800,7 +802,7 @@ mod tests {
     fn test_parse_probe_request_broadcast() {
         let radiotap = build_radiotap(0, &[]);
         let src: MacAddress = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
-        let mut frame = build_mgmt_header(FC_PROBE_REQUEST, &[0xFF; 6], &src, &[0xFF; 6]);
+        let mut frame = build_mgmt_header(FC_PROBE_REQUEST, [0xFF; 6], src, [0xFF; 6]);
         frame.extend_from_slice(&build_tag(TAG_SSID, &[])); // empty SSID = broadcast
 
         let mut packet = radiotap;
@@ -820,7 +822,7 @@ mod tests {
         let src: MacAddress = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
         let dest: MacAddress = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
         let bssid = src;
-        let mut frame = build_mgmt_header(FC_DEAUTH, &dest, &src, &bssid);
+        let mut frame = build_mgmt_header(FC_DEAUTH, dest, src, bssid);
         frame.extend_from_slice(&7u16.to_le_bytes()); // reason code 7: Class 3 frame from non-associated station
 
         let mut packet = radiotap;
@@ -843,7 +845,7 @@ mod tests {
         let src: MacAddress = [0xAA; 6];
         let dest: MacAddress = [0xBB; 6];
         let bssid = src;
-        let mut frame = build_mgmt_header(FC_DISASSOC, &dest, &src, &bssid);
+        let mut frame = build_mgmt_header(FC_DISASSOC, dest, src, bssid);
         frame.extend_from_slice(&3u16.to_le_bytes()); // reason code
 
         let mut packet = radiotap;
@@ -866,7 +868,7 @@ mod tests {
         let mut packet = radiotap;
         packet.extend_from_slice(&[0x80, 0x00]);
         // Should still parse but beacon will fail due to insufficient length
-        assert!(matches!(parse_frame(&packet), None));
+        assert!(parse_frame(&packet).is_none());
     }
 
     #[test]
@@ -937,7 +939,7 @@ mod tests {
     fn test_probe_response_parsing() {
         let radiotap = build_radiotap(0, &[]);
         let bssid: MacAddress = [0x11; 6];
-        let mut frame = build_mgmt_header(FC_PROBE_RESPONSE, &[0xFF; 6], &bssid, &bssid);
+        let mut frame = build_mgmt_header(FC_PROBE_RESPONSE, [0xFF; 6], bssid, bssid);
         frame.extend_from_slice(&build_beacon_fixed(0x0010));
         let rsn_ie = {
             let mut ie = vec![];

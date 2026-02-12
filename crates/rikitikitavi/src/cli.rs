@@ -373,6 +373,7 @@ pub enum ReportFormatArg {
     Json,
     Html,
     Csv,
+    Ocsf,
 }
 
 #[derive(Clone, ValueEnum)]

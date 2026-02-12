@@ -442,7 +442,7 @@ mod tests {
         let results = make_results(findings, 40.0);
         let html = render_html_report(&results);
         // Critical should be in an open details
-        assert!(html.contains(r#"<details open>"#));
+        assert!(html.contains(r"<details open>"));
         // Medium and Low should be in non-open details
         assert!(html.contains(r#"<details><summary><span class="badge medium">"#));
         assert!(html.contains(r#"<details><summary><span class="badge low">"#));

@@ -354,7 +354,7 @@ mod tests {
             // The number of unique fingerprints in new determines the total
             let unique_new: std::collections::HashSet<_> = new_findings
                 .iter()
-                .map(|f| f.fingerprint())
+                .map(rikitikitavi_models::Finding::fingerprint)
                 .collect();
             assert_eq!(accounted, unique_new.len());
         }

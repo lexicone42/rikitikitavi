@@ -1704,6 +1704,7 @@ dependencies = [
  "rikitikitavi-models",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "uuid",
 ]
