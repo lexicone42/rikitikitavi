@@ -61,6 +61,7 @@ futures = "0.3"
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
 ipnetwork = "0.20"
 base64 = "0.22"
 

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::app::{App, SeverityFilter};
+use crate::app::{App, DiffStatus, SeverityFilter};
 use crate::theme::Palette;
 
 #[allow(clippy::too_many_lines)]
@@ -19,6 +19,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Length(3),  // Footer
         ])
         .split(frame.area());
+
+    let has_diff = app.scan_diff.is_some();
 
     // Build all owned data from filtered findings, then drop the borrow.
     // This lets us mutably borrow `app.findings_table_state` for the stateful render.
@@ -53,7 +55,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     rikitikitavi_core::Severity::Info => " INFO ",
                 };
 
-                Row::new(vec![
+                let mut cells = vec![
                     Line::from(Span::styled(
                         sev_badge,
                         Style::default()
@@ -61,6 +63,34 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                             .bg(sev_color)
                             .add_modifier(Modifier::BOLD),
                     )),
+                ];
+
+                // DIFF badge column (only when comparison data is available)
+                if has_diff {
+                    let diff_cell = match app.finding_diff_status(f) {
+                        Some(DiffStatus::New) => Span::styled(
+                            " NEW ",
+                            Style::default()
+                                .fg(palette.bg)
+                                .bg(palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Some(DiffStatus::SeverityChanged) => Span::styled(
+                            " CHG ",
+                            Style::default()
+                                .fg(palette.bg)
+                                .bg(palette.medium)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Some(DiffStatus::Unchanged) | None => Span::styled(
+                            "     ",
+                            Style::default(),
+                        ),
+                    };
+                    cells.push(Line::from(diff_cell));
+                }
+
+                cells.extend([
                     Line::from(Span::styled(
                         f.title.clone(),
                         Style::default().fg(palette.fg),
@@ -74,7 +104,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         f.scanner.clone(),
                         Style::default().fg(palette.border),
                     )),
-                ])
+                ]);
+
+                Row::new(cells)
             })
             .collect();
 
@@ -144,6 +176,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     lines.push(Line::from(meta_spans));
                 }
 
+                // Diff status in detail pane
+                if has_diff {
+                    let status_text = match app.finding_diff_status(f) {
+                        Some(DiffStatus::New) => Some(("Status: New finding", palette.accent)),
+                        Some(DiffStatus::SeverityChanged) => {
+                            Some(("Status: Severity changed", palette.medium))
+                        }
+                        Some(DiffStatus::Unchanged) => {
+                            Some(("Status: Unchanged since last scan", palette.border))
+                        }
+                        None => None,
+                    };
+                    if let Some((text, color)) = status_text {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {text}"),
+                            Style::default().fg(color),
+                        )));
+                    }
+                }
+
                 // Show evidence if present
                 if let Some(evidence) = &f.evidence {
                     lines.push(Line::from(""));
@@ -193,23 +245,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     };
     // `filtered` is now dropped — safe to mutably borrow app.findings_table_state
 
-    let header_row = Row::new(vec![
+    let mut header_cells = vec![
         Line::from(Span::styled("SEV", palette.header_style)),
+    ];
+    let mut widths: Vec<Constraint> = vec![Constraint::Length(8)];
+
+    if has_diff {
+        header_cells.push(Line::from(Span::styled("DIFF", palette.header_style)));
+        widths.push(Constraint::Length(6));
+    }
+
+    header_cells.extend([
         Line::from(Span::styled("FINDING", palette.header_style)),
         Line::from(Span::styled("DEVICE", palette.header_style)),
         Line::from(Span::styled("MODULE", palette.header_style)),
-    ])
-    .style(palette.header_style);
+    ]);
+    widths.extend([Constraint::Min(30), Constraint::Length(16), Constraint::Length(14)]);
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(8),
-            Constraint::Min(30),
-            Constraint::Length(16),
-            Constraint::Length(14),
-        ],
-    )
+    let header_row = Row::new(header_cells).style(palette.header_style);
+
+    let table = Table::new(rows, widths)
     .header(header_row)
     .row_highlight_style(palette.selected_style)
     .block(

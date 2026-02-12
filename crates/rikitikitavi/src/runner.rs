@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use futures::future::join_all;
 use rikitikitavi_analysis::{calculate_risk_score, generate_attack_paths, generate_priority_actions};
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
@@ -266,6 +267,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         priority_actions,
         risk_score,
         scan_duration_secs: duration,
+        scanned_at: Utc::now(),
     })
 }
 

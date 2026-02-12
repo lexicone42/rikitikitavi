@@ -123,6 +123,30 @@ async fn cmd_scan(
 
     let results = runner::run_scan(&mut ctx).await?;
 
+    // ── History: load previous before saving current ────────────────
+    let history = rikitikitavi_analysis::ScanHistory::new();
+    let previous = if args.compare_previous {
+        history.as_ref().and_then(|h| h.load_latest().ok().flatten())
+    } else {
+        None
+    };
+
+    // Auto-save unless --no-save
+    if !args.no_save {
+        if let Some(ref h) = history {
+            match h.save(&results) {
+                Ok(path) => {
+                    if !args.quiet {
+                        println!("Scan saved to {}", path.display());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to save scan history: {e}");
+                }
+            }
+        }
+    }
+
     if let Some(output) = args.output {
         match args.format {
             cli::ReportFormatArg::Json => rikitikitavi_export::export_json(&results, &output)?,
@@ -132,6 +156,12 @@ async fn cmd_scan(
         println!("Results written to {}", output.display());
     } else if !args.quiet {
         print_cli_report(&results);
+    }
+
+    // ── Print comparison if requested ───────────────────────────────
+    if let Some(prev) = previous {
+        let diff = rikitikitavi_analysis::diff_scan_results(&prev, &results);
+        print_comparison_report(&diff);
     }
 
     Ok(())
@@ -234,6 +264,63 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
     }
 }
 
+fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) {
+    if let Some(baseline) = diff.baseline_time {
+        println!(
+            "Since last scan ({}):",
+            baseline.format("%Y-%m-%d %H:%M")
+        );
+    } else {
+        println!("Comparison with previous scan:");
+    }
+
+    if !diff.has_changes() {
+        println!("  No changes detected.");
+        println!();
+        return;
+    }
+
+    println!(
+        "  +{} new findings, -{} resolved, {} severity changes",
+        diff.new_findings.len(),
+        diff.resolved_findings.len(),
+        diff.severity_changes.len(),
+    );
+    println!(
+        "  +{} new devices, -{} disappeared",
+        diff.new_devices.len(),
+        diff.disappeared_devices.len(),
+    );
+    println!();
+
+    if !diff.new_findings.is_empty() {
+        println!("  New:");
+        for f in &diff.new_findings {
+            println!("    [{:8}] {}", f.severity, f.title);
+        }
+        println!();
+    }
+
+    if !diff.resolved_findings.is_empty() {
+        println!("  Resolved:");
+        for f in &diff.resolved_findings {
+            println!("    [{:8}] {}", f.severity, f.title);
+        }
+        println!();
+    }
+
+    if !diff.severity_changes.is_empty() {
+        println!("  Changed:");
+        for sc in &diff.severity_changes {
+            println!(
+                "    {} ({} -> {})",
+                sc.finding.title, sc.old_severity, sc.new_severity,
+            );
+        }
+        println!();
+    }
+}
+
 #[cfg(feature = "tui")]
 #[allow(clippy::too_many_lines)]
 async fn cmd_tui(
@@ -258,6 +345,12 @@ async fn cmd_tui(
     };
 
     let mut app = rikitikitavi_tui::App::new(tui_config);
+
+    // Load previous scan for comparison
+    let history = rikitikitavi_analysis::ScanHistory::new();
+    let previous_results = history
+        .as_ref()
+        .and_then(|h| h.load_latest().ok().flatten());
 
     // Perform initial scan before entering TUI
     let perspective = rikitikitavi_core::Perspective::Authenticated;
@@ -286,6 +379,17 @@ async fn cmd_tui(
 
     match runner::run_scan(&mut ctx).await {
         Ok(results) => {
+            // Compute diff against previous scan
+            if let Some(ref prev) = previous_results {
+                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
+                app.set_scan_diff(diff);
+            }
+            // Save to history
+            if let Some(ref h) = history {
+                if let Err(e) = h.save(&results) {
+                    tracing::warn!("failed to save scan history: {e}");
+                }
+            }
             app.results = Some(results);
             app.status_message = Some("Initial scan complete".to_owned());
         }
@@ -315,6 +419,17 @@ async fn cmd_tui(
     loop {
         // Check for completed background scan
         if let Ok(results) = scan_rx.try_recv() {
+            // Compute diff: compare new results against the previous scan
+            if let Some(ref prev) = app.results {
+                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
+                app.set_scan_diff(diff);
+            }
+            // Save to history
+            if let Some(ref h) = history {
+                if let Err(e) = h.save(&results) {
+                    tracing::warn!("failed to save scan history: {e}");
+                }
+            }
             app.results = Some(results);
             app.scanning = false;
             app.scan_progress = 1.0;
@@ -376,11 +491,37 @@ async fn cmd_tui(
 }
 
 fn cmd_report(
-    _args: &cli::ReportArgs,
+    args: &cli::ReportArgs,
     _app_config: &rikitikitavi_models::config::AppConfig,
 ) {
-    println!("Report generation not yet implemented.");
-    println!("Run a scan first with `rikitikitavi scan --output results.json`");
+    if args.latest {
+        let Some(history) = rikitikitavi_analysis::ScanHistory::new() else {
+            println!("Could not determine data directory.");
+            return;
+        };
+        match history.load_latest() {
+            Ok(Some(results)) => {
+                println!(
+                    "Last scan: {} ({} findings)",
+                    results.scanned_at.format("%Y-%m-%d %H:%M:%S"),
+                    results.findings.len(),
+                );
+                println!();
+                print_cli_report(&results);
+            }
+            Ok(None) => {
+                println!("No saved scans found.");
+                println!("Run `rikitikitavi scan` first to generate scan history.");
+            }
+            Err(e) => {
+                println!("Failed to load scan history: {e}");
+            }
+        }
+    } else {
+        println!("Report generation not yet implemented.");
+        println!("Use `rikitikitavi report --latest` to view the most recent saved scan.");
+        println!("Or run `rikitikitavi scan --output results.json` to export.");
+    }
 }
 
 #[cfg(feature = "unifi")]
@@ -558,6 +699,7 @@ async fn cmd_unifi_scan(
         let results = rikitikitavi_models::ScanResults {
             findings: all_findings,
             risk_score: 0.0,
+            scanned_at: chrono::Utc::now(),
             ..Default::default()
         };
         rikitikitavi_export::export_json(&results, &path)?;

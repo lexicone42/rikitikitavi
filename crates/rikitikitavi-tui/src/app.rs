@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
+use rikitikitavi_analysis::ScanDiff;
 use rikitikitavi_core::Severity;
-use rikitikitavi_models::{Device, Finding, ScanResults};
+use rikitikitavi_models::{Device, Finding, FindingFingerprint, ScanResults};
 
 /// Which screen the TUI is currently showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -55,6 +58,17 @@ pub enum Theme {
     Accessible,
 }
 
+/// Diff status for a finding relative to the previous scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffStatus {
+    /// Finding was not present in the previous scan.
+    New,
+    /// Finding was present with the same severity.
+    Unchanged,
+    /// Finding was present but severity changed.
+    SeverityChanged,
+}
+
 /// Controls which severity levels are shown in the findings list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SeverityFilter {
@@ -88,6 +102,10 @@ pub struct App {
     pub devices_table_state: TableState,
     /// Animation tick counter — incremented each event loop iteration (~100ms).
     pub tick: u64,
+    /// Diff against previous scan (set after comparison).
+    pub scan_diff: Option<ScanDiff>,
+    /// Pre-computed diff status for each finding fingerprint (O(1) lookup).
+    diff_status_cache: HashMap<FindingFingerprint, DiffStatus>,
 }
 
 impl App {
@@ -113,6 +131,8 @@ impl App {
             findings_table_state,
             devices_table_state,
             tick: 0,
+            scan_diff: None,
+            diff_status_cache: HashMap::new(),
         }
     }
 
@@ -369,6 +389,27 @@ impl App {
     /// Get current devices (convenience accessor).
     pub fn devices(&self) -> &[Device] {
         self.results.as_ref().map_or(&[], |r| r.devices.as_slice())
+    }
+
+    /// Set the scan diff and pre-compute per-finding status for O(1) render lookups.
+    pub fn set_scan_diff(&mut self, diff: ScanDiff) {
+        let mut cache = HashMap::new();
+        for f in &diff.new_findings {
+            cache.insert(f.fingerprint(), DiffStatus::New);
+        }
+        for sc in &diff.severity_changes {
+            cache.insert(sc.finding.fingerprint(), DiffStatus::SeverityChanged);
+        }
+        for f in &diff.unchanged_findings {
+            cache.insert(f.fingerprint(), DiffStatus::Unchanged);
+        }
+        self.diff_status_cache = cache;
+        self.scan_diff = Some(diff);
+    }
+
+    /// Get the diff status for a specific finding (O(1) cached lookup).
+    pub fn finding_diff_status(&self, finding: &Finding) -> Option<DiffStatus> {
+        self.diff_status_cache.get(&finding.fingerprint()).copied()
     }
 }
 

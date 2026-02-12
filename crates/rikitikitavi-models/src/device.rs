@@ -2,6 +2,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
+/// Stable identity of a device across scan runs.
+///
+/// Uses MAC address when available (stable across DHCP), falls back to IP.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceFingerprint {
+    Mac(String),
+    Ip(IpAddr),
+}
+
 /// A discovered network device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
@@ -85,6 +94,15 @@ impl Device {
     pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
         self.hostname = Some(hostname.into());
         self
+    }
+
+    /// Compute a fingerprint that identifies this device across scan runs.
+    /// Prefers MAC (stable across DHCP) over IP.
+    pub fn fingerprint(&self) -> DeviceFingerprint {
+        self.mac.as_ref().map_or_else(
+            || DeviceFingerprint::Ip(self.ip),
+            |mac| DeviceFingerprint::Mac(mac.clone()),
+        )
     }
 }
 
@@ -201,6 +219,38 @@ mod tests {
     #[test]
     fn test_device_type_default() {
         assert_eq!(DeviceType::default(), DeviceType::Unknown);
+    }
+
+    #[test]
+    fn fingerprint_uses_mac_when_available() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let device = Device::new(ip).with_mac("aa:bb:cc:dd:ee:ff");
+        assert_eq!(
+            device.fingerprint(),
+            DeviceFingerprint::Mac("aa:bb:cc:dd:ee:ff".to_owned())
+        );
+    }
+
+    #[test]
+    fn fingerprint_falls_back_to_ip() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let device = Device::new(ip);
+        assert_eq!(device.fingerprint(), DeviceFingerprint::Ip(ip));
+    }
+
+    #[test]
+    fn fingerprint_same_mac_same_fingerprint() {
+        let d1 = Device::new("10.0.0.1".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
+        let d2 = Device::new("10.0.0.2".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
+        // Same MAC → same fingerprint even with different IPs (DHCP scenario)
+        assert_eq!(d1.fingerprint(), d2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_different_mac_different_fingerprint() {
+        let d1 = Device::new("10.0.0.1".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
+        let d2 = Device::new("10.0.0.1".parse().unwrap()).with_mac("11:22:33:44:55:66");
+        assert_ne!(d1.fingerprint(), d2.fingerprint());
     }
 
     proptest! {

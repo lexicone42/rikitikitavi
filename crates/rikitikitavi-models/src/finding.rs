@@ -1,8 +1,17 @@
 use chrono::{DateTime, Utc};
 use rikitikitavi_core::Severity;
 use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
 use uuid::Uuid;
+
+/// Semantic identity of a finding — same problem on same target.
+///
+/// Uses `(scanner, title, affected_ip, affected_port)` to identify "the same
+/// issue" across scan runs. Deliberately excludes description, severity, and
+/// service — those can change without it being a "different" finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FindingFingerprint(u64);
 
 /// A security finding produced by a scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +139,17 @@ impl Finding {
         self
     }
 
+    /// Compute a fingerprint that identifies "the same problem on the same
+    /// target" across scan runs.
+    pub fn fingerprint(&self) -> FindingFingerprint {
+        let mut hasher = DefaultHasher::new();
+        self.scanner.hash(&mut hasher);
+        self.title.hash(&mut hasher);
+        self.affected_ip.hash(&mut hasher);
+        self.affected_port.hash(&mut hasher);
+        FindingFingerprint(hasher.finish())
+    }
+
     /// Builder-style setter for `PoC` evidence (truncated to 256 chars at a char boundary).
     #[must_use]
     pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
@@ -229,6 +249,72 @@ mod tests {
                     f
                 },
             )
+    }
+
+    #[test]
+    fn fingerprint_same_key_fields() {
+        let f1 = Finding::new("ports", "Open port", "desc A", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        let f2 = Finding::new("ports", "Open port", "desc B", Severity::High)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22)
+            .with_service("SSH");
+        // Same (scanner, title, ip, port) → same fingerprint despite
+        // different description, severity, and service.
+        assert_eq!(f1.fingerprint(), f2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_different_scanner() {
+        let f1 = Finding::new("ports", "Open port", "desc", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        let f2 = Finding::new("services", "Open port", "desc", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        assert_ne!(f1.fingerprint(), f2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_different_title() {
+        let f1 = Finding::new("ports", "Open SSH", "desc", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        let f2 = Finding::new("ports", "Weak SSH", "desc", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        assert_ne!(f1.fingerprint(), f2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_different_ip() {
+        let f1 = Finding::new("ports", "Open", "d", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        let f2 = Finding::new("ports", "Open", "d", Severity::Low)
+            .with_ip("10.0.0.2".parse().unwrap())
+            .with_port(22);
+        assert_ne!(f1.fingerprint(), f2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_different_port() {
+        let f1 = Finding::new("ports", "Open", "d", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(22);
+        let f2 = Finding::new("ports", "Open", "d", Severity::Low)
+            .with_ip("10.0.0.1".parse().unwrap())
+            .with_port(23);
+        assert_ne!(f1.fingerprint(), f2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_no_ip_no_port() {
+        let f1 = Finding::new("network", "No DNS", "desc", Severity::Info);
+        let f2 = Finding::new("network", "No DNS", "desc", Severity::Medium);
+        // Same key fields (both have None ip/port) → same fingerprint
+        assert_eq!(f1.fingerprint(), f2.fingerprint());
     }
 
     proptest! {

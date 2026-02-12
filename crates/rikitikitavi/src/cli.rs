@@ -120,6 +120,14 @@ pub struct ScanArgs {
     #[arg(long)]
     pub quiet: bool,
 
+    /// Compare results against the most recent saved scan.
+    #[arg(long)]
+    pub compare_previous: bool,
+
+    /// Do not auto-save scan results to history.
+    #[arg(long)]
+    pub no_save: bool,
+
     /// Scan with `UniFi` local API access (when running on `UniFi` device).
     #[cfg(feature = "unifi")]
     #[arg(long)]
@@ -166,6 +174,10 @@ pub struct ReportArgs {
     /// Include attack path analysis.
     #[arg(long)]
     pub attack_paths: bool,
+
+    /// Load and print the most recent saved scan from history.
+    #[arg(long)]
+    pub latest: bool,
 }
 
 #[derive(Args)]

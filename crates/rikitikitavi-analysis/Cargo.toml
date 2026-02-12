@@ -9,12 +9,17 @@ license.workspace = true
 rikitikitavi-core = { path = "../rikitikitavi-core" }
 rikitikitavi-models = { path = "../rikitikitavi-models" }
 
+anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

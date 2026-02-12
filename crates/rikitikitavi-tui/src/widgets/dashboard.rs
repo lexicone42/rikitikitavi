@@ -178,6 +178,7 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
     frame.render_widget(mascot, area);
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let findings = app.findings();
     let total = findings.len();
@@ -257,6 +258,18 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+
+    // Diff summary (when comparison data is available)
+    if let Some(diff) = &app.scan_diff {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  Since last: +{} new, -{} resolved",
+                diff.new_findings.len(),
+                diff.resolved_findings.len(),
+            ),
+            Style::default().fg(palette.accent),
+        )));
+    }
 
     // Risk grade
     let grade = map_risk_grade(critical, high, medium, palette);
