@@ -9,31 +9,27 @@ use rikitikitavi_models::Finding;
 use crate::app::App;
 use crate::theme::Palette;
 
-/// The Rikki-Tikki-Tavi mascot — proud mongoose with a cobra in its jaws!
-/// Lines above the animated snake chin line.
+/// The Rikki-Tikki-Tavi mascot — four-pawed mongoose with a snake in its jaws!
+/// Lines above the animated snake line.
 const MONGOOSE_TOP: &[&str] = &[
-    r"             ,,,,,      ",
-    r"           ,:::::::,    ",
-    r"          ,::/^\:::::,  ",
-    r"         ,::( ^  ^)::,  ",
-    r"         `:::\ w  /::;  ",
+    r"          .---.          ",
+    r"  ___    / o o \         ",
+    r"-'   `--'  w    >       ",
 ];
 
-/// The mongoose's chin/face line (before the dangling snake).
-const SNAKE_FACE: &str = "           ';:`. .':;'";
+/// The mongoose's jaw line (before the dangling snake).
+const SNAKE_FACE: &str = r"  \            /";
 
 /// Animated snake dangling from the mongoose's jaws — 4 wiggle frames.
 const SNAKE_DANGLE: &[&str] = &["~§>", "§~>", "~>§", ">§~"];
 
-/// Mongoose body below the face — shared across all animation frames.
+/// Mongoose body below the face — four paws on the ground.
 const MONGOOSE_BOTTOM: &[&str] = &[
-    r"             / `'` \    ",
-    r"            / .---. \   ",
-    r"           / /     \ \  ",
-    r"          ( (  \ /  ) ) ",
-    r"          `-\  |Y|  /-' ",
-    r"             | |=| |    ",
-    r"             |_| |_|    ",
+    r"   `-.      .-'         ",
+    r"     |`----'|           ",
+    r"     |      |           ",
+    r"     /|    /|           ",
+    r"    '-'   '-'           ",
 ];
 
 /// Severity bar sparkline characters.

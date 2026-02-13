@@ -1,20 +1,20 @@
 # rikitikitavi
 
 ```
-              ,,,,,
-            ,:::::::,
-           ,::/^\:::::,
-          ,::( ^  ^)::,        "Rikki-tikki knew he was a young mongoose,
-          `:::\ w  /::;         and it made him all the more pleased to think
-            ';:`. .':;'         that he had managed to escape a blow from behind."
-         ~~~~~ ~§> ~~~~~
-              / `'` \                               ─ Rudyard Kipling
-             / .---. \
-            / /     \ \
-           ( (  \ /  ) )
-           `-\  |Y|  /-'
-              | |=| |
-              |_| |_|
+                          ___         ~~~<§
+                    .----'   `--.__  ~~/
+          ~<§  ___.'    .-""""-.   `./       "When I was a young man I was led to believe
+         ~~/ .'   `.  .' .---.  `.  |         there were organisations to kill my snakes for me
+          / /  0  0 \|  /     \   | |         I.E. the church, I.E. the government, I.E. school
+          | |   w   |`-'       ;  | ;         But when I got a little older
+          \  `.___.'    ,      | / /          I learned I had to kill them myself"
+           `.   ,______/ )    .' .'
+             )-'   ____.'/   / .'                                      ─ Donovan
+            /    .'   (  `--' /
+           /   .'      `----.'
+          /_ .'   /|    /|
+         /  /    '-'   '-'
+        `~~'
 ```
 
 A home network security auditor written in Rust. Scans your local network for
@@ -22,8 +22,9 @@ misconfigurations, weak services, exposed ports, and provides actionable
 remediation guidance.
 
 Named after [Rikki-Tikki-Tavi](https://en.wikipedia.org/wiki/Rikki-Tikki-Tavi),
-the vigilant mongoose that protects the household — except this one hunts
-security vulnerabilities instead of cobras.
+the vigilant mongoose from Kipling's *Jungle Book* — and the
+[Donovan song](https://en.wikipedia.org/wiki/Riki_Tiki_Tavi_(song)) about
+learning to kill your own snakes. This one hunts security vulnerabilities.
 
 ## Quick Start
 
