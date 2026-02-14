@@ -356,8 +356,17 @@ pub enum AuthSignal {
     LoginForm,
     /// `OAuth`, SAML, or `OpenID` Connect markers in body.
     OAuthMarkers,
+    /// CSRF/XSRF token header present (`x-csrf-token`, `x-xsrf-token`, or
+    /// referenced in `access-control-expose-headers`).
+    CsrfTokenHeader,
+    /// `Set-Cookie` header contains a session-like cookie name (`sid=`,
+    /// `session`, `jsessionid`, `auth_token`, `token=`).
+    SessionCookie,
     /// JS client-side redirect to login/auth URL.
     ClientRedirect,
+    /// Body is a thin redirect page (`location.replace()` / `location.href=`)
+    /// changing only the port or scheme, with no login/auth target.
+    PortRedirect,
     /// Login-related text anywhere in body (weak signal).
     LoginText,
     /// SPA framework shell (mount point + `<script>` tags).
@@ -374,14 +383,28 @@ pub enum AuthSignal {
     SubstantialPage,
 }
 
+/// Header-level signals extracted from an HTTP response before consuming the
+/// body.  Threading these through a struct avoids losing information when
+/// `resp.text().await` moves the response.
+#[derive(Debug, Default)]
+pub struct ResponseHeaderSignals {
+    /// `WWW-Authenticate` header present.
+    pub has_www_authenticate: bool,
+    /// CSRF/XSRF token evidence in headers (`x-csrf-token`, `x-xsrf-token`,
+    /// or listed in `access-control-expose-headers`).
+    pub has_csrf_token: bool,
+    /// `Set-Cookie` header contains a session-like cookie name.
+    pub has_session_cookie: bool,
+}
+
 impl AuthSignal {
     /// Signed weight: positive = auth likely present, negative = content exposed.
     const fn weight(self) -> i32 {
         match self {
             Self::PasswordInput => 5,
-            Self::AuthHeader => 4,
-            Self::LoginForm | Self::OAuthMarkers => 3,
-            Self::ClientRedirect => 2,
+            Self::AuthHeader | Self::CsrfTokenHeader => 4,
+            Self::LoginForm | Self::OAuthMarkers | Self::SessionCookie => 3,
+            Self::ClientRedirect | Self::PortRedirect => 2,
             Self::LoginText | Self::SpaShell | Self::TinyResponse => 1,
             Self::NetworkDataExposed | Self::AdminStructuralContent => -3,
             Self::AdminTitle | Self::SubstantialPage => -1,
@@ -393,9 +416,12 @@ impl AuthSignal {
         match self {
             Self::PasswordInput => "password input field",
             Self::AuthHeader => "WWW-Authenticate header",
+            Self::CsrfTokenHeader => "CSRF token header",
+            Self::SessionCookie => "session cookie",
             Self::LoginForm => "login form action",
             Self::OAuthMarkers => "OAuth/SAML markers",
             Self::ClientRedirect => "JS redirect to login",
+            Self::PortRedirect => "port/scheme redirect",
             Self::LoginText => "login-related text",
             Self::SpaShell => "SPA framework shell",
             Self::TinyResponse => "minimal response (<512B)",
@@ -455,15 +481,23 @@ const ADMIN_KEYWORDS: &[&str] = &[
 ];
 
 /// Extract authentication signals from an HTTP response body and headers.
-pub fn extract_auth_signals(body: &str, has_www_authenticate: bool) -> Vec<AuthSignal> {
+pub fn extract_auth_signals(body: &str, headers: &ResponseHeaderSignals) -> Vec<AuthSignal> {
     let lower = body.to_lowercase();
     let len = body.len();
     let mut signals = Vec::new();
 
     // ── Auth-present signals (positive weight) ──
 
-    if has_www_authenticate {
+    if headers.has_www_authenticate {
         signals.push(AuthSignal::AuthHeader);
+    }
+
+    if headers.has_csrf_token {
+        signals.push(AuthSignal::CsrfTokenHeader);
+    }
+
+    if headers.has_session_cookie {
+        signals.push(AuthSignal::SessionCookie);
     }
 
     if lower.contains("type=\"password\"")
@@ -488,6 +522,10 @@ pub fn extract_auth_signals(body: &str, has_www_authenticate: bool) -> Vec<AuthS
 
     if has_client_redirect_to_auth(&lower) {
         signals.push(AuthSignal::ClientRedirect);
+    }
+
+    if is_port_redirect(&lower) {
+        signals.push(AuthSignal::PortRedirect);
     }
 
     if has_login_related_text(&lower) {
@@ -569,8 +607,25 @@ fn is_spa_shell(lower: &str) -> bool {
         || lower.contains("id=\"app\"")
         || lower.contains("id=\"__next\"")
         || lower.contains("id=\"__nuxt\"")
-        || lower.contains("id=\"__vue\""))
+        || lower.contains("id=\"__vue\"")
+        || lower.contains("id=\"portal-root\""))
         && lower.contains("<script")
+}
+
+/// Detect a thin redirect page that just changes port or scheme.
+///
+/// Matches bodies containing `location.replace(` or `location.href=` that
+/// target a URL with the same host but a different port/scheme, *without*
+/// any login/auth keywords.  These pages are not admin panels — they are
+/// transparent redirectors.
+fn is_port_redirect(lower: &str) -> bool {
+    let has_redirect = lower.contains("location.replace(") || lower.contains("location.href");
+    if !has_redirect {
+        return false;
+    }
+    let has_auth_target =
+        lower.contains("login") || lower.contains("auth") || lower.contains("signin");
+    !has_auth_target
 }
 
 /// Check for `RFC1918` private IP addresses in body content.
@@ -640,6 +695,51 @@ fn format_auth_evidence(signals: &[AuthSignal]) -> String {
     let score: i32 = signals.iter().map(|s| s.weight()).sum();
     parts.push(format!("confidence score: {score}"));
     parts.join(". ")
+}
+
+/// Extract header-level auth signals from a `reqwest::Response` before
+/// the body is consumed.
+fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSignals {
+    let has_www_authenticate = resp.headers().contains_key("www-authenticate");
+
+    // CSRF: explicit x-csrf-token / x-xsrf-token header, or mentioned in
+    // access-control-expose-headers.
+    let has_csrf_token = resp.headers().contains_key("x-csrf-token")
+        || resp.headers().contains_key("x-xsrf-token")
+        || resp
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                let lower = v.to_lowercase();
+                lower.contains("csrf") || lower.contains("xsrf")
+            });
+
+    // Session cookie: set-cookie header with a session-like name.
+    let has_session_cookie = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .any(|v| {
+            v.to_str()
+                .ok()
+                .is_some_and(|s| is_session_cookie_value(&s.to_lowercase()))
+        });
+
+    ResponseHeaderSignals {
+        has_www_authenticate,
+        has_csrf_token,
+        has_session_cookie,
+    }
+}
+
+/// Check if a `Set-Cookie` value (lowercased) looks like a session cookie.
+fn is_session_cookie_value(lower: &str) -> bool {
+    lower.starts_with("sid=")
+        || lower.contains("session")
+        || lower.contains("jsessionid")
+        || lower.starts_with("auth_token=")
+        || lower.starts_with("token=")
 }
 
 /// Audit a single HTTP endpoint.
@@ -764,9 +864,9 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         let admin_url = format!("{scheme}://{ip}:{port}{path}");
         if let Ok(resp) = client.get(&admin_url).send().await {
             if resp.status().as_u16() == 200 {
-                let has_www_auth = resp.headers().contains_key("www-authenticate");
+                let header_signals = extract_response_header_signals(&resp);
                 let body = resp.text().await.unwrap_or_default();
-                let signals = extract_auth_signals(&body, has_www_auth);
+                let signals = extract_auth_signals(&body, &header_signals);
                 let classification = classify_auth(&signals);
 
                 match classification {
@@ -1105,7 +1205,7 @@ mod tests {
                 <button>Login</button>
             </form>
         </body></html>"#;
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Protected);
     }
 
@@ -1117,14 +1217,18 @@ mod tests {
               window.location = "/oauth/authorize?client_id=abc&redirect_uri=/cb"
             </script>
         </body></html>"#;
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Protected);
     }
 
     #[test]
     fn test_classify_auth_www_authenticate_header() {
         let body = "<html><body></body></html>";
-        let signals = extract_auth_signals(body, true);
+        let headers = ResponseHeaderSignals {
+            has_www_authenticate: true,
+            ..ResponseHeaderSignals::default()
+        };
+        let signals = extract_auth_signals(body, &headers);
         assert_eq!(classify_auth(&signals), AuthClassification::Protected);
     }
 
@@ -1142,7 +1246,7 @@ mod tests {
             <h2>Network Settings</h2>
             <h2>Firewall Rules</h2>
         </body></html>";
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
     }
 
@@ -1159,7 +1263,7 @@ mod tests {
             <h2>Firewall Rules</h2>
             <table><tr><td>Rule 1</td><td>Allow HTTP</td></tr></table>
         </body></html>";
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
     }
 
@@ -1170,14 +1274,14 @@ mod tests {
         <body><div id="root"></div>
         <script src="/static/js/main.abc123.js"></script>
         </body></html>"#;
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Ambiguous);
     }
 
     #[test]
     fn test_classify_auth_empty_200_ambiguous() {
         let body = "<html><body></body></html>";
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Ambiguous);
     }
 
@@ -1192,7 +1296,7 @@ mod tests {
                 <button>Sign In</button>
             </form>
         </body></html>"#;
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Protected);
     }
 
@@ -1204,7 +1308,7 @@ mod tests {
                 <input type="password" name="pw">
             </form>
         </body></html>"#;
-        let signals = extract_auth_signals(body, false);
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
         assert_eq!(classify_auth(&signals), AuthClassification::Protected);
     }
 
@@ -1338,6 +1442,106 @@ mod tests {
         assert_eq!(classify_auth(&signals), AuthClassification::Ambiguous);
     }
 
+    // ── New header-based signal tests ──────────────────────────────
+
+    #[test]
+    fn test_classify_auth_csrf_token_header() {
+        // CSRF token header alone: +4 ≥ 3 → Protected
+        let body = "<html><body></body></html>";
+        let headers = ResponseHeaderSignals {
+            has_csrf_token: true,
+            ..ResponseHeaderSignals::default()
+        };
+        let signals = extract_auth_signals(body, &headers);
+        assert!(signals.contains(&AuthSignal::CsrfTokenHeader));
+        assert_eq!(classify_auth(&signals), AuthClassification::Protected);
+    }
+
+    #[test]
+    fn test_classify_auth_session_cookie_on_spa() {
+        // Session cookie (+3) on SPA shell (+1) = +4 ≥ 3 → Protected
+        let body = r#"<!DOCTYPE html>
+        <html><head><title>App</title></head>
+        <body><div id="root"></div>
+        <script src="/static/js/main.abc123.js"></script>
+        </body></html>"#;
+        let headers = ResponseHeaderSignals {
+            has_session_cookie: true,
+            ..ResponseHeaderSignals::default()
+        };
+        let signals = extract_auth_signals(body, &headers);
+        assert!(signals.contains(&AuthSignal::SessionCookie));
+        assert!(signals.contains(&AuthSignal::SpaShell));
+        assert_eq!(classify_auth(&signals), AuthClassification::Protected);
+    }
+
+    #[test]
+    fn test_classify_auth_port_redirect() {
+        // Thin redirect page: PortRedirect (+2) + TinyResponse (+1) = +3 → Protected
+        // Use a hostname (not a private IP) to avoid triggering NetworkDataExposed.
+        let body = r#"<html><script>location.replace("https://myhost:5001/")</script></html>"#;
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
+        assert!(signals.contains(&AuthSignal::PortRedirect));
+        assert_eq!(classify_auth(&signals), AuthClassification::Protected);
+    }
+
+    #[test]
+    fn test_port_redirect_not_triggered_with_login() {
+        // Redirect to login page should NOT trigger PortRedirect
+        let body = r#"<script>window.location = "/login"</script>"#;
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
+        assert!(!signals.contains(&AuthSignal::PortRedirect));
+        // Should trigger ClientRedirect instead (window.location + login keyword)
+        assert!(signals.contains(&AuthSignal::ClientRedirect));
+    }
+
+    #[test]
+    fn test_spa_shell_portal_root() {
+        // UniFi portal-root pattern
+        assert!(is_spa_shell(
+            r#"<div id="portal-root"></div><script src="/main.js"></script>"#
+        ));
+    }
+
+    #[test]
+    fn test_is_session_cookie_value_sid() {
+        assert!(is_session_cookie_value("sid=abc123; httponly; path=/"));
+    }
+
+    #[test]
+    fn test_is_session_cookie_value_jsessionid() {
+        assert!(is_session_cookie_value(
+            "jsessionid=abc123; httponly; secure"
+        ));
+    }
+
+    #[test]
+    fn test_is_session_cookie_value_tracking() {
+        // A tracking cookie is NOT a session cookie
+        assert!(!is_session_cookie_value("_ga=ga1.2.12345; path=/"));
+    }
+
+    #[test]
+    fn test_is_port_redirect_location_replace() {
+        assert!(is_port_redirect(
+            r#"<script>location.replace("https://192.168.1.220:5001/")</script>"#
+        ));
+    }
+
+    #[test]
+    fn test_is_port_redirect_location_href() {
+        assert!(is_port_redirect(
+            r#"<script>location.href="https://host:5001/"</script>"#
+        ));
+    }
+
+    #[test]
+    fn test_is_port_redirect_false_with_login() {
+        assert!(!is_port_redirect(
+            r#"<script>location.replace("/login")</script>"#
+        ));
+    }
+
     proptest! {
         /// classify_missing_headers never panics with any combination of bools
         #[test]
@@ -1406,8 +1610,15 @@ mod tests {
         fn prop_extract_auth_signals_no_panic(
             body in ".*",
             has_www_auth in any::<bool>(),
+            has_csrf in any::<bool>(),
+            has_session in any::<bool>(),
         ) {
-            let _ = extract_auth_signals(&body, has_www_auth);
+            let headers = ResponseHeaderSignals {
+                has_www_authenticate: has_www_auth,
+                has_csrf_token: has_csrf,
+                has_session_cookie: has_session,
+            };
+            let _ = extract_auth_signals(&body, &headers);
         }
 
         /// `classify_auth` is deterministic — same body produces same result
@@ -1415,9 +1626,16 @@ mod tests {
         fn prop_classify_auth_deterministic(
             body in ".*",
             has_www_auth in any::<bool>(),
+            has_csrf in any::<bool>(),
+            has_session in any::<bool>(),
         ) {
-            let s1 = extract_auth_signals(&body, has_www_auth);
-            let s2 = extract_auth_signals(&body, has_www_auth);
+            let headers = ResponseHeaderSignals {
+                has_www_authenticate: has_www_auth,
+                has_csrf_token: has_csrf,
+                has_session_cookie: has_session,
+            };
+            let s1 = extract_auth_signals(&body, &headers);
+            let s2 = extract_auth_signals(&body, &headers);
             assert_eq!(classify_auth(&s1), classify_auth(&s2));
         }
 
@@ -1426,8 +1644,15 @@ mod tests {
         fn prop_classify_auth_matches_score(
             body in ".*",
             has_www_auth in any::<bool>(),
+            has_csrf in any::<bool>(),
+            has_session in any::<bool>(),
         ) {
-            let signals = extract_auth_signals(&body, has_www_auth);
+            let headers = ResponseHeaderSignals {
+                has_www_authenticate: has_www_auth,
+                has_csrf_token: has_csrf,
+                has_session_cookie: has_session,
+            };
+            let signals = extract_auth_signals(&body, &headers);
             let score: i32 = signals.iter().map(|s| s.weight()).sum();
             let classification = classify_auth(&signals);
             match classification {

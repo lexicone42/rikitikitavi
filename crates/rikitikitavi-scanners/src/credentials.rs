@@ -405,7 +405,7 @@ async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<HttpCheckResult> {
     // 302/301 to /login = auth required (good)
     if first_line.contains("200") {
         // Check if the response suggests auth is present (login forms, OAuth,
-        // password fields, auth headers, etc.)
+        // password fields, auth headers, session cookies, etc.)
         let body_lower = response.to_lowercase();
         if body_lower.contains("login")
             || body_lower.contains("password")
@@ -420,7 +420,18 @@ async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<HttpCheckResult> {
             || body_lower.contains("saml")
             || body_lower.contains("openid")
             || body_lower.contains("www-authenticate:")
+            || has_session_cookie_header(&body_lower)
         {
+            return Some(HttpCheckResult {
+                no_auth: false,
+                evidence: None,
+            });
+        }
+
+        // Thin redirect page — `location.replace()` or `location.href=`
+        // changing only port/scheme without login/auth keywords.  This is not
+        // an admin panel, just a transparent redirector (e.g. HTTP→HTTPS).
+        if is_thin_redirect(&body_lower) {
             return Some(HttpCheckResult {
                 no_auth: false,
                 evidence: None,
@@ -739,6 +750,43 @@ async fn check_telnet_default_creds(ip: IpAddr) -> Option<TelnetLoginResult> {
         }
     }
     None
+}
+
+/// Check if any `set-cookie:` header line contains a session-like cookie name.
+///
+/// This operates on the full lowercased HTTP response (headers + body) since
+/// the credentials scanner uses raw TCP.
+fn has_session_cookie_header(lower: &str) -> bool {
+    for line in lower.lines() {
+        if let Some(value) = line.strip_prefix("set-cookie:") {
+            let trimmed = value.trim();
+            if trimmed.starts_with("sid=")
+                || trimmed.contains("session")
+                || trimmed.contains("jsessionid")
+                || trimmed.starts_with("auth_token=")
+                || trimmed.starts_with("token=")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Detect a thin redirect page (port/scheme change only, no auth keywords).
+///
+/// Matches `location.replace(` or `location.href` in the body without any
+/// login/auth keywords — these are transparent redirectors, not admin panels.
+fn is_thin_redirect(lower: &str) -> bool {
+    let has_redirect = lower.contains("location.replace(") || lower.contains("location.href");
+    if !has_redirect {
+        return false;
+    }
+    // If there are auth keywords, it is a redirect *to* a login page, not a
+    // thin port redirect.
+    let has_auth_target =
+        lower.contains("login") || lower.contains("auth") || lower.contains("signin");
+    !has_auth_target
 }
 
 /// Extract the `<title>` content from an HTML response.
@@ -1626,6 +1674,59 @@ mod tests {
     }
 
     // ── FTP proptests ───────────────────────────────────────────────
+
+    // ── Session cookie / thin redirect tests ───────────────────────
+
+    #[test]
+    fn test_has_session_cookie_header_sid() {
+        let response = "http/1.1 200 ok\r\nset-cookie: sid=abc123; httponly\r\n\r\n<html></html>";
+        assert!(has_session_cookie_header(response));
+    }
+
+    #[test]
+    fn test_has_session_cookie_header_jsessionid() {
+        let response =
+            "http/1.1 200 ok\r\nset-cookie: jsessionid=xyz; secure\r\n\r\n<html></html>";
+        assert!(has_session_cookie_header(response));
+    }
+
+    #[test]
+    fn test_has_session_cookie_header_tracking_cookie() {
+        // A tracking cookie should NOT be treated as a session cookie
+        let response = "http/1.1 200 ok\r\nset-cookie: _ga=ga1.2.12345; path=/\r\n\r\n<html></html>";
+        assert!(!has_session_cookie_header(response));
+    }
+
+    #[test]
+    fn test_has_session_cookie_header_no_cookie() {
+        let response = "http/1.1 200 ok\r\n\r\n<html></html>";
+        assert!(!has_session_cookie_header(response));
+    }
+
+    #[test]
+    fn test_is_thin_redirect_location_replace() {
+        let body = r#"<html><script>location.replace("https://192.168.1.220:5001/")</script></html>"#;
+        assert!(is_thin_redirect(&body.to_lowercase()));
+    }
+
+    #[test]
+    fn test_is_thin_redirect_location_href() {
+        let body =
+            r#"<html><script>location.href="https://192.168.1.220:5001/"</script></html>"#;
+        assert!(is_thin_redirect(&body.to_lowercase()));
+    }
+
+    #[test]
+    fn test_is_thin_redirect_false_with_login() {
+        let body = r#"<html><script>location.replace("/login")</script></html>"#;
+        assert!(!is_thin_redirect(&body.to_lowercase()));
+    }
+
+    #[test]
+    fn test_is_thin_redirect_false_no_redirect() {
+        let body = "<html><body>Hello world</body></html>";
+        assert!(!is_thin_redirect(&body.to_lowercase()));
+    }
 
     proptest! {
         #[test]
