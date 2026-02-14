@@ -463,6 +463,26 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
     }
 }
 
+/// Clean up a hostname from mDNS/UPnP discovery.
+///
+/// Strips `.local` suffix and rejects UUID-style hostnames that aren't
+/// human-readable (e.g. Chromecast device IDs).
+fn clean_hostname(raw: &str) -> Option<String> {
+    let cleaned = raw.strip_suffix(".local").unwrap_or(raw).trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Reject UUID-style hostnames (8-4-4-4-12 hex pattern)
+    let hex_count = cleaned.chars().filter(char::is_ascii_hexdigit).count();
+    let dash_count = cleaned.chars().filter(|c| *c == '-').count();
+    let total = cleaned.len();
+    // If >80% hex digits + dashes and has 4+ dashes, it's a UUID
+    if dash_count >= 4 && (hex_count + dash_count) * 100 / total > 80 {
+        return None;
+    }
+    Some(cleaned.to_owned())
+}
+
 /// Merge `DeviceHint` data from Phase 2 findings into devices.
 ///
 /// Uses priority-based merging: higher-priority sources overwrite lower ones.
@@ -519,9 +539,11 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
                 changed = true;
             }
             if let Some(hostname) = &hint.hostname {
-                if device.hostname.is_none() {
-                    device.hostname = Some(hostname.clone());
-                    changed = true;
+                if let Some(clean) = clean_hostname(hostname) {
+                    if device.hostname.is_none() {
+                        device.hostname = Some(clean);
+                        changed = true;
+                    }
                 }
             }
             if let Some(dt) = hint.device_type {
@@ -843,7 +865,7 @@ mod tests {
         // OUI vendor is set (priority 1), not overwritten since mDNS has no vendor
         assert_eq!(devices[0].vendor.as_deref(), Some("LG"));
         // mDNS hostname is set
-        assert_eq!(devices[0].hostname.as_deref(), Some("denon.local"));
+        assert_eq!(devices[0].hostname.as_deref(), Some("denon"));
     }
 
     #[test]
@@ -861,6 +883,35 @@ mod tests {
         assert!(devices[0].vendor.is_none());
         assert!(devices[0].hostname.is_none());
         assert_eq!(devices[0].device_type, DeviceType::Unknown);
+    }
+
+    #[test]
+    fn test_clean_hostname_strips_local() {
+        assert_eq!(clean_hostname("denon.local"), Some("denon".to_owned()));
+        assert_eq!(
+            clean_hostname("Kathryns-MacBook-Pro.local"),
+            Some("Kathryns-MacBook-Pro".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_clean_hostname_rejects_uuid() {
+        assert_eq!(
+            clean_hostname("3b7bb773-aa67-7879-b533-ffa93275bbd0.local"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_clean_hostname_keeps_friendly() {
+        assert_eq!(
+            clean_hostname("rudiger (DS418play)"),
+            Some("rudiger (DS418play)".to_owned())
+        );
+        assert_eq!(
+            clean_hostname("Hue Bridge (192.168.1.169)"),
+            Some("Hue Bridge (192.168.1.169)".to_owned())
+        );
     }
 
     fn arb_severity() -> impl Strategy<Value = Severity> {

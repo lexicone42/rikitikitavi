@@ -71,14 +71,30 @@ fn upnp_type_to_device_type(urn: &str) -> DeviceType {
 /// vendor whose primary product category differs from their `UPnP` role.
 /// For example, Synology NAS devices advertise as `MediaServer` (DLNA)
 /// but should be classified as NAS.
-fn manufacturer_override_device_type(manufacturer: &str, upnp_type: DeviceType) -> DeviceType {
-    let lower = manufacturer.to_lowercase();
-    if lower.contains("synology") || lower.contains("qnap") || lower.contains("western digital") {
+fn manufacturer_override_device_type(
+    manufacturer: &str,
+    model: &str,
+    upnp_type: DeviceType,
+) -> DeviceType {
+    let mfr_lower = manufacturer.to_lowercase();
+    if mfr_lower.contains("synology") || mfr_lower.contains("qnap") || mfr_lower.contains("western digital") {
         return DeviceType::Nas;
     }
-    if lower.contains("lg electronics") {
+    if mfr_lower.contains("lg electronics") {
         return DeviceType::SmartTv;
     }
+    if mfr_lower.contains("signify") || mfr_lower.contains("philips") {
+        return DeviceType::IoT;
+    }
+
+    // Model-based classification when UPnP type is ambiguous
+    if upnp_type == DeviceType::Unknown {
+        let model_lower = model.to_lowercase();
+        if model_lower.contains("tv") || model_lower.contains("android tv") {
+            return DeviceType::SmartTv;
+        }
+    }
+
     upnp_type
 }
 
@@ -113,11 +129,13 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
     if model != "unknown" {
         hint = hint.with_model(model);
     }
-    if let Some(dt) = &info.device_type {
-        let device_type = manufacturer_override_device_type(manufacturer, upnp_type_to_device_type(dt));
-        if device_type != DeviceType::Unknown {
-            hint = hint.with_device_type(device_type);
-        }
+    let base_type = info
+        .device_type
+        .as_deref()
+        .map_or(DeviceType::Unknown, upnp_type_to_device_type);
+    let device_type = manufacturer_override_device_type(manufacturer, model, base_type);
+    if device_type != DeviceType::Unknown {
+        hint = hint.with_device_type(device_type);
     }
 
     findings.push(
@@ -989,6 +1007,37 @@ mod tests {
         let findings = classify_upnp_device(ip, "http://192.168.1.50/desc.xml", &info);
         let hint = findings[0].device_hint.as_ref().unwrap();
         assert_eq!(hint.device_type, Some(DeviceType::Router));
+    }
+
+    #[test]
+    fn test_signify_hue_bridge_classified_as_iot() {
+        let ip: IpAddr = "192.168.1.169".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("Hue Bridge (192.168.1.169)".to_owned()),
+            manufacturer: Some("Signify".to_owned()),
+            model_name: Some("Philips hue bridge 2015".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:Basic:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.169/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::IoT));
+        assert_eq!(hint.vendor.as_deref(), Some("Signify"));
+    }
+
+    #[test]
+    fn test_android_tv_box_classified_as_smart_tv() {
+        let ip: IpAddr = "192.168.2.18".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("4K Android TV Box".to_owned()),
+            manufacturer: Some("SkyworthDigital".to_owned()),
+            model_name: Some("4K Android TV Box".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:Basic:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.2.18/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::SmartTv));
     }
 
     #[test]
