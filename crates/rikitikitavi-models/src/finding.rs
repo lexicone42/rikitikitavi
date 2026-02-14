@@ -1,3 +1,4 @@
+use crate::DeviceHint;
 use chrono::{DateTime, Utc};
 use rikitikitavi_core::Severity;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,9 @@ pub struct Finding {
     /// Proof-of-concept evidence (banner, login prompt, directory listing, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
+    /// Hint about the device that produced this finding, for enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_hint: Option<DeviceHint>,
     /// When the finding was discovered.
     pub discovered_at: DateTime<Utc>,
 }
@@ -70,6 +74,7 @@ impl Finding {
             cve_ids: Vec::new(),
             references: Vec::new(),
             evidence: None,
+            device_hint: None,
             discovered_at: Utc::now(),
         }
     }
@@ -167,6 +172,13 @@ impl Finding {
         }
         self
     }
+
+    /// Builder-style setter for device identification hint.
+    #[must_use]
+    pub fn with_device_hint(mut self, hint: DeviceHint) -> Self {
+        self.device_hint = Some(hint);
+        self
+    }
 }
 
 impl PartialEq for Finding {
@@ -185,6 +197,7 @@ impl PartialEq for Finding {
             && self.cve_ids == other.cve_ids
             && self.references == other.references
             && self.evidence == other.evidence
+            && self.device_hint == other.device_hint
     }
 }
 

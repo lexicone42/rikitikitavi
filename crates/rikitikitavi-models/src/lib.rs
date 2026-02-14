@@ -7,7 +7,7 @@ pub mod priority_action;
 
 pub use attack_path::{AttackPath, AttackStep};
 pub use config::ScanConfig;
-pub use device::{Device, DeviceFingerprint, DeviceType};
+pub use device::{Device, DeviceFingerprint, DeviceHint, DeviceType};
 pub use finding::{Finding, FindingFingerprint, Remediation};
 pub use ocsf::OcsfFinding;
 pub use priority_action::PriorityAction;

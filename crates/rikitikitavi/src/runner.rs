@@ -5,7 +5,7 @@ use rikitikitavi_analysis::{
     calculate_risk_score, generate_attack_paths, generate_priority_actions,
 };
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
-use rikitikitavi_models::{Device, DeviceType, Finding, ScanContext, ScanResults};
+use rikitikitavi_models::{Device, DeviceHint, DeviceType, Finding, ScanContext, ScanResults};
 use rikitikitavi_scanners::ScannerRegistry;
 use std::net::IpAddr;
 use std::time::Instant;
@@ -236,6 +236,9 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
+    // Enrich devices with hints from Phase 2 findings
+    post_enrich_devices(&mut ctx.discovered_devices, &all_findings);
+
     // Deduplicate findings from Phase 1 + Phase 2 overlap
     let pre_dedup = all_findings.len();
     let all_findings = deduplicate_findings(all_findings);
@@ -344,11 +347,41 @@ fn detail_score(f: &Finding) -> u32 {
     score
 }
 
+/// Classify device type based on which ports are open.
+fn classify_by_ports(open_ports: &[u16]) -> Option<DeviceType> {
+    if open_ports.contains(&9100) || open_ports.contains(&631) {
+        return Some(DeviceType::Printer);
+    }
+    if open_ports.contains(&554) || open_ports.contains(&8554) {
+        return Some(DeviceType::Camera);
+    }
+    if open_ports.contains(&1883) || open_ports.contains(&8883) {
+        return Some(DeviceType::IoT);
+    }
+    if open_ports.contains(&62078) {
+        return Some(DeviceType::Phone);
+    }
+    if open_ports.contains(&5000) && open_ports.contains(&5001) {
+        return Some(DeviceType::Nas);
+    }
+    if open_ports.contains(&8443) && open_ports.contains(&8880) {
+        return Some(DeviceType::Server);
+    }
+    if open_ports.contains(&3689) || open_ports.contains(&5353) {
+        return Some(DeviceType::MediaPlayer);
+    }
+    if open_ports.contains(&3389) {
+        return Some(DeviceType::Desktop);
+    }
+    None
+}
+
 /// Enrich `ctx.discovered_devices` from Phase 1 scan findings.
 ///
 /// Groups findings by IP address and extracts open ports, services, and
 /// device metadata to build a rich device inventory that Phase 2 scanners
-/// can use for adaptive scanning.
+/// can use for adaptive scanning. Also applies device-scanner hints and
+/// port-based classification.
 fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
     use std::collections::HashMap;
 
@@ -361,30 +394,138 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
 
     // Collect open ports from port-scanner findings
     for finding in findings {
-        if finding.scanner != "ports" {
-            continue;
+        if finding.scanner == "ports" {
+            let Some(ip) = finding.affected_ip else {
+                continue;
+            };
+            let Some(port) = finding.affected_port else {
+                continue;
+            };
+
+            if let Some(device) = device_map.get_mut(&ip) {
+                // Avoid duplicate port entries
+                if !device.open_ports.iter().any(|p| p.port == port) {
+                    device.open_ports.push(OpenPort {
+                        port,
+                        protocol: PortProtocol::Tcp,
+                        service: finding.affected_service.clone(),
+                        version: None,
+                        banner: None,
+                    });
+                }
+            }
         }
+
+        // Apply device-scanner hints (OUI vendor + device_type)
+        if finding.scanner == "device" {
+            if let (Some(ip), Some(hint)) = (finding.affected_ip, &finding.device_hint) {
+                if let Some(device) = device_map.get_mut(&ip) {
+                    if let Some(vendor) = &hint.vendor {
+                        if device.vendor.is_none() {
+                            vendor.clone_into(device.vendor.get_or_insert_with(String::new));
+                        }
+                    }
+                    if let Some(dt) = hint.device_type {
+                        if device.device_type == DeviceType::Unknown && dt != DeviceType::Unknown {
+                            device.device_type = dt;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Port-based classification for devices still Unknown
+    for device in &mut ctx.discovered_devices {
+        if device.device_type == DeviceType::Unknown && !device.open_ports.is_empty() {
+            let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+            if let Some(dt) = classify_by_ports(&ports) {
+                device.device_type = dt;
+            }
+        }
+    }
+}
+
+/// Merge `DeviceHint` data from Phase 2 findings into devices.
+///
+/// Uses priority-based merging: higher-priority sources overwrite lower ones.
+/// Priority (low → high): OUI (device scanner, priority=1), SSH banner (2),
+/// mDNS service (3), `UPnP` description (4).
+fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
+    use std::collections::HashMap;
+
+    // Collect all hints by IP, with priority
+    let mut hints_by_ip: HashMap<IpAddr, Vec<(u8, &DeviceHint)>> = HashMap::new();
+
+    for finding in findings {
         let Some(ip) = finding.affected_ip else {
             continue;
         };
-        let Some(port) = finding.affected_port else {
+        let Some(hint) = &finding.device_hint else {
+            continue;
+        };
+        if hint.is_empty() {
+            continue;
+        }
+
+        let priority = match finding.scanner.as_str() {
+            "services" => 2,
+            "mdns" => {
+                // UPnP findings (have vendor) get higher priority than plain mDNS
+                if hint.vendor.is_some() { 4 } else { 3 }
+            }
+            // "device" and any other scanner default to lowest priority
+            _ => 1,
+        };
+
+        hints_by_ip.entry(ip).or_default().push((priority, hint));
+    }
+
+    if hints_by_ip.is_empty() {
+        return;
+    }
+
+    let mut enriched_count = 0u32;
+    for device in devices.iter_mut() {
+        let Some(hints) = hints_by_ip.get(&device.ip) else {
             continue;
         };
 
-        if let Some(device) = device_map.get_mut(&ip) {
-            // Avoid duplicate port entries
-            if !device.open_ports.iter().any(|p| p.port == port) {
-                device.open_ports.push(OpenPort {
-                    port,
-                    protocol: PortProtocol::Tcp,
-                    service: finding.affected_service.clone(),
-                    version: None,
-                    banner: None,
-                });
+        // Sort by priority (low first) so higher-priority overwrites
+        let mut sorted: Vec<_> = hints.clone();
+        sorted.sort_by_key(|(prio, _)| *prio);
+
+        let mut changed = false;
+        for (_, hint) in &sorted {
+            if let Some(vendor) = &hint.vendor {
+                vendor.clone_into(device.vendor.get_or_insert_with(String::new));
+                changed = true;
+            }
+            if let Some(hostname) = &hint.hostname {
+                if device.hostname.is_none() {
+                    device.hostname = Some(hostname.clone());
+                    changed = true;
+                }
+            }
+            if let Some(dt) = hint.device_type {
+                if dt != DeviceType::Unknown {
+                    device.device_type = dt;
+                    changed = true;
+                }
+            }
+            if let Some(os) = &hint.os_guess {
+                os.clone_into(device.os_guess.get_or_insert_with(String::new));
+                changed = true;
             }
         }
-        // If the IP isn't in our device list yet (edge case), we don't create
-        // a new device here — discover_network should have found it.
+
+        if changed {
+            enriched_count += 1;
+        }
+    }
+
+    if enriched_count > 0 {
+        tracing::info!(enriched_count, "enriched devices from Phase 2 hints");
     }
 }
 
@@ -470,6 +611,143 @@ mod tests {
         let f2 = basic_finding("ports", Severity::Medium, ip("10.0.0.1"), 23);
         let result = deduplicate_findings(vec![f1, f2]);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_classify_by_ports_printer() {
+        assert_eq!(classify_by_ports(&[80, 443, 9100, 631]), Some(DeviceType::Printer));
+    }
+
+    #[test]
+    fn test_classify_by_ports_camera() {
+        assert_eq!(classify_by_ports(&[80, 554]), Some(DeviceType::Camera));
+    }
+
+    #[test]
+    fn test_classify_by_ports_iot() {
+        assert_eq!(classify_by_ports(&[1883]), Some(DeviceType::IoT));
+    }
+
+    #[test]
+    fn test_classify_by_ports_nas() {
+        assert_eq!(classify_by_ports(&[5000, 5001, 443]), Some(DeviceType::Nas));
+    }
+
+    #[test]
+    fn test_classify_by_ports_phone() {
+        assert_eq!(classify_by_ports(&[62078]), Some(DeviceType::Phone));
+    }
+
+    #[test]
+    fn test_classify_by_ports_desktop() {
+        assert_eq!(classify_by_ports(&[3389]), Some(DeviceType::Desktop));
+    }
+
+    #[test]
+    fn test_classify_by_ports_none() {
+        assert_eq!(classify_by_ports(&[80, 443]), None);
+    }
+
+    #[test]
+    fn test_post_enrich_devices_upnp_overwrites_oui() {
+        let mut devices = vec![
+            Device::new(ip("192.168.1.220"))
+                .with_mac("00:11:32:aa:bb:cc"),
+        ];
+        // Device scanner found vendor="Synology"
+        devices[0].vendor = Some("Synology".to_owned());
+        devices[0].device_type = DeviceType::Nas;
+
+        let findings = vec![
+            // UPnP finding with richer data
+            Finding::new("mdns", "UPnP device: rudiger", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.220"))
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_vendor("Synology Inc.")
+                        .with_hostname("rudiger")
+                        .with_model("DS418play")
+                        .with_device_type(DeviceType::MediaPlayer), // UPnP MediaServer
+                ),
+        ];
+
+        post_enrich_devices(&mut devices, &findings);
+
+        // UPnP (priority 4) overwrites OUI vendor name
+        assert_eq!(devices[0].vendor.as_deref(), Some("Synology Inc."));
+        assert_eq!(devices[0].hostname.as_deref(), Some("rudiger"));
+        // UPnP device_type overwrites
+        assert_eq!(devices[0].device_type, DeviceType::MediaPlayer);
+    }
+
+    #[test]
+    fn test_post_enrich_ssh_os_guess() {
+        let mut devices = vec![
+            Device::new(ip("192.168.1.10")),
+        ];
+
+        let findings = vec![
+            Finding::new("services", "SSH on 10", "desc", Severity::Low)
+                .with_ip(ip("192.168.1.10"))
+                .with_device_hint(
+                    DeviceHint::new().with_os_guess("Linux (Debian)"),
+                ),
+        ];
+
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].os_guess.as_deref(), Some("Linux (Debian)"));
+    }
+
+    #[test]
+    fn test_post_enrich_priority_ordering() {
+        let mut devices = vec![
+            Device::new(ip("192.168.1.30")),
+        ];
+
+        let findings = vec![
+            // mDNS hostname-only hint (priority 3)
+            Finding::new("mdns", "AirPlay", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.30"))
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_hostname("denon.local")
+                        .with_device_type(DeviceType::MediaPlayer),
+                ),
+            // Device scanner OUI hint (priority 1)
+            Finding::new("device", "LG device", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.30"))
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_vendor("LG")
+                        .with_device_type(DeviceType::Unknown),
+                ),
+        ];
+
+        post_enrich_devices(&mut devices, &findings);
+
+        // mDNS (priority 3) device_type overwrites OUI (priority 1)
+        assert_eq!(devices[0].device_type, DeviceType::MediaPlayer);
+        // OUI vendor is set (priority 1), not overwritten since mDNS has no vendor
+        assert_eq!(devices[0].vendor.as_deref(), Some("LG"));
+        // mDNS hostname is set
+        assert_eq!(devices[0].hostname.as_deref(), Some("denon.local"));
+    }
+
+    #[test]
+    fn test_post_enrich_empty_hints_ignored() {
+        let mut devices = vec![
+            Device::new(ip("192.168.1.1")),
+        ];
+
+        let findings = vec![
+            Finding::new("ports", "Open port", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.1")),
+        ];
+
+        post_enrich_devices(&mut devices, &findings);
+        assert!(devices[0].vendor.is_none());
+        assert!(devices[0].hostname.is_none());
+        assert_eq!(devices[0].device_type, DeviceType::Unknown);
     }
 
     fn arb_severity() -> impl Strategy<Value = Severity> {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -587,6 +587,30 @@ async fn grab_http_server(ip: IpAddr, port: u16) -> Option<String> {
     None
 }
 
+/// Extract an OS guess from an SSH version banner.
+///
+/// Returns `None` for bare `OpenSSH` without OS suffix (too ambiguous).
+fn parse_os_from_ssh_banner(banner: &str) -> Option<String> {
+    let lower = banner.to_lowercase();
+    if lower.contains("dropbear") {
+        return Some("Linux (embedded)".to_owned());
+    }
+    // OpenSSH_X.Yp1 Debian-...
+    if lower.contains("debian") {
+        return Some("Linux (Debian)".to_owned());
+    }
+    // OpenSSH_X.Yp1 Ubuntu-...
+    if lower.contains("ubuntu") {
+        return Some("Linux (Ubuntu)".to_owned());
+    }
+    // OpenSSH_X.Yp1 FreeBSD-...
+    if lower.contains("freebsd") {
+        return Some("FreeBSD".to_owned());
+    }
+    // Bare OpenSSH without OS suffix — too ambiguous
+    None
+}
+
 /// Classify a banner finding based on the service and version info.
 #[allow(clippy::too_many_lines)]
 fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
@@ -666,6 +690,9 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     if port == 22 && banner_lower.contains("ssh") {
         // Detect Dropbear SSH (common on embedded/IoT devices)
         if banner_lower.contains("dropbear") {
+            let hint = DeviceHint::new()
+                .with_device_type(DeviceType::IoT)
+                .with_os_guess("Linux (embedded)");
             return Some(
                 Finding::new(
                     "services",
@@ -684,7 +711,8 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
                 .with_opt_remediation(crate::remediation::get(
                     "rikitikitavi.services.dropbear-ssh",
                     &[],
-                )),
+                ))
+                .with_device_hint(hint),
             );
         }
 
@@ -733,6 +761,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
                 "rikitikitavi.services.outdated-ssh",
                 &[],
             ));
+        }
+
+        if let Some(os) = parse_os_from_ssh_banner(banner) {
+            finding = finding.with_device_hint(DeviceHint::new().with_os_guess(os));
         }
 
         return Some(finding);
@@ -970,6 +1002,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_os_from_ssh_banner() {
+        assert_eq!(
+            parse_os_from_ssh_banner("SSH-2.0-dropbear_2020.81"),
+            Some("Linux (embedded)".to_owned())
+        );
+        assert_eq!(
+            parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"),
+            Some("Linux (Debian)".to_owned())
+        );
+        assert_eq!(
+            parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"),
+            Some("Linux (Ubuntu)".to_owned())
+        );
+        assert_eq!(
+            parse_os_from_ssh_banner("SSH-2.0-OpenSSH_9.0 FreeBSD-20230316"),
+            Some("FreeBSD".to_owned())
+        );
+        // Bare OpenSSH — too ambiguous
+        assert_eq!(parse_os_from_ssh_banner("SSH-2.0-OpenSSH_9.5"), None);
+    }
+
+    #[test]
     fn test_classify_ssh_banner_old() {
         let ip = "192.168.1.1".parse().unwrap();
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_7.4").unwrap();
@@ -981,6 +1035,30 @@ mod tests {
         let ip = "192.168.1.1".parse().unwrap();
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.5").unwrap();
         assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_ssh_banner_debian_has_os_hint() {
+        let ip = "192.168.1.10".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1").unwrap();
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.os_guess.as_deref(), Some("Linux (Debian)"));
+    }
+
+    #[test]
+    fn test_ssh_dropbear_has_iot_hint() {
+        let ip = "192.168.1.20".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-dropbear_2020.81").unwrap();
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::IoT));
+        assert_eq!(hint.os_guess.as_deref(), Some("Linux (embedded)"));
+    }
+
+    #[test]
+    fn test_ssh_bare_openssh_no_hint() {
+        let ip = "192.168.1.30".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.5").unwrap();
+        assert!(finding.device_hint.is_none());
     }
 
     #[test]

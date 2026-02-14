@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 
 use crate::Scanner;
 
@@ -105,38 +105,7 @@ fn oui_lookup(mac: &str) -> Option<&'static str> {
         .map(|(_, vendor)| *vendor)
 }
 
-/// Classify device type based on which ports are open.
-#[cfg(test)] // Will be used in scan() once port scan results are cross-referenced
-fn classify_by_ports(open_ports: &[u16]) -> Option<&'static str> {
-    // Check for specific port combinations
-    if open_ports.contains(&9100) || open_ports.contains(&631) {
-        return Some("Printer");
-    }
-    if open_ports.contains(&554) || open_ports.contains(&8554) {
-        return Some("Camera");
-    }
-    if open_ports.contains(&1883) || open_ports.contains(&8883) {
-        return Some("IoT device");
-    }
-    if open_ports.contains(&62078) {
-        return Some("iPhone/iPad");
-    }
-    if open_ports.contains(&5000) && open_ports.contains(&5001) {
-        return Some("NAS");
-    }
-    if open_ports.contains(&8443) && open_ports.contains(&8880) {
-        return Some("UniFi controller");
-    }
-    if open_ports.contains(&3689) || open_ports.contains(&5353) {
-        return Some("Media device");
-    }
-    if open_ports.contains(&3389) {
-        return Some("Windows PC");
-    }
-    None
-}
-
-/// Classify device type from vendor name.
+/// Classify device type from vendor name (human-readable label for descriptions).
 fn classify_by_vendor(vendor: &str) -> &'static str {
     match vendor {
         "Synology" => "NAS",
@@ -148,6 +117,19 @@ fn classify_by_vendor(vendor: &str) -> &'static str {
         "Raspberry Pi" => "Single-board computer",
         "HP" => "Printer (likely)",
         _ => "Unknown",
+    }
+}
+
+/// Map an OUI vendor name to a structured `DeviceType` for enrichment.
+const fn vendor_to_device_type(vendor: &str) -> DeviceType {
+    match vendor.as_bytes() {
+        b"Synology" => DeviceType::Nas,
+        b"Sonos" | b"Roku" => DeviceType::MediaPlayer,
+        b"Ring" => DeviceType::Camera,
+        b"Philips Hue" | b"Espressif" => DeviceType::IoT,
+        b"HP" => DeviceType::Printer,
+        b"Raspberry Pi" => DeviceType::Server,
+        _ => DeviceType::Unknown,
     }
 }
 
@@ -200,6 +182,9 @@ impl Scanner for DeviceScanner {
             if vendor.is_some() {
                 identified += 1;
                 let device_class = classify_by_vendor(vendor_name);
+                let hint = DeviceHint::new()
+                    .with_vendor(vendor_name)
+                    .with_device_type(vendor_to_device_type(vendor_name));
                 findings.push(
                     Finding::new(
                         "device",
@@ -211,7 +196,8 @@ impl Scanner for DeviceScanner {
                         Severity::Info,
                     )
                     .with_ip(entry.ip)
-                    .with_mac(&entry.mac),
+                    .with_mac(&entry.mac)
+                    .with_device_hint(hint),
                 );
             } else {
                 unidentified += 1;
@@ -283,35 +269,23 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_by_ports_printer() {
-        assert_eq!(classify_by_ports(&[80, 443, 9100, 631]), Some("Printer"));
-    }
-
-    #[test]
-    fn test_classify_by_ports_camera() {
-        assert_eq!(classify_by_ports(&[80, 554]), Some("Camera"));
-    }
-
-    #[test]
-    fn test_classify_by_ports_iot() {
-        assert_eq!(classify_by_ports(&[1883]), Some("IoT device"));
-    }
-
-    #[test]
-    fn test_classify_by_ports_nas() {
-        assert_eq!(classify_by_ports(&[5000, 5001, 443]), Some("NAS"));
-    }
-
-    #[test]
-    fn test_classify_by_ports_none() {
-        assert_eq!(classify_by_ports(&[80, 443]), None);
-    }
-
-    #[test]
     fn test_classify_by_vendor() {
         assert_eq!(classify_by_vendor("Synology"), "NAS");
         assert_eq!(classify_by_vendor("Sonos"), "Speaker");
         assert_eq!(classify_by_vendor("Ring"), "Camera/doorbell");
         assert_eq!(classify_by_vendor("Apple"), "Unknown");
+    }
+
+    #[test]
+    fn test_vendor_to_device_type() {
+        assert_eq!(vendor_to_device_type("Synology"), DeviceType::Nas);
+        assert_eq!(vendor_to_device_type("Sonos"), DeviceType::MediaPlayer);
+        assert_eq!(vendor_to_device_type("Roku"), DeviceType::MediaPlayer);
+        assert_eq!(vendor_to_device_type("Ring"), DeviceType::Camera);
+        assert_eq!(vendor_to_device_type("Philips Hue"), DeviceType::IoT);
+        assert_eq!(vendor_to_device_type("Espressif"), DeviceType::IoT);
+        assert_eq!(vendor_to_device_type("HP"), DeviceType::Printer);
+        assert_eq!(vendor_to_device_type("Raspberry Pi"), DeviceType::Server);
+        assert_eq!(vendor_to_device_type("Apple"), DeviceType::Unknown);
     }
 }

@@ -124,6 +124,82 @@ pub enum PortProtocol {
     Udp,
 }
 
+
+/// Hint about a device's identity, attached to findings by scanners that
+/// discover device metadata. The runner merges hints into `Device` objects
+/// using a priority-based strategy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceHint {
+    /// Vendor / manufacturer name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// Model name / number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Hostname or friendly name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// Classified device type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<DeviceType>,
+    /// Operating system guess from banners / service probes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_guess: Option<String>,
+}
+
+impl DeviceHint {
+    /// Create an empty hint (all fields `None`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder-style setter for vendor.
+    #[must_use]
+    pub fn with_vendor(mut self, vendor: impl Into<String>) -> Self {
+        self.vendor = Some(vendor.into());
+        self
+    }
+
+    /// Builder-style setter for model.
+    #[must_use]
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Builder-style setter for hostname.
+    #[must_use]
+    pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.hostname = Some(hostname.into());
+        self
+    }
+
+    /// Builder-style setter for device type.
+    #[must_use]
+    pub const fn with_device_type(mut self, device_type: DeviceType) -> Self {
+        self.device_type = Some(device_type);
+        self
+    }
+
+    /// Builder-style setter for OS guess.
+    #[must_use]
+    pub fn with_os_guess(mut self, os_guess: impl Into<String>) -> Self {
+        self.os_guess = Some(os_guess.into());
+        self
+    }
+
+    /// Returns `true` if all fields are `None`.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.vendor.is_none()
+            && self.model.is_none()
+            && self.hostname.is_none()
+            && self.device_type.is_none()
+            && self.os_guess.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +327,62 @@ mod tests {
         let d1 = Device::new("10.0.0.1".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
         let d2 = Device::new("10.0.0.1".parse().unwrap()).with_mac("11:22:33:44:55:66");
         assert_ne!(d1.fingerprint(), d2.fingerprint());
+    }
+
+    #[test]
+    fn device_hint_builder() {
+        let hint = DeviceHint::new()
+            .with_vendor("Synology")
+            .with_model("DS418play")
+            .with_hostname("rudiger")
+            .with_device_type(DeviceType::Nas)
+            .with_os_guess("Linux (DSM)");
+
+        assert_eq!(hint.vendor.as_deref(), Some("Synology"));
+        assert_eq!(hint.model.as_deref(), Some("DS418play"));
+        assert_eq!(hint.hostname.as_deref(), Some("rudiger"));
+        assert_eq!(hint.device_type, Some(DeviceType::Nas));
+        assert_eq!(hint.os_guess.as_deref(), Some("Linux (DSM)"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn device_hint_default_is_empty() {
+        let hint = DeviceHint::new();
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn device_hint_partial_is_not_empty() {
+        let hint = DeviceHint::new().with_vendor("LG Electronics");
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn device_hint_json_roundtrip() {
+        let hint = DeviceHint::new()
+            .with_vendor("Synology")
+            .with_device_type(DeviceType::Nas);
+        let json = serde_json::to_string(&hint).unwrap();
+        let recovered: DeviceHint = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered, hint);
+    }
+
+    #[test]
+    fn device_hint_json_skips_none_fields() {
+        let hint = DeviceHint::new().with_vendor("HP");
+        let json = serde_json::to_string(&hint).unwrap();
+        assert!(json.contains("vendor"));
+        assert!(!json.contains("model"));
+        assert!(!json.contains("hostname"));
+        assert!(!json.contains("device_type"));
+        assert!(!json.contains("os_guess"));
+    }
+
+    #[test]
+    fn device_hint_deserializes_from_empty_object() {
+        let hint: DeviceHint = serde_json::from_str("{}").unwrap();
+        assert!(hint.is_empty());
     }
 
     proptest! {

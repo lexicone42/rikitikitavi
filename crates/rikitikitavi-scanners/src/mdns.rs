@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use rikitikitavi_network::MdnsService;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -52,6 +52,21 @@ pub fn parse_upnp_device_xml(xml: &str) -> UpnpDeviceInfo {
     }
 }
 
+/// Map a `UPnP` device type URN to a `DeviceType`.
+fn upnp_type_to_device_type(urn: &str) -> DeviceType {
+    if urn.contains("InternetGatewayDevice") || urn.contains("WANDevice") {
+        DeviceType::Router
+    } else if urn.contains("MediaRenderer") || urn.contains("MediaServer") {
+        DeviceType::MediaPlayer
+    } else if urn.contains("Printer") {
+        DeviceType::Printer
+    } else if urn.contains("Camera") {
+        DeviceType::Camera
+    } else {
+        DeviceType::Unknown
+    }
+}
+
 /// Classify a `UPnP` device description into findings.
 pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -76,6 +91,20 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
         desc_parts.push(format!("Serial: {serial}"));
     }
 
+    let mut hint = DeviceHint::new().with_hostname(name);
+    if manufacturer != "unknown" {
+        hint = hint.with_vendor(manufacturer);
+    }
+    if model != "unknown" {
+        hint = hint.with_model(model);
+    }
+    if let Some(dt) = &info.device_type {
+        let device_type = upnp_type_to_device_type(dt);
+        if device_type != DeviceType::Unknown {
+            hint = hint.with_device_type(device_type);
+        }
+    }
+
     findings.push(
         Finding::new(
             "mdns",
@@ -84,7 +113,8 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
             Severity::Info,
         )
         .with_ip(ip)
-        .with_service("UPnP"),
+        .with_service("UPnP")
+        .with_device_hint(hint),
     );
 
     // Serial number exposure is a privacy concern
@@ -200,7 +230,7 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
         |loc| format!("UPnP/SSDP service on {ip}: {svc_type} at {loc}"),
     );
 
-    Finding::new(
+    let mut finding = Finding::new(
         "mdns",
         &title,
         &format!(
@@ -212,7 +242,15 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     )
     .with_ip(ip)
     .with_service("SSDP")
-    .with_cwe("CWE-284")
+    .with_cwe("CWE-284");
+
+    if svc_type.contains("InternetGatewayDevice") {
+        finding = finding.with_device_hint(
+            DeviceHint::new().with_device_type(DeviceType::Router),
+        );
+    }
+
+    finding
 }
 
 /// Send SSDP M-SEARCH and collect responses.
@@ -289,10 +327,16 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         hostname = service.hostname,
     );
 
+    // Hostname for building per-branch hints (avoids cloning)
+    let hint_hostname: Option<&str> = if service.hostname.is_empty() {
+        None
+    } else {
+        Some(&service.hostname)
+    };
+
     // Classify by service type
     if svc_type.contains("_ssh._tcp") {
-        findings.push(
-            Finding::new(
+        let mut finding = Finding::new(
                 "mdns",
                 &format!("SSH service advertised: {display_name} on {ip}:{}", service.port),
                 &format!(
@@ -305,8 +349,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("SSH")
-            .with_cwe("CWE-200"),
-        );
+            .with_cwe("CWE-200");
+        if let Some(h) = hint_hostname {
+            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
+        }
+        findings.push(finding);
     } else if svc_type.contains("_http._tcp") {
         let severity = if service
             .txt_records
@@ -318,8 +365,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             Severity::Info
         };
 
-        findings.push(
-            Finding::new(
+        let mut finding = Finding::new(
                 "mdns",
                 &format!("HTTP service advertised: {display_name} on {ip}:{}", service.port),
                 &format!(
@@ -331,9 +377,14 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("HTTP")
-            .with_cwe("CWE-200"),
-        );
+            .with_cwe("CWE-200");
+        if let Some(h) = hint_hostname {
+            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
+        }
+        findings.push(finding);
     } else if svc_type.contains("_ipp._tcp") || svc_type.contains("_printer._tcp") {
+        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+            .with_device_type(DeviceType::Printer);
         findings.push(
             Finding::new(
                 "mdns",
@@ -348,11 +399,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("IPP")
-            .with_cwe("CWE-200"),
+            .with_cwe("CWE-200")
+            .with_device_hint(hint),
         );
     } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {
-        findings.push(
-            Finding::new(
+        let mut finding = Finding::new(
                 "mdns",
                 &format!("File sharing service: {display_name} on {ip}:{}", service.port),
                 &format!(
@@ -365,9 +416,14 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("SMB")
-            .with_cwe("CWE-732"),
-        );
+            .with_cwe("CWE-732");
+        if let Some(h) = hint_hostname {
+            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
+        }
+        findings.push(finding);
     } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
+        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+            .with_device_type(DeviceType::MediaPlayer);
         findings.push(
             Finding::new(
                 "mdns",
@@ -381,9 +437,12 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             )
             .with_ip(ip)
             .with_port(service.port)
-            .with_service("AirPlay"),
+            .with_service("AirPlay")
+            .with_device_hint(hint),
         );
     } else if svc_type.contains("_googlecast._tcp") {
+        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+            .with_device_type(DeviceType::MediaPlayer);
         findings.push(
             Finding::new(
                 "mdns",
@@ -396,9 +455,12 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             )
             .with_ip(ip)
             .with_port(service.port)
-            .with_service("Google Cast"),
+            .with_service("Google Cast")
+            .with_device_hint(hint),
         );
     } else if svc_type.contains("_hap._tcp") {
+        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+            .with_device_type(DeviceType::IoT);
         findings.push(
             Finding::new(
                 "mdns",
@@ -413,12 +475,12 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("HomeKit")
-            .with_cwe("CWE-287"),
+            .with_cwe("CWE-287")
+            .with_device_hint(hint),
         );
     } else {
         // Generic mDNS service
-        findings.push(
-            Finding::new(
+        let mut finding = Finding::new(
                 "mdns",
                 &format!("mDNS service: {display_name} ({svc_type}) on {ip}:{}", service.port),
                 &base_desc,
@@ -426,8 +488,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             )
             .with_ip(ip)
             .with_port(service.port)
-            .with_service("mDNS"),
-        );
+            .with_service("mDNS");
+        if let Some(h) = hint_hostname {
+            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
+        }
+        findings.push(finding);
     }
 
     findings
@@ -833,6 +898,101 @@ mod tests {
         // Only info listing
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_upnp_type_to_device_type() {
+        assert_eq!(
+            upnp_type_to_device_type("urn:schemas-upnp-org:device:InternetGatewayDevice:1"),
+            DeviceType::Router
+        );
+        assert_eq!(
+            upnp_type_to_device_type("urn:schemas-upnp-org:device:MediaRenderer:1"),
+            DeviceType::MediaPlayer
+        );
+        assert_eq!(
+            upnp_type_to_device_type("urn:schemas-upnp-org:device:Printer:1"),
+            DeviceType::Printer
+        );
+        assert_eq!(
+            upnp_type_to_device_type("urn:dial-multiscreen-org:service:dial:1"),
+            DeviceType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_upnp_finding_has_device_hint() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("rudiger".to_owned()),
+            manufacturer: Some("Synology".to_owned()),
+            model_name: Some("DS418play".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:MediaServer:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.220:5000/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.vendor.as_deref(), Some("Synology"));
+        assert_eq!(hint.model.as_deref(), Some("DS418play"));
+        assert_eq!(hint.hostname.as_deref(), Some("rudiger"));
+        assert_eq!(hint.device_type, Some(DeviceType::MediaPlayer));
+    }
+
+    #[test]
+    fn test_mdns_printer_has_device_hint() {
+        let svc = MdnsService {
+            name: "HP Color LaserJet".to_owned(),
+            service_type: "_ipp._tcp.local".to_owned(),
+            hostname: "printer.local".to_owned(),
+            ip: "192.168.1.100".parse().unwrap(),
+            port: 631,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.hostname.as_deref(), Some("printer.local"));
+        assert_eq!(hint.device_type, Some(DeviceType::Printer));
+    }
+
+    #[test]
+    fn test_mdns_airplay_has_device_hint() {
+        let svc = MdnsService {
+            name: "Denon AVR-X1800H".to_owned(),
+            service_type: "_airplay._tcp.local".to_owned(),
+            hostname: "denon.local".to_owned(),
+            ip: "192.168.1.30".parse().unwrap(),
+            port: 7000,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.hostname.as_deref(), Some("denon.local"));
+        assert_eq!(hint.device_type, Some(DeviceType::MediaPlayer));
+    }
+
+    #[test]
+    fn test_ssdp_gateway_has_device_hint() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let svc = SsdpService {
+            location: Some("http://192.168.1.1:49152/desc.xml".to_owned()),
+            server: Some("Linux UPnP/1.1 MiniUPnPd/2.2".to_owned()),
+            service_type: Some("urn:schemas-upnp-org:device:InternetGatewayDevice:1".to_owned()),
+        };
+        let finding = classify_ssdp_service(ip, &svc);
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Router));
+    }
+
+    #[test]
+    fn test_ssdp_generic_no_device_hint() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let svc = SsdpService {
+            location: Some("http://192.168.1.50:8080/".to_owned()),
+            server: Some("Chromecast/1.0".to_owned()),
+            service_type: Some("urn:dial-multiscreen-org:service:dial:1".to_owned()),
+        };
+        let finding = classify_ssdp_service(ip, &svc);
+        assert!(finding.device_hint.is_none());
     }
 
     proptest! {
