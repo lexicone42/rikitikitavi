@@ -271,6 +271,9 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         "scan complete"
     );
 
+    // Propagate identification across devices sharing the same MAC address
+    propagate_mac_siblings(&mut ctx.discovered_devices);
+
     // Deduplicate devices by IP, keeping the entry with the most metadata
     dedup_devices(&mut ctx.discovered_devices);
 
@@ -567,6 +570,65 @@ fn dedup_devices(devices: &mut Vec<Device>) {
     let mut keep: Vec<usize> = best.into_values().collect();
     keep.sort_unstable();
     *devices = keep.into_iter().map(|i| devices[i].clone()).collect();
+}
+
+/// Propagate identification across devices that share the same MAC address.
+///
+/// When the same physical device appears at multiple IPs (DHCP lease change,
+/// dual-stack, etc.), one entry may have been identified while others remain
+/// unknown. This copies `device_type`, `vendor`, `hostname`, and `os_guess`
+/// from identified entries to their same-MAC siblings.
+fn propagate_mac_siblings(devices: &mut [Device]) {
+    use std::collections::HashMap;
+
+    // Collect best-known info per MAC (using owned strings to avoid borrow issues)
+    let mut mac_info: HashMap<String, (DeviceType, Option<String>, Option<String>, Option<String>)> =
+        HashMap::new();
+
+    for device in devices.iter() {
+        let Some(mac) = device.mac.as_deref() else {
+            continue;
+        };
+        let entry = mac_info.entry(mac.to_owned()).or_insert((
+            DeviceType::Unknown,
+            None,
+            None,
+            None,
+        ));
+        if device.device_type != DeviceType::Unknown && entry.0 == DeviceType::Unknown {
+            entry.0 = device.device_type;
+        }
+        if entry.1.is_none() {
+            entry.1.clone_from(&device.vendor);
+        }
+        if entry.2.is_none() {
+            entry.2.clone_from(&device.hostname);
+        }
+        if entry.3.is_none() {
+            entry.3.clone_from(&device.os_guess);
+        }
+    }
+
+    // Apply best-known info back to all devices with matching MAC
+    for device in devices.iter_mut() {
+        let Some(mac) = device.mac.as_deref() else {
+            continue;
+        };
+        if let Some((dt, vendor, hostname, os)) = mac_info.get(mac) {
+            if device.device_type == DeviceType::Unknown && *dt != DeviceType::Unknown {
+                device.device_type = *dt;
+            }
+            if device.vendor.is_none() {
+                device.vendor.clone_from(vendor);
+            }
+            if device.hostname.is_none() {
+                device.hostname.clone_from(hostname);
+            }
+            if device.os_guess.is_none() {
+                device.os_guess.clone_from(os);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
