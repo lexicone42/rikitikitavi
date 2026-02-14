@@ -31,8 +31,8 @@ const DATABASE_PORTS: &[(u16, &str)] = &[
 
 /// Check if a `Redis` instance allows unauthenticated access.
 ///
-/// Sends the `PING` command and checks for a `+PONG` response, which
-/// indicates no authentication is required.
+/// Sends `PING` first. If the server responds with `+PONG` (no auth),
+/// follows up with `INFO server` to extract version, OS, and memory info.
 async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -53,30 +53,187 @@ async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
         .ok()?;
 
     let response = String::from_utf8_lossy(&buf[..n]);
-    Some(classify_redis_response(&response))
+    let result = classify_redis_response(&response);
+
+    // If no auth required, try to get server info
+    if matches!(result, RedisResult::NoAuth(_)) {
+        // Send INFO server command
+        if tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"INFO server\r\n"))
+            .await
+            .ok()?
+            .ok()
+            .is_some()
+        {
+            let mut info_buf = vec![0u8; 4096];
+            if let Ok(Ok(info_n)) =
+                tokio::time::timeout(READ_TIMEOUT, stream.read(&mut info_buf)).await
+            {
+                if info_n > 0 {
+                    // Parse the RESP bulk string containing INFO output
+                    let info = parse_resp_value(&info_buf[..info_n])
+                        .and_then(|(val, _)| match val {
+                            RespValue::BulkString(s) => Some(parse_redis_info(&s)),
+                            _ => None,
+                        });
+                    return Some(RedisResult::NoAuth(info));
+                }
+            }
+        }
+        return Some(RedisResult::NoAuth(None));
+    }
+
+    Some(result)
 }
 
 /// Result of a `Redis` authentication probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RedisResult {
-    /// No auth required — `Redis` responds to PING
-    NoAuth,
+    /// No auth required — `Redis` responds to PING; optional server info.
+    NoAuth(Option<RedisInfo>),
     /// Auth required — got `-NOAUTH` or similar
     AuthRequired,
     /// Unexpected response
     Unknown,
 }
 
+/// Structured info from a `Redis` `INFO server` response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedisInfo {
+    version: Option<String>,
+    os: Option<String>,
+    tcp_port: Option<u16>,
+    connected_clients: Option<u32>,
+    used_memory_human: Option<String>,
+}
+
+/// A parsed RESP (Redis Serialization Protocol) value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RespValue {
+    /// `+OK\r\n`
+    SimpleString(String),
+    /// `-ERR ...\r\n`
+    Error(String),
+    /// `:1000\r\n`
+    Integer(i64),
+    /// `$6\r\nfoobar\r\n`
+    BulkString(String),
+    /// `$-1\r\n`
+    Null,
+}
+
+/// Parse a single RESP value from the given bytes.
+///
+/// Returns the parsed value and the number of bytes consumed, or `None`
+/// if the data is incomplete or malformed.
+fn parse_resp_value(data: &[u8]) -> Option<(RespValue, usize)> {
+    if data.is_empty() {
+        return None;
+    }
+    let prefix = data[0];
+    let rest = &data[1..];
+
+    match prefix {
+        // Simple string: +OK\r\n
+        b'+' => {
+            let end = find_crlf(rest)?;
+            let s = String::from_utf8_lossy(&rest[..end]).into_owned();
+            Some((RespValue::SimpleString(s), 1 + end + 2))
+        }
+        // Error: -ERR message\r\n
+        b'-' => {
+            let end = find_crlf(rest)?;
+            let s = String::from_utf8_lossy(&rest[..end]).into_owned();
+            Some((RespValue::Error(s), 1 + end + 2))
+        }
+        // Integer: :1000\r\n
+        b':' => {
+            let end = find_crlf(rest)?;
+            let s = std::str::from_utf8(&rest[..end]).ok()?;
+            let val = s.parse::<i64>().ok()?;
+            Some((RespValue::Integer(val), 1 + end + 2))
+        }
+        // Bulk string: $6\r\nfoobar\r\n or $-1\r\n for null
+        b'$' => {
+            let len_end = find_crlf(rest)?;
+            let len_str = std::str::from_utf8(&rest[..len_end]).ok()?;
+            let len = len_str.parse::<i64>().ok()?;
+            if len < 0 {
+                return Some((RespValue::Null, 1 + len_end + 2));
+            }
+            let len = usize::try_from(len).ok()?;
+            let data_start = len_end + 2; // past the \r\n after length
+            if rest.len() < data_start + len + 2 {
+                return None; // incomplete
+            }
+            let s = String::from_utf8_lossy(&rest[data_start..data_start + len]).into_owned();
+            Some((RespValue::BulkString(s), 1 + data_start + len + 2))
+        }
+        _ => None,
+    }
+}
+
+/// Find the position of `\r\n` in a byte slice.
+fn find_crlf(data: &[u8]) -> Option<usize> {
+    data.windows(2).position(|w| w == b"\r\n")
+}
+
+/// Parse the `Redis` `INFO server` bulk string into structured fields.
+///
+/// The INFO response is a text block with `key:value` lines separated by `\n`,
+/// with section headers like `# Server`.
+fn parse_redis_info(bulk: &str) -> RedisInfo {
+    let mut info = RedisInfo {
+        version: None,
+        os: None,
+        tcp_port: None,
+        connected_clients: None,
+        used_memory_human: None,
+    };
+
+    for line in bulk.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            match key {
+                "redis_version" => info.version = Some(value.to_owned()),
+                "os" => info.os = Some(value.to_owned()),
+                "tcp_port" => info.tcp_port = value.parse().ok(),
+                "connected_clients" => info.connected_clients = value.parse().ok(),
+                "used_memory_human" => info.used_memory_human = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+    }
+
+    info
+}
+
 /// Classify a `Redis` PING response.
 fn classify_redis_response(response: &str) -> RedisResult {
     let trimmed = response.trim();
     if trimmed.starts_with("+PONG") {
-        RedisResult::NoAuth
+        RedisResult::NoAuth(None)
     } else if trimmed.starts_with("-NOAUTH") || trimmed.starts_with("-ERR") {
         RedisResult::AuthRequired
     } else {
         RedisResult::Unknown
     }
+}
+
+/// Classify a `Redis` version for end-of-life status.
+///
+/// Redis versions below 7.0 are end-of-life and no longer receive
+/// security patches.
+fn classify_redis_version_eol(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    if let Some(major_str) = parts.first() {
+        if let Ok(major) = major_str.parse::<u32>() {
+            return major < 7;
+        }
+    }
+    false
 }
 
 /// Check if a `MongoDB` instance allows unauthenticated access.
@@ -109,12 +266,11 @@ async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     Some(true)
 }
 
-/// Check if a `MySQL` instance allows anonymous or empty-password login.
+/// Read and parse a `MySQL` Handshake v10 greeting packet.
 ///
-/// Reads the `MySQL` handshake greeting packet. If the server sends a
-/// greeting, it means the port is `MySQL`. We then check the server
-/// version and capabilities.
-async fn check_mysql_greeting(ip: IpAddr, port: u16) -> Option<String> {
+/// Connects to the `MySQL` port and reads the server greeting, which
+/// contains the version string, capability flags, auth plugin, and more.
+async fn check_mysql_greeting(ip: IpAddr, port: u16) -> Option<MysqlGreeting> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -127,34 +283,161 @@ async fn check_mysql_greeting(ip: IpAddr, port: u16) -> Option<String> {
         .ok()?
         .ok()?;
 
-    if n < 5 {
+    if n < 7 {
         return None;
     }
 
-    // MySQL greeting packet: 4 bytes header, then protocol version, then
-    // null-terminated server version string
-    parse_mysql_version(&buf[..n])
+    parse_mysql_greeting(&buf[..n])
 }
 
-/// Parse the `MySQL` server version from a greeting packet.
-fn parse_mysql_version(packet: &[u8]) -> Option<String> {
-    // Packet layout: [length(3)] [sequence(1)] [protocol_version(1)] [version_string(null-terminated)]
-    if packet.len() < 6 {
+/// Parsed `MySQL` Handshake v10 greeting packet.
+///
+/// Contains the security-relevant fields from the server greeting:
+/// version, connection ID, capability flags, character set, status flags,
+/// and the authentication plugin name (if `CLIENT_PLUGIN_AUTH` is set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MysqlGreeting {
+    pub version: String,
+    pub connection_id: u32,
+    pub capability_flags: u32,
+    pub character_set: u8,
+    pub status_flags: u16,
+    pub auth_plugin: Option<String>,
+}
+
+/// `CLIENT_SSL` capability flag — server supports TLS connections.
+const CLIENT_SSL: u32 = 0x0000_0800;
+/// `CLIENT_SECURE_CONNECTION` — server supports 4.1+ auth protocol.
+const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+/// `CLIENT_PLUGIN_AUTH` — server sends auth plugin name in greeting.
+const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+
+/// Parse a `MySQL` Handshake v10 greeting packet into structured data.
+///
+/// Packet layout (after 4-byte header):
+/// ```text
+/// [1] protocol_version (must be 10)
+/// [N] version_string\0
+/// [4] connection_id (u32 LE)
+/// [8] auth_plugin_data_part1
+/// [1] filler (0x00)
+/// [2] capability_flags_lower (u16 LE)
+/// [1] character_set
+/// [2] status_flags (u16 LE)
+/// [2] capability_flags_upper (u16 LE)
+/// [1] auth_plugin_data_len (or 0x00)
+/// [10] reserved
+/// [N] auth_plugin_data_part2 (if CLIENT_SECURE_CONNECTION)
+/// [N] auth_plugin_name\0 (if CLIENT_PLUGIN_AUTH)
+/// ```
+fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
+    // Minimum: 4 header + 1 proto + 1 version char + 1 null = 7
+    if packet.len() < 7 {
         return None;
     }
 
-    // Protocol version is at byte 4
-    let proto_version = packet[4];
-    if proto_version != 10 {
-        // Protocol version 10 is the current MySQL protocol
+    // Protocol version at byte 4
+    if packet[4] != 10 {
         return None;
     }
 
-    // Version string starts at byte 5 and is null-terminated
+    // Version string starts at byte 5, null-terminated
     let version_start = 5;
-    let version_end = packet[version_start..].iter().position(|&b| b == 0)? + version_start;
+    let null_pos = packet[version_start..].iter().position(|&b| b == 0)?;
+    let version_end = version_start + null_pos;
+    let version = String::from_utf8(packet[version_start..version_end].to_vec()).ok()?;
 
-    String::from_utf8(packet[version_start..version_end].to_vec()).ok()
+    // After version null: connection_id(4) + auth_data_1(8) + filler(1) = 13 bytes
+    let post_version = version_end + 1;
+    if packet.len() < post_version + 13 {
+        // Short packet — return version only with defaults
+        return Some(MysqlGreeting {
+            version,
+            connection_id: 0,
+            capability_flags: 0,
+            character_set: 0,
+            status_flags: 0,
+            auth_plugin: None,
+        });
+    }
+
+    let connection_id = u32::from_le_bytes([
+        packet[post_version],
+        packet[post_version + 1],
+        packet[post_version + 2],
+        packet[post_version + 3],
+    ]);
+
+    // Skip auth_plugin_data_part1 (8 bytes) + filler (1 byte)
+    let cap_lower_pos = post_version + 4 + 8 + 1;
+    if packet.len() < cap_lower_pos + 2 {
+        return Some(MysqlGreeting {
+            version,
+            connection_id,
+            capability_flags: 0,
+            character_set: 0,
+            status_flags: 0,
+            auth_plugin: None,
+        });
+    }
+
+    let cap_lower =
+        u32::from(u16::from_le_bytes([packet[cap_lower_pos], packet[cap_lower_pos + 1]]));
+
+    // character_set(1) + status_flags(2) + capability_flags_upper(2) + auth_plugin_data_len(1) + reserved(10) = 16
+    if packet.len() < cap_lower_pos + 2 + 16 {
+        return Some(MysqlGreeting {
+            version,
+            connection_id,
+            capability_flags: cap_lower,
+            character_set: 0,
+            status_flags: 0,
+            auth_plugin: None,
+        });
+    }
+
+    let character_set = packet[cap_lower_pos + 2];
+    let status_pos = cap_lower_pos + 3;
+    let status_flags = u16::from_le_bytes([packet[status_pos], packet[status_pos + 1]]);
+    let cap_upper_pos = status_pos + 2;
+    let cap_upper =
+        u32::from(u16::from_le_bytes([packet[cap_upper_pos], packet[cap_upper_pos + 1]]));
+    let capability_flags = cap_lower | (cap_upper << 16);
+
+    let auth_plugin_data_len = packet[cap_upper_pos + 2];
+
+    // Skip reserved (10 bytes)
+    let mut cursor = cap_upper_pos + 2 + 1 + 10;
+
+    // Skip auth_plugin_data_part2 if CLIENT_SECURE_CONNECTION
+    if capability_flags & CLIENT_SECURE_CONNECTION != 0 {
+        // Length is max(13, auth_plugin_data_len) - 8
+        let part2_len = if auth_plugin_data_len > 8 {
+            usize::from(auth_plugin_data_len) - 8
+        } else {
+            13 - 8 // minimum 5 bytes (including null terminator)
+        };
+        cursor += part2_len;
+    }
+
+    // Read auth_plugin_name if CLIENT_PLUGIN_AUTH
+    let auth_plugin = if capability_flags & CLIENT_PLUGIN_AUTH != 0 && cursor < packet.len() {
+        packet[cursor..]
+            .iter()
+            .position(|&b| b == 0)
+            .and_then(|end| String::from_utf8(packet[cursor..cursor + end].to_vec()).ok())
+    } else {
+        None
+    };
+
+    Some(MysqlGreeting {
+        version,
+        connection_id,
+        capability_flags,
+        character_set,
+        status_flags,
+        auth_plugin,
+    })
 }
 
 /// Check if an `Elasticsearch` instance is accessible without authentication.
@@ -326,7 +609,29 @@ impl Scanner for DatabaseScanner {
 async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     if let Some(result) = check_redis_no_auth(*ip, port).await {
         match result {
-            RedisResult::NoAuth => {
+            RedisResult::NoAuth(ref info) => {
+                // Build enriched description from server info
+                let detail = info.as_ref().map_or_else(String::new, |i| {
+                    let mut parts = Vec::new();
+                    if let Some(ref v) = i.version {
+                        parts.push(format!("version {v}"));
+                    }
+                    if let Some(ref os) = i.os {
+                        parts.push(format!("OS: {os}"));
+                    }
+                    if let Some(clients) = i.connected_clients {
+                        parts.push(format!("{clients} connected clients"));
+                    }
+                    if let Some(ref mem) = i.used_memory_human {
+                        parts.push(format!("memory: {mem}"));
+                    }
+                    if parts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Server info: {}.", parts.join(", "))
+                    }
+                });
+
                 findings.push(
                     Finding::new(
                         "database",
@@ -334,7 +639,7 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                         &format!(
                             "Redis at {ip}:{port} responds to commands without \
                              requiring authentication. An attacker can read/write all \
-                             data and potentially execute Lua scripts."
+                             data and potentially execute Lua scripts.{detail}"
                         ),
                         Severity::Critical,
                     )
@@ -347,6 +652,28 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                         &[],
                     )),
                 );
+
+                // EOL version finding
+                if let Some(ref version) = info.as_ref().and_then(|i| i.version.clone()) {
+                    if classify_redis_version_eol(version) {
+                        findings.push(
+                            Finding::new(
+                                "database",
+                                &format!("Redis {version} is end-of-life on {ip}:{port}"),
+                                &format!(
+                                    "Redis at {ip}:{port} is running version {version}, \
+                                     which is end-of-life and no longer receives security \
+                                     patches. Upgrade to Redis 7.0 or later.",
+                                ),
+                                Severity::Medium,
+                            )
+                            .with_ip(*ip)
+                            .with_port(port)
+                            .with_service("Redis")
+                            .with_cwe("CWE-1104"),
+                        );
+                    }
+                }
             }
             RedisResult::AuthRequired => {
                 findings.push(
@@ -391,28 +718,105 @@ async fn check_mongodb(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
 }
 
 async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
-    if let Some(version) = check_mysql_greeting(*ip, port).await {
-        let severity = classify_mysql_version(&version);
+    let Some(greeting) = check_mysql_greeting(*ip, port).await else {
+        return;
+    };
+
+    let ssl_supported = greeting.capability_flags & CLIENT_SSL != 0;
+    let auth_plugin_label = greeting.auth_plugin.as_deref().unwrap_or("unknown");
+
+    // Version disclosure finding (always generated)
+    let severity = classify_mysql_version(&greeting.version);
+    let ssl_status = if ssl_supported {
+        "SSL supported"
+    } else {
+        "SSL NOT supported"
+    };
+    findings.push(
+        Finding::new(
+            "database",
+            &format!("MySQL {} exposed on {ip}:{port}", greeting.version),
+            &format!(
+                "MySQL server at {ip}:{port} is running version {}. \
+                 Connection ID: {}, auth plugin: {auth_plugin_label}, {ssl_status}. \
+                 The server accepted a TCP connection and revealed its version, \
+                 which helps attackers identify exploitable vulnerabilities.",
+                greeting.version, greeting.connection_id,
+            ),
+            severity,
+        )
+        .with_ip(*ip)
+        .with_port(port)
+        .with_service("MySQL")
+        .with_cwe("CWE-200")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.database.mysql-exposed",
+            &[],
+        )),
+    );
+
+    // SSL support finding
+    if !ssl_supported {
         findings.push(
             Finding::new(
                 "database",
-                &format!("MySQL {version} exposed on {ip}:{port}"),
+                &format!("MySQL does not support SSL on {ip}:{port}"),
                 &format!(
-                    "MySQL server at {ip}:{port} is running version {version}. \
-                     The server accepted a TCP connection and revealed its version, \
-                     which helps attackers identify exploitable vulnerabilities."
+                    "MySQL server at {ip}:{port} (version {}) does not advertise \
+                     SSL/TLS support in its capability flags. All traffic including \
+                     credentials is transmitted in cleartext.",
+                    greeting.version,
                 ),
-                severity,
+                Severity::Medium,
             )
             .with_ip(*ip)
             .with_port(port)
             .with_service("MySQL")
-            .with_cwe("CWE-200")
-            .with_opt_remediation(crate::remediation::get(
-                "rikitikitavi.database.mysql-exposed",
-                &[],
-            )),
+            .with_cwe("CWE-319"),
         );
+    }
+
+    // Auth plugin finding
+    if let Some(ref plugin) = greeting.auth_plugin {
+        match plugin.as_str() {
+            "mysql_old_password" => {
+                findings.push(
+                    Finding::new(
+                        "database",
+                        &format!("MySQL uses weak auth plugin on {ip}:{port}"),
+                        &format!(
+                            "MySQL at {ip}:{port} uses the mysql_old_password \
+                             authentication plugin, which relies on a weak hashing \
+                             algorithm vulnerable to offline brute-force attacks. \
+                             Upgrade to caching_sha2_password or mysql_native_password.",
+                        ),
+                        Severity::Medium,
+                    )
+                    .with_ip(*ip)
+                    .with_port(port)
+                    .with_service("MySQL")
+                    .with_cwe("CWE-328"),
+                );
+            }
+            "mysql_native_password" => {
+                findings.push(
+                    Finding::new(
+                        "database",
+                        &format!("MySQL uses SHA1-based auth on {ip}:{port}"),
+                        &format!(
+                            "MySQL at {ip}:{port} uses mysql_native_password \
+                             (SHA1-based). While acceptable, consider upgrading to \
+                             caching_sha2_password for stronger security.",
+                        ),
+                        Severity::Info,
+                    )
+                    .with_ip(*ip)
+                    .with_port(port)
+                    .with_service("MySQL"),
+                );
+            }
+            _ => {} // caching_sha2_password and others — no finding needed
+        }
     }
 }
 
@@ -521,11 +925,65 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    // ── Helper: build a complete MySQL Handshake v10 packet ─────────
+
+    /// Build a realistic MySQL Handshake v10 packet for testing.
+    fn build_mysql_packet(
+        version: &str,
+        conn_id: u32,
+        cap_flags: u32,
+        charset: u8,
+        status: u16,
+        auth_plugin: Option<&str>,
+    ) -> Vec<u8> {
+        let mut packet = vec![0u8; 4]; // header (length + sequence)
+        packet.push(10); // protocol version
+        packet.extend_from_slice(version.as_bytes());
+        packet.push(0); // null terminator
+        packet.extend_from_slice(&conn_id.to_le_bytes());
+        packet.extend_from_slice(&[0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68]); // auth_data_1
+        packet.push(0x00); // filler
+        let cap_lower = (cap_flags & 0xFFFF) as u16;
+        packet.extend_from_slice(&cap_lower.to_le_bytes());
+        packet.push(charset);
+        packet.extend_from_slice(&status.to_le_bytes());
+        let cap_upper = ((cap_flags >> 16) & 0xFFFF) as u16;
+        packet.extend_from_slice(&cap_upper.to_le_bytes());
+        // auth_plugin_data_len
+        let plugin_data_len: u8 = if cap_flags & CLIENT_SECURE_CONNECTION != 0 {
+            21
+        } else {
+            0
+        };
+        packet.push(plugin_data_len);
+        packet.extend_from_slice(&[0u8; 10]); // reserved
+
+        if cap_flags & CLIENT_SECURE_CONNECTION != 0 {
+            // auth_plugin_data_part2: max(13, plugin_data_len) - 8 bytes
+            let part2_len = if plugin_data_len > 8 {
+                usize::from(plugin_data_len) - 8
+            } else {
+                5
+            };
+            packet.extend_from_slice(&vec![0x41u8; part2_len]);
+        }
+
+        if let Some(plugin) = auth_plugin {
+            packet.extend_from_slice(plugin.as_bytes());
+            packet.push(0); // null terminator
+        }
+
+        packet
+    }
+
     // ── Redis classification tests ──────────────────────────────────
 
     #[test]
     fn test_redis_pong_no_auth() {
-        assert_eq!(classify_redis_response("+PONG\r\n"), RedisResult::NoAuth);
+        assert_eq!(
+            classify_redis_response("+PONG\r\n"),
+            RedisResult::NoAuth(None)
+        );
     }
 
     #[test]
@@ -554,50 +1012,246 @@ mod tests {
         assert_eq!(classify_redis_response(""), RedisResult::Unknown);
     }
 
-    // ── MySQL version parsing tests ─────────────────────────────────
+    // ── RESP protocol parser tests ──────────────────────────────────
 
     #[test]
-    fn test_parse_mysql_version_valid() {
-        // Simulate a MySQL greeting: 3-byte length, 1-byte seq, protocol 10, then "8.0.35\0"
-        let mut packet = vec![0u8; 4]; // length + sequence
-        packet.push(10); // protocol version
-        packet.extend_from_slice(b"8.0.35\0");
-        assert_eq!(parse_mysql_version(&packet), Some("8.0.35".to_owned()));
+    fn test_parse_resp_simple_string() {
+        let data = b"+OK\r\n";
+        let (val, consumed) = parse_resp_value(data).unwrap();
+        assert_eq!(val, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(consumed, 5);
     }
 
     #[test]
-    fn test_parse_mysql_version_mariadb() {
-        let mut packet = vec![0u8; 4];
-        packet.push(10);
-        packet.extend_from_slice(b"5.5.68-MariaDB\0");
+    fn test_parse_resp_error() {
+        let data = b"-ERR unknown command\r\n";
+        let (val, consumed) = parse_resp_value(data).unwrap();
+        assert_eq!(val, RespValue::Error("ERR unknown command".to_owned()));
+        assert_eq!(consumed, 22);
+    }
+
+    #[test]
+    fn test_parse_resp_integer() {
+        let data = b":1000\r\n";
+        let (val, consumed) = parse_resp_value(data).unwrap();
+        assert_eq!(val, RespValue::Integer(1000));
+        assert_eq!(consumed, 7);
+    }
+
+    #[test]
+    fn test_parse_resp_bulk_string() {
+        let data = b"$6\r\nfoobar\r\n";
+        let (val, consumed) = parse_resp_value(data).unwrap();
+        assert_eq!(val, RespValue::BulkString("foobar".to_owned()));
+        assert_eq!(consumed, 12);
+    }
+
+    #[test]
+    fn test_parse_resp_null() {
+        let data = b"$-1\r\n";
+        let (val, consumed) = parse_resp_value(data).unwrap();
+        assert_eq!(val, RespValue::Null);
+        assert_eq!(consumed, 5);
+    }
+
+    #[test]
+    fn test_parse_resp_empty() {
+        assert!(parse_resp_value(b"").is_none());
+    }
+
+    #[test]
+    fn test_parse_resp_incomplete_bulk() {
+        // Bulk string says 10 bytes but only provides 3
+        let data = b"$10\r\nabc\r\n";
+        assert!(parse_resp_value(data).is_none());
+    }
+
+    // ── Redis INFO parsing tests ────────────────────────────────────
+
+    #[test]
+    fn test_parse_redis_info() {
+        let info_text = "\
+# Server\r\n\
+redis_version:7.2.4\r\n\
+os:Linux 6.1.0-18-amd64 x86_64\r\n\
+tcp_port:6379\r\n\
+\r\n\
+# Clients\r\n\
+connected_clients:3\r\n\
+\r\n\
+# Memory\r\n\
+used_memory_human:1.23M\r\n";
+
+        let info = parse_redis_info(info_text);
+        assert_eq!(info.version.as_deref(), Some("7.2.4"));
         assert_eq!(
-            parse_mysql_version(&packet),
-            Some("5.5.68-MariaDB".to_owned())
+            info.os.as_deref(),
+            Some("Linux 6.1.0-18-amd64 x86_64")
+        );
+        assert_eq!(info.tcp_port, Some(6379));
+        assert_eq!(info.connected_clients, Some(3));
+        assert_eq!(info.used_memory_human.as_deref(), Some("1.23M"));
+    }
+
+    #[test]
+    fn test_parse_redis_info_partial() {
+        let info_text = "# Server\r\nredis_version:6.2.14\r\n";
+        let info = parse_redis_info(info_text);
+        assert_eq!(info.version.as_deref(), Some("6.2.14"));
+        assert!(info.os.is_none());
+        assert!(info.tcp_port.is_none());
+    }
+
+    #[test]
+    fn test_parse_redis_info_empty() {
+        let info = parse_redis_info("");
+        assert!(info.version.is_none());
+        assert!(info.os.is_none());
+    }
+
+    // ── Redis version EOL tests ─────────────────────────────────────
+
+    #[test]
+    fn test_classify_redis_version_eol_old() {
+        assert!(classify_redis_version_eol("6.2.14"));
+    }
+
+    #[test]
+    fn test_classify_redis_version_eol_very_old() {
+        assert!(classify_redis_version_eol("5.0.14"));
+    }
+
+    #[test]
+    fn test_classify_redis_version_current() {
+        assert!(!classify_redis_version_eol("7.2.4"));
+    }
+
+    #[test]
+    fn test_classify_redis_version_future() {
+        assert!(!classify_redis_version_eol("8.0.0"));
+    }
+
+    #[test]
+    fn test_classify_redis_version_unparseable() {
+        assert!(!classify_redis_version_eol("unknown"));
+    }
+
+    // ── MySQL greeting parsing tests ────────────────────────────────
+
+    #[test]
+    fn test_parse_mysql_greeting_full() {
+        let packet = build_mysql_packet(
+            "8.0.35",
+            42,
+            CLIENT_SSL | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH,
+            0x21, // utf8
+            0x0002,
+            Some("caching_sha2_password"),
+        );
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert_eq!(greeting.version, "8.0.35");
+        assert_eq!(greeting.connection_id, 42);
+        assert!(greeting.capability_flags & CLIENT_SSL != 0);
+        assert!(greeting.capability_flags & CLIENT_PLUGIN_AUTH != 0);
+        assert_eq!(greeting.character_set, 0x21);
+        assert_eq!(greeting.status_flags, 0x0002);
+        assert_eq!(
+            greeting.auth_plugin.as_deref(),
+            Some("caching_sha2_password")
         );
     }
 
     #[test]
-    fn test_parse_mysql_version_wrong_protocol() {
+    fn test_parse_mysql_greeting_no_ssl() {
+        let packet = build_mysql_packet(
+            "8.0.35",
+            1,
+            CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH, // no SSL
+            0x21,
+            0x0002,
+            Some("mysql_native_password"),
+        );
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert!(greeting.capability_flags & CLIENT_SSL == 0);
+        assert_eq!(
+            greeting.auth_plugin.as_deref(),
+            Some("mysql_native_password")
+        );
+    }
+
+    #[test]
+    fn test_parse_mysql_greeting_old_auth() {
+        let packet = build_mysql_packet(
+            "5.1.73",
+            100,
+            CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH,
+            0x08,
+            0x0002,
+            Some("mysql_old_password"),
+        );
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert_eq!(greeting.version, "5.1.73");
+        assert_eq!(greeting.auth_plugin.as_deref(), Some("mysql_old_password"));
+    }
+
+    #[test]
+    fn test_parse_mysql_greeting_no_plugin_auth() {
+        let packet = build_mysql_packet(
+            "5.5.68-MariaDB",
+            200,
+            CLIENT_SSL | CLIENT_SECURE_CONNECTION, // no PLUGIN_AUTH
+            0x21,
+            0x0002,
+            None,
+        );
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert_eq!(greeting.version, "5.5.68-MariaDB");
+        assert!(greeting.auth_plugin.is_none());
+    }
+
+    #[test]
+    fn test_parse_mysql_greeting_minimal() {
+        // Just header + protocol + version + null — no capabilities
+        let mut packet = vec![0u8; 4]; // header
+        packet.push(10); // protocol
+        packet.extend_from_slice(b"5.7.44\0");
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert_eq!(greeting.version, "5.7.44");
+        assert_eq!(greeting.connection_id, 0); // default for short packet
+        assert_eq!(greeting.capability_flags, 0);
+    }
+
+    #[test]
+    fn test_parse_mysql_greeting_too_short() {
+        assert!(parse_mysql_greeting(&[0, 0, 0, 0, 10]).is_none());
+    }
+
+    #[test]
+    fn test_parse_mysql_greeting_wrong_protocol() {
         let mut packet = vec![0u8; 4];
         packet.push(9); // Old protocol
         packet.extend_from_slice(b"4.1.0\0");
-        assert_eq!(parse_mysql_version(&packet), None);
+        assert!(parse_mysql_greeting(&packet).is_none());
     }
 
     #[test]
-    fn test_parse_mysql_version_too_short() {
-        assert_eq!(parse_mysql_version(&[0, 0, 0, 0, 10]), None);
-    }
-
-    #[test]
-    fn test_parse_mysql_version_no_null_terminator() {
+    fn test_parse_mysql_greeting_no_null_terminator() {
         let mut packet = vec![0u8; 4];
         packet.push(10);
         packet.extend_from_slice(b"8.0.35"); // No null terminator
-        assert_eq!(parse_mysql_version(&packet), None);
+        assert!(parse_mysql_greeting(&packet).is_none());
     }
 
-    // ── MySQL version severity tests ────────────────────────────────
+    #[test]
+    fn test_parse_mysql_greeting_mariadb() {
+        let mut packet = vec![0u8; 4];
+        packet.push(10);
+        packet.extend_from_slice(b"5.5.68-MariaDB\0");
+        let greeting = parse_mysql_greeting(&packet).unwrap();
+        assert_eq!(greeting.version, "5.5.68-MariaDB");
+    }
+
+    // ── MySQL version severity tests (unchanged) ────────────────────
 
     #[test]
     fn test_mysql_version_5_5_high() {
@@ -679,8 +1333,18 @@ mod tests {
         }
 
         #[test]
-        fn prop_parse_mysql_version_no_panic(data in proptest::collection::vec(any::<u8>(), 0..128)) {
-            let _ = parse_mysql_version(&data);
+        fn prop_parse_mysql_greeting_no_panic(data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let _ = parse_mysql_greeting(&data);
+        }
+
+        #[test]
+        fn prop_parse_resp_no_panic(data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let _ = parse_resp_value(&data);
+        }
+
+        #[test]
+        fn prop_parse_redis_info_no_panic(text in ".*") {
+            let _ = parse_redis_info(&text);
         }
 
         #[test]

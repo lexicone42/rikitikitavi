@@ -19,10 +19,19 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 struct FtpCheckResult {
     code: u16,
     listing: Option<String>,
+    banner: Option<FtpBanner>,
+}
+
+/// Parsed FTP server banner — software identification from the greeting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FtpBanner {
+    software: String,
+    version: Option<String>,
+    raw: String,
 }
 
 /// Check if a host accepts anonymous FTP login.
-/// Returns the FTP response code and, on success (230), a directory listing.
+/// Returns the FTP response code, optional directory listing, and parsed banner.
 async fn check_anonymous_ftp(ip: IpAddr) -> Option<FtpCheckResult> {
     let addr = SocketAddr::new(ip, 21);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -31,11 +40,15 @@ async fn check_anonymous_ftp(ip: IpAddr) -> Option<FtpCheckResult> {
         .ok()?;
 
     // Read banner
-    let mut buf = vec![0u8; 1024];
-    let _ = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+    let mut banner_buf = vec![0u8; 1024];
+    let banner_n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut banner_buf))
         .await
         .ok()?
         .ok()?;
+
+    // Parse the banner for software identification
+    let banner_str = String::from_utf8_lossy(&banner_buf[..banner_n]);
+    let banner = parse_ftp_banner(&banner_str);
 
     // Send anonymous login
     tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"USER anonymous\r\n"))
@@ -78,7 +91,11 @@ async fn check_anonymous_ftp(ip: IpAddr) -> Option<FtpCheckResult> {
         None
     };
 
-    Some(FtpCheckResult { code, listing })
+    Some(FtpCheckResult {
+        code,
+        listing,
+        banner,
+    })
 }
 
 /// Attempt to get a directory listing via FTP PASV mode.
@@ -135,6 +152,217 @@ async fn try_ftp_listing(stream: &mut TcpStream, _ip: IpAddr) -> Option<String> 
 fn extract_ftp_code(response: &str) -> Option<u16> {
     let code_str: String = response.chars().take(3).collect();
     code_str.parse().ok()
+}
+
+/// Parse a complete FTP response, handling multi-line continuation.
+///
+/// FTP multi-line format: `220-Line1\r\n220-Line2\r\n220 Final.\r\n`
+/// - First 3 chars are the response code
+/// - 4th char `-` means continuation, ` ` means final line
+///
+/// Returns `(code, collected_text)`.
+fn parse_ftp_response(response: &str) -> Option<(u16, String)> {
+    let mut lines_iter = response.lines();
+    let first_line = lines_iter.next()?;
+
+    // FTP codes are always 3 ASCII digits — guard against multi-byte chars
+    let bytes = first_line.as_bytes();
+    if bytes.len() < 3 || !bytes[..3].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    // Safe to slice: first 3 bytes are guaranteed ASCII
+    let code: u16 = first_line[..3].parse().ok()?;
+    let mut text_parts = Vec::new();
+
+    // Get text after the code+separator on the first line
+    if bytes.len() > 4 {
+        text_parts.push(&first_line[4..]);
+    }
+
+    // Check if this is a multi-line response (4th char is '-')
+    if bytes.len() >= 4 && bytes[3] == b'-' {
+        let code_str = &first_line[..3];
+        for line in lines_iter {
+            let lb = line.as_bytes();
+            if lb.len() >= 4 && line.starts_with(code_str) && lb[3] == b' ' {
+                // Final line
+                text_parts.push(&line[4..]);
+                break;
+            } else if lb.len() >= 4 && line.starts_with(code_str) && lb[3] == b'-' {
+                text_parts.push(&line[4..]);
+            } else {
+                // Continuation line without code prefix
+                text_parts.push(line);
+            }
+        }
+    }
+
+    let text = text_parts.join("\n");
+    Some((code, text))
+}
+
+/// Extract software name and version from an FTP banner.
+///
+/// Recognizes: `vsFTPd`, `ProFTPD`, `Pure-FTPd`, `FileZilla` Server,
+/// Microsoft FTP, `wu-ftpd`.
+fn parse_ftp_banner(banner: &str) -> Option<FtpBanner> {
+    // Parse the response to get raw text
+    let (_, text) = parse_ftp_response(banner)?;
+    let raw = text.clone();
+
+    // Try each known pattern
+    if let Some(banner) = match_vsftpd(&text, &raw) {
+        return Some(banner);
+    }
+    if let Some(banner) = match_proftpd(&text, &raw) {
+        return Some(banner);
+    }
+    if let Some(banner) = match_filezilla(&text, &raw) {
+        return Some(banner);
+    }
+    if let Some(banner) = match_pureftpd(&text, &raw) {
+        return Some(banner);
+    }
+    if let Some(banner) = match_microsoft_ftp(&text, &raw) {
+        return Some(banner);
+    }
+    if let Some(banner) = match_wuftpd(&text, &raw) {
+        return Some(banner);
+    }
+
+    // Unknown server — return raw banner if we got a 220
+    Some(FtpBanner {
+        software: "Unknown".to_owned(),
+        version: None,
+        raw,
+    })
+}
+
+/// Match `vsFTPd` banner: `(vsFTPd X.Y.Z)` or `vsFTPd X.Y.Z`
+fn match_vsftpd(text: &str, raw: &str) -> Option<FtpBanner> {
+    // Pattern: "(vsFTPd X.Y.Z)" — with parens
+    if let Some(start) = text.find("vsFTPd ") {
+        let after = &text[start + 7..];
+        let version_end = after
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after.len());
+        let version = &after[..version_end];
+        if !version.is_empty() {
+            return Some(FtpBanner {
+                software: "vsFTPd".to_owned(),
+                version: Some(version.to_owned()),
+                raw: raw.to_owned(),
+            });
+        }
+    }
+    if text.contains("vsFTPd") {
+        return Some(FtpBanner {
+            software: "vsFTPd".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Match `ProFTPD` banner: `ProFTPD X.Y.Z Server`
+fn match_proftpd(text: &str, raw: &str) -> Option<FtpBanner> {
+    if let Some(start) = text.find("ProFTPD ") {
+        let after = &text[start + 8..];
+        let version_end = after
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after.len());
+        let version = &after[..version_end];
+        if !version.is_empty() {
+            return Some(FtpBanner {
+                software: "ProFTPD".to_owned(),
+                version: Some(version.to_owned()),
+                raw: raw.to_owned(),
+            });
+        }
+    }
+    if text.contains("ProFTPD") {
+        return Some(FtpBanner {
+            software: "ProFTPD".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Match `FileZilla` Server banner: `FileZilla Server X.Y.Z`
+fn match_filezilla(text: &str, raw: &str) -> Option<FtpBanner> {
+    if let Some(start) = text.find("FileZilla Server ") {
+        let after = &text[start + 17..];
+        let version_end = after
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after.len());
+        let version = &after[..version_end];
+        if !version.is_empty() {
+            return Some(FtpBanner {
+                software: "FileZilla Server".to_owned(),
+                version: Some(version.to_owned()),
+                raw: raw.to_owned(),
+            });
+        }
+    }
+    if text.contains("FileZilla") {
+        return Some(FtpBanner {
+            software: "FileZilla Server".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Match `Pure-FTPd` banner
+fn match_pureftpd(text: &str, raw: &str) -> Option<FtpBanner> {
+    if text.contains("Pure-FTPd") {
+        return Some(FtpBanner {
+            software: "Pure-FTPd".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Match Microsoft FTP Service banner
+fn match_microsoft_ftp(text: &str, raw: &str) -> Option<FtpBanner> {
+    if text.contains("Microsoft FTP") {
+        return Some(FtpBanner {
+            software: "Microsoft FTP".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Match `wu-ftpd` banner
+fn match_wuftpd(text: &str, raw: &str) -> Option<FtpBanner> {
+    if text.contains("wu-") {
+        return Some(FtpBanner {
+            software: "wu-ftpd".to_owned(),
+            version: None,
+            raw: raw.to_owned(),
+        });
+    }
+    None
+}
+
+/// Classify a `vsFTPd` version — versions below 3.0 have known vulnerabilities.
+fn classify_vsftpd_version_eol(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    if let Some(major_str) = parts.first() {
+        if let Ok(major) = major_str.parse::<u32>() {
+            return major < 3;
+        }
+    }
+    false
 }
 
 /// Result of an HTTP no-auth check.
@@ -537,15 +765,82 @@ fn parse_pasv_response(response: &str) -> Option<SocketAddr> {
 }
 
 /// Check FTP credentials on a target and push findings.
+#[allow(clippy::too_many_lines)]
 async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
     if let Some(result) = check_anonymous_ftp(ip).await {
+        // Banner disclosure finding — always generated when banner is parsed
+        if let Some(ref banner) = result.banner {
+            if banner.software != "Unknown" {
+                let version_label = banner
+                    .version
+                    .as_ref()
+                    .map_or_else(String::new, |v| format!(" {v}"));
+                findings.push(
+                    Finding::new(
+                        "credentials",
+                        &format!(
+                            "FTP banner discloses {}{version_label} on {ip}",
+                            banner.software
+                        ),
+                        &format!(
+                            "FTP server at {ip}:21 discloses software version: \
+                             {}{version_label}. Banner: {}",
+                            banner.software, banner.raw,
+                        ),
+                        Severity::Low,
+                    )
+                    .with_ip(ip)
+                    .with_port(21)
+                    .with_service("FTP")
+                    .with_cwe("CWE-200"),
+                );
+            }
+
+            // Old vsFTPd version check
+            if banner.software == "vsFTPd" {
+                if let Some(ref version) = banner.version {
+                    if classify_vsftpd_version_eol(version) {
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!("vsFTPd {version} has known vulnerabilities on {ip}"),
+                                &format!(
+                                    "FTP server at {ip}:21 is running vsFTPd {version}. \
+                                     Versions below 3.0 have known security vulnerabilities \
+                                     including the infamous vsftpd 2.3.4 backdoor. Upgrade \
+                                     to vsFTPd 3.0 or later.",
+                                ),
+                                Severity::Medium,
+                            )
+                            .with_ip(ip)
+                            .with_port(21)
+                            .with_service("FTP")
+                            .with_cwe("CWE-1104"),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Anonymous login findings
         if result.code == 230 {
+            let software_label = result
+                .banner
+                .as_ref()
+                .map(|b| {
+                    if b.software == "Unknown" {
+                        String::new()
+                    } else {
+                        format!(" ({})", b.software)
+                    }
+                })
+                .unwrap_or_default();
             let mut finding = Finding::new(
                 "credentials",
                 &format!("Anonymous FTP login accepted on {ip}"),
                 &format!(
-                    "FTP server at {ip}:21 accepts anonymous login. Anyone on the \
-                     network can read (and possibly write) files."
+                    "FTP server{software_label} at {ip}:21 accepts anonymous login. \
+                     Anyone on the network can read (and possibly write) files."
                 ),
                 Severity::High,
             )
@@ -898,6 +1193,7 @@ impl Scanner for CredentialScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_extract_ftp_code_230() {
@@ -1205,5 +1501,130 @@ mod tests {
     fn test_truncate_long() {
         let result = truncate_evidence("hello world", 5);
         assert_eq!(result, "hello...");
+    }
+
+    // ── FTP response parsing tests ──────────────────────────────────
+
+    #[test]
+    fn test_parse_ftp_response_single_line() {
+        let (code, text) = parse_ftp_response("220 Ready.\r\n").unwrap();
+        assert_eq!(code, 220);
+        assert_eq!(text, "Ready.");
+    }
+
+    #[test]
+    fn test_parse_ftp_response_multi_line() {
+        let response = "220-Welcome to FTP\r\n220-Please login\r\n220 Ready.\r\n";
+        let (code, text) = parse_ftp_response(response).unwrap();
+        assert_eq!(code, 220);
+        assert_eq!(text, "Welcome to FTP\nPlease login\nReady.");
+    }
+
+    #[test]
+    fn test_parse_ftp_response_empty() {
+        assert!(parse_ftp_response("").is_none());
+    }
+
+    #[test]
+    fn test_parse_ftp_response_short() {
+        assert!(parse_ftp_response("ab").is_none());
+    }
+
+    #[test]
+    fn test_parse_ftp_response_non_numeric() {
+        assert!(parse_ftp_response("abc Not a code").is_none());
+    }
+
+    #[test]
+    fn test_parse_ftp_response_530() {
+        let (code, text) = parse_ftp_response("530 Login incorrect.\r\n").unwrap();
+        assert_eq!(code, 530);
+        assert_eq!(text, "Login incorrect.");
+    }
+
+    // ── FTP banner parsing tests ────────────────────────────────────
+
+    #[test]
+    fn test_parse_ftp_banner_vsftpd() {
+        let banner = parse_ftp_banner("220 (vsFTPd 3.0.5)\r\n").unwrap();
+        assert_eq!(banner.software, "vsFTPd");
+        assert_eq!(banner.version.as_deref(), Some("3.0.5"));
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_proftpd() {
+        let banner = parse_ftp_banner("220 ProFTPD 1.3.8 Server\r\n").unwrap();
+        assert_eq!(banner.software, "ProFTPD");
+        assert_eq!(banner.version.as_deref(), Some("1.3.8"));
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_filezilla() {
+        let banner = parse_ftp_banner("220-FileZilla Server 1.8.0\r\n220 Welcome\r\n").unwrap();
+        assert_eq!(banner.software, "FileZilla Server");
+        assert_eq!(banner.version.as_deref(), Some("1.8.0"));
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_microsoft() {
+        let banner = parse_ftp_banner("220 Microsoft FTP Service\r\n").unwrap();
+        assert_eq!(banner.software, "Microsoft FTP");
+        assert!(banner.version.is_none());
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_pureftpd() {
+        let banner =
+            parse_ftp_banner("220---------- Welcome to Pure-FTPd ----------\r\n220 Ready\r\n")
+                .unwrap();
+        assert_eq!(banner.software, "Pure-FTPd");
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_unknown() {
+        let banner = parse_ftp_banner("220 Welcome to my server\r\n").unwrap();
+        assert_eq!(banner.software, "Unknown");
+        assert!(banner.version.is_none());
+    }
+
+    #[test]
+    fn test_parse_ftp_banner_empty() {
+        assert!(parse_ftp_banner("").is_none());
+    }
+
+    // ── vsFTPd version classification tests ─────────────────────────
+
+    #[test]
+    fn test_classify_vsftpd_eol_old() {
+        assert!(classify_vsftpd_version_eol("2.3.4"));
+    }
+
+    #[test]
+    fn test_classify_vsftpd_eol_very_old() {
+        assert!(classify_vsftpd_version_eol("1.2.1"));
+    }
+
+    #[test]
+    fn test_classify_vsftpd_current() {
+        assert!(!classify_vsftpd_version_eol("3.0.5"));
+    }
+
+    #[test]
+    fn test_classify_vsftpd_unparseable() {
+        assert!(!classify_vsftpd_version_eol("unknown"));
+    }
+
+    // ── FTP proptests ───────────────────────────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_parse_ftp_response_no_panic(text in ".*") {
+            let _ = parse_ftp_response(&text);
+        }
+
+        #[test]
+        fn prop_parse_ftp_banner_no_panic(text in ".*") {
+            let _ = parse_ftp_banner(&text);
+        }
     }
 }
