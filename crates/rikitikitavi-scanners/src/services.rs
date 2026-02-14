@@ -873,7 +873,7 @@ impl Scanner for ServicesScanner {
     }
 
     fn supported_perspectives(&self) -> &[Perspective] {
-        &[Perspective::Authenticated, Perspective::Privileged]
+        &[Perspective::Unauthenticated, Perspective::Authenticated, Perspective::Privileged]
     }
 
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {

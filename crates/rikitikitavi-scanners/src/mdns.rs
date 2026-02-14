@@ -67,6 +67,21 @@ fn upnp_type_to_device_type(urn: &str) -> DeviceType {
     }
 }
 
+/// Override `UPnP`-derived device type when the manufacturer is a known
+/// vendor whose primary product category differs from their `UPnP` role.
+/// For example, Synology NAS devices advertise as `MediaServer` (DLNA)
+/// but should be classified as NAS.
+fn manufacturer_override_device_type(manufacturer: &str, upnp_type: DeviceType) -> DeviceType {
+    let lower = manufacturer.to_lowercase();
+    if lower.contains("synology") || lower.contains("qnap") || lower.contains("western digital") {
+        return DeviceType::Nas;
+    }
+    if lower.contains("lg electronics") {
+        return DeviceType::SmartTv;
+    }
+    upnp_type
+}
+
 /// Classify a `UPnP` device description into findings.
 pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -99,7 +114,7 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
         hint = hint.with_model(model);
     }
     if let Some(dt) = &info.device_type {
-        let device_type = upnp_type_to_device_type(dt);
+        let device_type = manufacturer_override_device_type(manufacturer, upnp_type_to_device_type(dt));
         if device_type != DeviceType::Unknown {
             hint = hint.with_device_type(device_type);
         }
@@ -422,8 +437,15 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         }
         findings.push(finding);
     } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
+        let airplay_type = if display_name.contains("MacBook") || display_name.contains("macbook") {
+            DeviceType::Laptop
+        } else if display_name.contains("iMac") || display_name.contains("Mac Pro") || display_name.contains("Mac mini") || display_name.contains("Mac Studio") {
+            DeviceType::Desktop
+        } else {
+            DeviceType::MediaPlayer
+        };
         let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
-            .with_device_type(DeviceType::MediaPlayer);
+            .with_device_type(airplay_type);
         findings.push(
             Finding::new(
                 "mdns",
@@ -935,7 +957,53 @@ mod tests {
         assert_eq!(hint.vendor.as_deref(), Some("Synology"));
         assert_eq!(hint.model.as_deref(), Some("DS418play"));
         assert_eq!(hint.hostname.as_deref(), Some("rudiger"));
-        assert_eq!(hint.device_type, Some(DeviceType::MediaPlayer));
+        // Synology manufactures NAS devices; their MediaServer UPnP role is
+        // overridden by the manufacturer-based classification.
+        assert_eq!(hint.device_type, Some(DeviceType::Nas));
+    }
+
+    #[test]
+    fn test_upnp_lg_tv_classified_as_smart_tv() {
+        let ip: IpAddr = "192.168.2.11".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("[LG] webOS TV".to_owned()),
+            manufacturer: Some("LG Electronics".to_owned()),
+            model_name: Some("OLED55C7P".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:MediaRenderer:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.2.11/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::SmartTv));
+    }
+
+    #[test]
+    fn test_manufacturer_override_preserves_generic() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("My Router".to_owned()),
+            manufacturer: Some("Netgear".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:InternetGatewayDevice:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.50/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Router));
+    }
+
+    #[test]
+    fn test_airplay_macbook_classified_as_laptop() {
+        let svc = MdnsService {
+            name: "Kathryn's MacBook Pro".to_owned(),
+            service_type: "_airplay._tcp.local".to_owned(),
+            hostname: "Kathryns-MacBook-Pro.local".to_owned(),
+            ip: "192.168.3.235".parse().unwrap(),
+            port: 7000,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Laptop));
     }
 
     #[test]

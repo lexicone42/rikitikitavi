@@ -129,6 +129,7 @@ const fn vendor_to_device_type(vendor: &str) -> DeviceType {
         b"Philips Hue" | b"Espressif" => DeviceType::IoT,
         b"HP" => DeviceType::Printer,
         b"Raspberry Pi" => DeviceType::Server,
+        b"Ubiquiti" => DeviceType::Switch,
         _ => DeviceType::Unknown,
     }
 }
@@ -286,6 +287,7 @@ mod tests {
         assert_eq!(vendor_to_device_type("Espressif"), DeviceType::IoT);
         assert_eq!(vendor_to_device_type("HP"), DeviceType::Printer);
         assert_eq!(vendor_to_device_type("Raspberry Pi"), DeviceType::Server);
+        assert_eq!(vendor_to_device_type("Ubiquiti"), DeviceType::Switch);
         assert_eq!(vendor_to_device_type("Apple"), DeviceType::Unknown);
     }
 }

@@ -271,6 +271,9 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         "scan complete"
     );
 
+    // Deduplicate devices by IP, keeping the entry with the most metadata
+    dedup_devices(&mut ctx.discovered_devices);
+
     Ok(ScanResults {
         findings: all_findings,
         devices: std::mem::take(&mut ctx.discovered_devices),
@@ -527,6 +530,43 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
     if enriched_count > 0 {
         tracing::info!(enriched_count, "enriched devices from Phase 2 hints");
     }
+}
+
+/// Deduplicate devices by IP address.
+///
+/// When multiple entries share the same IP (e.g. from overlapping ARP
+/// cache snapshots), keep the one with the richest metadata: prefer
+/// entries with known `device_type`, then most open ports, then first
+/// occurrence.
+fn dedup_devices(devices: &mut Vec<Device>) {
+    use std::collections::HashMap;
+
+    let mut best: HashMap<IpAddr, usize> = HashMap::new();
+    for (i, device) in devices.iter().enumerate() {
+        best.entry(device.ip)
+            .and_modify(|prev| {
+                let prev_dev = &devices[*prev];
+                let new_is_better =
+                    // Prefer identified over unknown
+                    (device.device_type != DeviceType::Unknown && prev_dev.device_type == DeviceType::Unknown)
+                    // Prefer more open ports
+                    || (device.device_type == prev_dev.device_type
+                        && device.open_ports.len() > prev_dev.open_ports.len())
+                    // Prefer having a hostname
+                    || (device.device_type == prev_dev.device_type
+                        && device.open_ports.len() == prev_dev.open_ports.len()
+                        && device.hostname.is_some()
+                        && prev_dev.hostname.is_none());
+                if new_is_better {
+                    *prev = i;
+                }
+            })
+            .or_insert(i);
+    }
+
+    let mut keep: Vec<usize> = best.into_values().collect();
+    keep.sort_unstable();
+    *devices = keep.into_iter().map(|i| devices[i].clone()).collect();
 }
 
 #[cfg(test)]
