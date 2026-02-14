@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_network::MdnsService;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
@@ -134,9 +135,6 @@ pub struct MdnsScanner;
 /// SSDP multicast address and port.
 const SSDP_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(239, 255, 255, 250), 1900);
 
-/// mDNS multicast address and port.
-const MDNS_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(224, 0, 0, 251), 5353);
-
 /// Parse an SSDP M-SEARCH response to extract service info.
 ///
 /// Typical SSDP response:
@@ -182,30 +180,6 @@ pub struct SsdpService {
     pub location: Option<String>,
     pub server: Option<String>,
     pub service_type: Option<String>,
-}
-
-/// Parse an mDNS response to extract advertised service names.
-///
-/// mDNS responses are DNS packets; we do a simple text scan of the
-/// response bytes for `.local` names since full DNS parsing is complex.
-pub fn parse_mdns_names(data: &[u8]) -> Vec<String> {
-    // Simple heuristic: scan for printable ASCII sequences ending in ".local"
-    let text = String::from_utf8_lossy(data);
-    let mut names = Vec::new();
-
-    for segment in text.split(|c: char| !c.is_ascii_graphic() || c == '\0') {
-        let trimmed = segment.trim();
-        #[allow(clippy::case_sensitive_file_extension_comparisons)]
-        if trimmed.len() > 6 && trimmed.ends_with(".local") {
-            // Filter out common noise
-            let name = trimmed.to_owned();
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-
-    names
 }
 
 /// Classify a discovered SSDP service.
@@ -281,54 +255,181 @@ async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
     results
 }
 
-/// Send mDNS query and collect responses.
-#[allow(clippy::unused_async)]
-async fn discover_mdns() -> Vec<(IpAddr, Vec<String>)> {
-    let mut results = Vec::new();
+// ── mDNS service classification ─────────────────────────────────────
 
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("could not bind mDNS socket: {e}");
-            return results;
-        }
+/// Classify a discovered mDNS service into security findings.
+#[allow(clippy::too_many_lines)]
+fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let ip = service.ip;
+    let svc_type = &service.service_type;
+
+    // Build a display name
+    let display_name = if service.name.is_empty() {
+        service.hostname.clone()
+    } else {
+        service.name.clone()
     };
 
-    let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+    // TXT metadata summary
+    let txt_summary = if service.txt_records.is_empty() {
+        String::new()
+    } else {
+        format!(" TXT: [{}]", service.txt_records.join(", "))
+    };
 
-    // Minimal mDNS query for _services._dns-sd._udp.local (service enumeration)
-    // DNS header: ID=0, flags=0x0000, qdcount=1
-    // Question: _services._dns-sd._udp.local, type PTR (12), class IN (1)
-    let query: &[u8] = &[
-        0x00, 0x00, // Transaction ID
-        0x00, 0x00, // Flags: standard query
-        0x00, 0x01, // Questions: 1
-        0x00, 0x00, // Answers: 0
-        0x00, 0x00, // Authority: 0
-        0x00, 0x00, // Additional: 0
-        // _services._dns-sd._udp.local
-        0x09, b'_', b's', b'e', b'r', b'v', b'i', b'c', b'e', b's', 0x07, b'_', b'd', b'n', b's',
-        b'-', b's', b'd', 0x04, b'_', b'u', b'd', b'p', 0x05, b'l', b'o', b'c', b'a', b'l',
-        0x00, // Root label
-        0x00, 0x0C, // Type: PTR
-        0x00, 0x01, // Class: IN
-    ];
+    // Base finding for every discovered service
+    let base_desc = format!(
+        "mDNS service '{display_name}' of type {svc_type} on {ip}:{port} \
+         (hostname: {hostname}).{txt_summary} \
+         mDNS service advertisement reveals device capabilities \
+         and can help attackers map the network.",
+        port = service.port,
+        hostname = service.hostname,
+    );
 
-    let dest = SocketAddr::new(IpAddr::V4(MDNS_ADDR.0), MDNS_ADDR.1);
-    if socket.send_to(query, dest).is_err() {
-        tracing::warn!("could not send mDNS query");
-        return results;
+    // Classify by service type
+    if svc_type.contains("_ssh._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("SSH service advertised: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} SSH access advertised via mDNS makes this host \
+                     easily discoverable. Ensure strong authentication (key-based) \
+                     is required and password auth is disabled."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("SSH")
+            .with_cwe("CWE-200"),
+        );
+    } else if svc_type.contains("_http._tcp") {
+        let severity = if service
+            .txt_records
+            .iter()
+            .any(|t| t.contains("admin") || t.contains("path=/"))
+        {
+            Severity::Low
+        } else {
+            Severity::Info
+        };
+
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("HTTP service advertised: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} HTTP service discovered via mDNS. Web interfaces \
+                     may expose admin panels, configuration pages, or APIs."
+                ),
+                severity,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("HTTP")
+            .with_cwe("CWE-200"),
+        );
+    } else if svc_type.contains("_ipp._tcp") || svc_type.contains("_printer._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("Printer service advertised: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} Network printers can leak document contents, \
+                     user information, and internal network details through their \
+                     management interfaces."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("IPP")
+            .with_cwe("CWE-200"),
+        );
+    } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("File sharing service: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} File sharing service discovered via mDNS. \
+                     Shared folders may expose sensitive documents or allow \
+                     unauthorized access if permissions are misconfigured."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("SMB")
+            .with_cwe("CWE-732"),
+        );
+    } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("AirPlay device: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} AirPlay service allows screen mirroring and \
+                     media streaming. Unauthorized users on the network can \
+                     stream content to this device."
+                ),
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("AirPlay"),
+        );
+    } else if svc_type.contains("_googlecast._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("Chromecast/Google Cast: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} Google Cast device allows media casting from \
+                     any device on the network."
+                ),
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("Google Cast"),
+        );
+    } else if svc_type.contains("_hap._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("HomeKit device: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} Apple HomeKit accessory discovered. HomeKit \
+                     devices control physical home functions (locks, cameras, \
+                     lights). Ensure pairing is restricted."
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("HomeKit")
+            .with_cwe("CWE-287"),
+        );
+    } else {
+        // Generic mDNS service
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("mDNS service: {display_name} ({svc_type}) on {ip}:{}", service.port),
+                &base_desc,
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("mDNS"),
+        );
     }
 
-    let mut buf = [0u8; 4096];
-    while let Ok((n, addr)) = socket.recv_from(&mut buf) {
-        let names = parse_mdns_names(&buf[..n]);
-        if !names.is_empty() {
-            results.push((addr.ip(), names));
-        }
-    }
-
-    results
+    findings
 }
 
 #[async_trait]
@@ -379,25 +480,19 @@ impl Scanner for MdnsScanner {
             }
         }
 
-        // mDNS discovery
-        let mdns_results = discover_mdns().await;
-        tracing::info!(mdns_count = mdns_results.len(), "mDNS discovery complete");
-        for (ip, names) in &mdns_results {
-            for name in names {
-                findings.push(
-                    Finding::new(
-                        "mdns",
-                        &format!("mDNS service: {name} on {ip}"),
-                        &format!(
-                            "Device at {ip} advertises mDNS service '{name}'. \
-                             mDNS service advertisement reveals device capabilities \
-                             and can help attackers map the network."
-                        ),
-                        Severity::Info,
-                    )
-                    .with_ip(*ip)
-                    .with_service("mDNS"),
+        // mDNS discovery — proper DNS packet parsing via network crate
+        match rikitikitavi_network::discover_services(3).await {
+            Ok(mdns_services) => {
+                tracing::info!(
+                    mdns_count = mdns_services.len(),
+                    "mDNS discovery complete"
                 );
+                for service in &mdns_services {
+                    findings.extend(classify_mdns_service(service));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("mDNS discovery failed: {e}");
             }
         }
 
@@ -449,27 +544,156 @@ mod tests {
         assert!(parse_ssdp_response(response).is_none());
     }
 
+    // ── mDNS service classification tests ────────────────────────
+
     #[test]
-    fn test_parse_mdns_names() {
-        // Simulate a response containing .local names embedded in binary
-        let data = b"\x00\x00printer._ipp._tcp.local\x00\x00\x0cnas.local\x00";
-        let names = parse_mdns_names(data);
-        assert!(names.iter().any(|n| n.contains(".local")));
+    fn test_classify_ssh_service() {
+        let svc = MdnsService {
+            name: "NAS".to_owned(),
+            service_type: "_ssh._tcp.local".to_owned(),
+            hostname: "nas.local".to_owned(),
+            ip: "192.168.1.10".parse().unwrap(),
+            port: 22,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].title.contains("SSH"));
     }
 
     #[test]
-    fn test_parse_mdns_names_empty() {
-        let data = b"\x00\x00\x00\x01\x02\x03";
-        let names = parse_mdns_names(data);
-        assert!(names.is_empty());
+    fn test_classify_http_service() {
+        let svc = MdnsService {
+            name: "Router".to_owned(),
+            service_type: "_http._tcp.local".to_owned(),
+            hostname: "router.local".to_owned(),
+            ip: "192.168.1.1".parse().unwrap(),
+            port: 80,
+            txt_records: vec!["path=/admin".to_owned()],
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings.len(), 1);
+        // Admin path bumps severity to Low
+        assert_eq!(findings[0].severity, Severity::Low);
     }
 
     #[test]
-    fn test_parse_mdns_names_no_duplicates() {
-        let data = b"foo.local\x00foo.local\x00bar.local\x00";
-        let names = parse_mdns_names(data);
-        // foo.local should appear only once
-        assert_eq!(names.iter().filter(|n| n == &"foo.local").count(), 1);
+    fn test_classify_http_service_generic() {
+        let svc = MdnsService {
+            name: "Web App".to_owned(),
+            service_type: "_http._tcp.local".to_owned(),
+            hostname: "app.local".to_owned(),
+            ip: "192.168.1.50".parse().unwrap(),
+            port: 8080,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_printer_service() {
+        let svc = MdnsService {
+            name: "EPSON XP-440".to_owned(),
+            service_type: "_ipp._tcp.local".to_owned(),
+            hostname: "printer.local".to_owned(),
+            ip: "192.168.1.100".parse().unwrap(),
+            port: 631,
+            txt_records: vec!["rp=ipp/print".to_owned(), "ty=EPSON XP-440".to_owned()],
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].title.contains("Printer"));
+    }
+
+    #[test]
+    fn test_classify_smb_service() {
+        let svc = MdnsService {
+            name: "NAS Share".to_owned(),
+            service_type: "_smb._tcp.local".to_owned(),
+            hostname: "nas.local".to_owned(),
+            ip: "192.168.1.20".parse().unwrap(),
+            port: 445,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].title.contains("File sharing"));
+    }
+
+    #[test]
+    fn test_classify_airplay_service() {
+        let svc = MdnsService {
+            name: "Living Room TV".to_owned(),
+            service_type: "_airplay._tcp.local".to_owned(),
+            hostname: "appletv.local".to_owned(),
+            ip: "192.168.1.30".parse().unwrap(),
+            port: 7000,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("AirPlay"));
+    }
+
+    #[test]
+    fn test_classify_googlecast_service() {
+        let svc = MdnsService {
+            name: "Kitchen Display".to_owned(),
+            service_type: "_googlecast._tcp.local".to_owned(),
+            hostname: "chromecast.local".to_owned(),
+            ip: "192.168.1.40".parse().unwrap(),
+            port: 8009,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("Chromecast"));
+    }
+
+    #[test]
+    fn test_classify_homekit_service() {
+        let svc = MdnsService {
+            name: "Front Door Lock".to_owned(),
+            service_type: "_hap._tcp.local".to_owned(),
+            hostname: "lock.local".to_owned(),
+            ip: "192.168.1.60".parse().unwrap(),
+            port: 8080,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].title.contains("HomeKit"));
+    }
+
+    #[test]
+    fn test_classify_generic_service() {
+        let svc = MdnsService {
+            name: "Unknown Thing".to_owned(),
+            service_type: "_custom._tcp.local".to_owned(),
+            hostname: "thing.local".to_owned(),
+            ip: "192.168.1.99".parse().unwrap(),
+            port: 9999,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_empty_name_uses_hostname() {
+        let svc = MdnsService {
+            name: String::new(),
+            service_type: "_ssh._tcp.local".to_owned(),
+            hostname: "server.local".to_owned(),
+            ip: "10.0.0.1".parse().unwrap(),
+            port: 22,
+            txt_records: Vec::new(),
+        };
+        let findings = classify_mdns_service(&svc);
+        assert!(findings[0].title.contains("server.local"));
     }
 
     #[test]
@@ -594,12 +818,6 @@ mod tests {
         #[test]
         fn prop_parse_ssdp_no_panic(response in ".*") {
             let _ = parse_ssdp_response(&response);
-        }
-
-        /// `parse_mdns_names` never panics on arbitrary bytes
-        #[test]
-        fn prop_parse_mdns_names_no_panic(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
-            let _ = parse_mdns_names(&data);
         }
 
         /// `classify_ssdp_service` never panics with arbitrary service data
