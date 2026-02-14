@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
 use rikitikitavi_network::MdnsService;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
@@ -457,25 +458,46 @@ impl Scanner for MdnsScanner {
         // SSDP discovery
         let ssdp_results = discover_ssdp().await;
         tracing::info!(ssdp_count = ssdp_results.len(), "SSDP discovery complete");
-        for (ip, service) in &ssdp_results {
-            findings.push(classify_ssdp_service(*ip, service));
 
-            // Fetch UPnP device description if a LOCATION URL is available
-            // (skipped in Passive mode — HTTP fetches slow down quick scans)
-            if ctx
-                .config
-                .intensity
-                .at_least(rikitikitavi_models::config::ScanIntensity::Active)
-            {
+        // Deduplicate SSDP service findings by (IP, service_type)
+        let mut seen_ssdp_services: HashSet<(IpAddr, String)> = HashSet::new();
+        for (ip, service) in &ssdp_results {
+            let svc_type = service
+                .service_type
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_owned();
+            if seen_ssdp_services.insert((*ip, svc_type)) {
+                findings.push(classify_ssdp_service(*ip, service));
+            }
+        }
+
+        // Group SSDP responses by (IP, LOCATION) for UPnP device description
+        // fetching — same device advertising multiple service URNs should only
+        // produce one info finding and one serial-number finding.
+        if ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
+        {
+            let mut device_groups: HashMap<(IpAddr, String), Vec<SsdpService>> = HashMap::new();
+            for (ip, service) in &ssdp_results {
                 if let Some(location) = &service.location {
-                    if let Some(device_info) = fetch_upnp_description(location).await {
-                        tracing::debug!(
-                            ip = %ip,
-                            name = ?device_info.friendly_name,
-                            "fetched UPnP device description"
-                        );
-                        findings.extend(classify_upnp_device(*ip, location, &device_info));
-                    }
+                    device_groups
+                        .entry((*ip, location.clone()))
+                        .or_default()
+                        .push(service.clone());
+                }
+            }
+
+            for (ip, location) in device_groups.keys() {
+                if let Some(device_info) = fetch_upnp_description(location).await {
+                    tracing::debug!(
+                        ip = %ip,
+                        name = ?device_info.friendly_name,
+                        "fetched UPnP device description"
+                    );
+                    findings.extend(classify_upnp_device(*ip, location, &device_info));
                 }
             }
         }

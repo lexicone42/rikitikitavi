@@ -119,7 +119,7 @@ async fn check_dns_rebinding(nameservers: &[IpAddr], findings: &mut Vec<Finding>
 }
 
 /// Check if an IP address is in a private/reserved range.
-fn is_private_ip(ip: IpAddr) -> bool {
+pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let octets = v4.octets();

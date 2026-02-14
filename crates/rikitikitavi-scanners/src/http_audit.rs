@@ -34,14 +34,28 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
     let mut findings = Vec::new();
 
     if !headers.has_hsts {
+        let (severity, description) = if crate::dns::is_private_ip(ip) {
+            (
+                Severity::Info,
+                "The server does not send a Strict-Transport-Security header. \
+                 On private network IPs, HSTS has no practical effect — browsers \
+                 do not HSTS-pin raw IP addresses or RFC1918 ranges.",
+            )
+        } else {
+            (
+                Severity::Medium,
+                "The server does not send a Strict-Transport-Security header. \
+                 Without HSTS, browsers may connect over unencrypted HTTP, \
+                 enabling man-in-the-middle attacks.",
+            )
+        };
+
         findings.push(
             Finding::new(
                 "http_audit",
                 &format!("Missing HSTS header on {ip}:{port}"),
-                "The server does not send a Strict-Transport-Security header. \
-                 Without HSTS, browsers may connect over unencrypted HTTP, \
-                 enabling man-in-the-middle attacks.",
-                Severity::Medium,
+                description,
+                severity,
             )
             .with_ip(ip)
             .with_port(port)
@@ -1011,6 +1025,8 @@ mod tests {
         let headers = HeaderSet::default();
         let findings = classify_missing_headers(ip, 443, &headers);
         assert_eq!(findings.len(), 4);
+        // HSTS on private IP → Info
+        assert_eq!(findings[0].severity, Severity::Info);
     }
 
     #[test]
@@ -1028,8 +1044,23 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_missing_hsts_only() {
+    fn test_classify_missing_hsts_only_private_ip() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let headers = HeaderSet {
+            has_hsts: false,
+            has_x_frame_options: true,
+            has_content_security_policy: true,
+            has_x_content_type_options: true,
+            server: None,
+        };
+        let findings = classify_missing_headers(ip, 443, &headers);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_missing_hsts_only_public_ip() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
         let headers = HeaderSet {
             has_hsts: false,
             has_x_frame_options: true,

@@ -120,13 +120,26 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
     }
 
     if issue_lower.contains("self-signed") || issue_lower.contains("self signed") {
+        let (severity, description) = if crate::dns::is_private_ip(ip) {
+            (
+                Severity::Low,
+                "The TLS certificate is self-signed. This is expected on home \
+                 network devices (routers, NAS, IoT hubs) that have no way to \
+                 obtain CA-signed certificates for private IP addresses.",
+            )
+        } else {
+            (
+                Severity::Medium,
+                "The TLS certificate is self-signed. It prevents certificate \
+                 validation and trains users to accept security warnings.",
+            )
+        };
+
         return Finding::new(
             "ssl",
             &format!("Self-signed certificate on {ip}:{port}"),
-            "The TLS certificate is self-signed. While common on home network \
-             devices, it prevents certificate validation and trains users to \
-             accept security warnings.",
-            Severity::Medium,
+            description,
+            severity,
         )
         .with_ip(ip)
         .with_port(port)
@@ -563,8 +576,15 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_cert_self_signed() {
+    fn test_classify_cert_self_signed_private_ip() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_cert_issue(ip, 443, "self-signed certificate");
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_classify_cert_self_signed_public_ip() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
         let finding = classify_cert_issue(ip, 443, "self-signed certificate");
         assert_eq!(finding.severity, Severity::Medium);
     }
