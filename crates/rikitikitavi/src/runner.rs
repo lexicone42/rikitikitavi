@@ -277,6 +277,17 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     // Deduplicate devices by IP, keeping the entry with the most metadata
     dedup_devices(&mut ctx.discovered_devices);
 
+    // Ensure gateway remains classified as Router after all enrichment.
+    // OUI hints may reclassify it (e.g. Ubiquiti → Switch), but the gateway
+    // is by definition a router — it routes packets between networks.
+    if let Some(gw_ip) = ctx.gateway {
+        for device in &mut ctx.discovered_devices {
+            if device.ip == gw_ip {
+                device.device_type = DeviceType::Router;
+            }
+        }
+    }
+
     Ok(ScanResults {
         findings: all_findings,
         devices: std::mem::take(&mut ctx.discovered_devices),

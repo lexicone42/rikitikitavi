@@ -13,6 +13,7 @@ pub mod isolation;
 pub mod mdns;
 pub mod neighbor;
 pub mod network;
+pub mod oui_db;
 #[cfg(feature = "monitor")]
 pub mod passive_wifi;
 pub mod ports;
