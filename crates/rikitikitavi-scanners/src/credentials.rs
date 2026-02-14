@@ -404,11 +404,22 @@ async fn check_http_no_auth(ip: IpAddr, port: u16) -> Option<HttpCheckResult> {
     // 401/403 = auth required (good)
     // 302/301 to /login = auth required (good)
     if first_line.contains("200") {
-        // Check if the body suggests a login page despite 200
+        // Check if the response suggests auth is present (login forms, OAuth,
+        // password fields, auth headers, etc.)
         let body_lower = response.to_lowercase();
         if body_lower.contains("login")
             || body_lower.contains("password")
             || body_lower.contains("sign in")
+            || body_lower.contains("log in")
+            || body_lower.contains("signin")
+            || body_lower.contains("authenticate")
+            || body_lower.contains("username")
+            || body_lower.contains("type=\"password\"")
+            || body_lower.contains("type='password'")
+            || body_lower.contains("oauth")
+            || body_lower.contains("saml")
+            || body_lower.contains("openid")
+            || body_lower.contains("www-authenticate:")
         {
             return Some(HttpCheckResult {
                 no_auth: false,

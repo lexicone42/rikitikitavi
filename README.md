@@ -1,20 +1,16 @@
 # rikitikitavi
 
 ```
-                          ___         ~~~<§
-                    .----'   `--.__  ~~/
-          ~<§  ___.'    .-""""-.   `./       "When I was a young man I was led to believe
-         ~~/ .'   `.  .' .---.  `.  |         there were organisations to kill my snakes for me
-          / /  0  0 \|  /     \   | |         I.E. the church, I.E. the government, I.E. school
-          | |   w   |`-'       ;  | ;         But when I got a little older
-          \  `.___.'    ,      | / /          I learned I had to kill them myself"
-           `.   ,______/ )    .' .'
-             )-'   ____.'/   / .'                                      ─ Donovan
-            /    .'   (  `--' /
-           /   .'      `----.'
-          /_ .'   /|    /|
-         /  /    '-'   '-'
-        `~~'
+                                .------.__
+   /\      ____________________/ o    o   >--~~<§
+  /  `----'                      `--ww--'
+ (              .----.   .----.     /        "When I was a young man I was led to believe
+  \   .--------|      |-|      |--'           there were organisations to kill my snakes for me
+   `--'        |      | |      |              I.E. the church, I.E. the government, I.E. school
+               `------' `------'              But when I got a little older
+                                              I learned I had to kill them myself"
+
+                                                                             ─ Donovan
 ```
 
 A home network security auditor written in Rust. Scans your local network for

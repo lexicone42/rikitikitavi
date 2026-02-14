@@ -927,7 +927,7 @@ mod tests {
 
     // ── Helper: build a complete MySQL Handshake v10 packet ─────────
 
-    /// Build a realistic MySQL Handshake v10 packet for testing.
+    /// Build a realistic `MySQL` Handshake v10 packet for testing.
     fn build_mysql_packet(
         version: &str,
         conn_id: u32,
