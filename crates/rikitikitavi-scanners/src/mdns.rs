@@ -165,7 +165,10 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
             )
             .with_ip(ip)
             .with_service("UPnP")
-            .with_cwe("CWE-200"),
+            .with_cwe("CWE-200")
+            .with_references(vec![
+                "https://owasp.org/www-project-internet-of-things/".to_owned(),
+            ]),
         );
     }
 
@@ -410,7 +413,10 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_ip(ip)
             .with_port(service.port)
             .with_service("HTTP")
-            .with_cwe("CWE-200");
+            .with_cwe("CWE-200")
+            .with_references(vec![
+                "https://owasp.org/www-project-internet-of-things/".to_owned(),
+            ]);
         if let Some(h) = hint_hostname {
             finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
         }
@@ -433,6 +439,9 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_port(service.port)
             .with_service("IPP")
             .with_cwe("CWE-200")
+            .with_references(vec![
+                "https://owasp.org/www-project-internet-of-things/".to_owned(),
+            ])
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {

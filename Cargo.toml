@@ -66,6 +66,9 @@ ipnetwork = "0.20"
 base64 = "0.22"
 pcap = "2"
 
+# X.509 certificate parsing
+x509-parser = "0.16"
+
 # Testing
 mockall = "0.13"
 proptest = "1"

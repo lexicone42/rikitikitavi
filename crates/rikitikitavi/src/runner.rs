@@ -304,37 +304,62 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 /// When Phase 1 (ports) and Phase 2 (services, ssl, credentials, etc.) both
 /// report on the same IP:port, keep the finding with the highest detail score.
 /// Findings without both IP and port are never deduplicated.
+///
+/// Within the same scanner, multiple findings per (IP, port) are kept
+/// (e.g. ssl reports self-signed + excessive validity + cert details for one port).
+/// Across different scanners, dedup keeps the finding with the best detail score
+/// (e.g. ports + services + ssl all reporting something on port 443 → keep the
+/// most detailed one from the deeper scanner).
 fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::HashMap;
 
-    let mut keyed: HashMap<(IpAddr, u16), Vec<Finding>> = HashMap::new();
+    // Phase 1: Group by (IP, port, scanner) — keep all findings from the same scanner
+    let mut by_scanner: HashMap<(IpAddr, u16, String), Vec<Finding>> = HashMap::new();
     let mut unkeyed: Vec<Finding> = Vec::new();
 
     for finding in findings {
         if let (Some(ip), Some(port)) = (finding.affected_ip, finding.affected_port) {
-            keyed.entry((ip, port)).or_default().push(finding);
+            let key = (ip, port, finding.scanner.clone());
+            by_scanner.entry(key).or_default().push(finding);
         } else {
             unkeyed.push(finding);
         }
     }
 
+    // Phase 2: For each (IP, port), pick the best scanner and keep all its findings.
+    // If multiple scanners report on the same port, keep the deepest one.
+    let mut by_port: HashMap<(IpAddr, u16), Vec<(String, Vec<Finding>)>> = HashMap::new();
+    for ((ip, port, scanner), group) in by_scanner {
+        by_port
+            .entry((ip, port))
+            .or_default()
+            .push((scanner, group));
+    }
+
     let mut result: Vec<Finding> = unkeyed;
-    for (_key, mut group) in keyed {
-        if group.len() == 1 {
-            result.push(group.pop().expect("non-empty group"));
+    for (_key, scanner_groups) in by_port {
+        if scanner_groups.len() == 1 {
+            // Only one scanner reported on this port — keep all its findings
+            result.extend(scanner_groups.into_iter().flat_map(|(_, f)| f));
         } else {
-            // Keep the finding with the highest detail score
-            group.sort_by(|a, b| {
-                let score_a = detail_score(a);
-                let score_b = detail_score(b);
-                score_b.cmp(&score_a).then_with(|| {
-                    // Tiebreaker: prefer non-"ports" scanner (Phase 2 is deeper)
-                    let a_is_ports = a.scanner == "ports";
-                    let b_is_ports = b.scanner == "ports";
-                    a_is_ports.cmp(&b_is_ports)
-                })
-            });
-            result.push(group.swap_remove(0));
+            // Multiple scanners on the same port — keep the best one
+            let mut best_scanner = String::new();
+            let mut best_score = 0_u32;
+            for (scanner, group) in &scanner_groups {
+                let max_score = group.iter().map(detail_score).max().unwrap_or(0);
+                let is_ports = scanner == "ports";
+                // Prefer non-ports scanners (Phase 2 deeper analysis)
+                let adjusted = if is_ports { max_score } else { max_score + 1 };
+                if adjusted > best_score {
+                    best_score = adjusted;
+                    scanner.clone_into(&mut best_scanner);
+                }
+            }
+            for (scanner, group) in scanner_groups {
+                if scanner == best_scanner {
+                    result.extend(group);
+                }
+            }
         }
     }
 

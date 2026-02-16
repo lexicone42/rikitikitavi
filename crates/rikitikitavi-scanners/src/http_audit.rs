@@ -61,6 +61,9 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-319")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html".to_owned(),
+            ])
             .with_opt_remediation(crate::remediation::get(
                 "rikitikitavi.http_audit.missing-hsts",
                 &[],
@@ -81,7 +84,10 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_cwe("CWE-1021"),
+            .with_cwe("CWE-1021")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html".to_owned(),
+            ]),
         );
     }
 
@@ -97,7 +103,10 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_cwe("CWE-79"),
+            .with_cwe("CWE-79")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+            ]),
         );
     }
 
@@ -114,7 +123,10 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_cwe("CWE-16"),
+            .with_cwe("CWE-16")
+            .with_references(vec![
+                "https://owasp.org/www-project-secure-headers/".to_owned(),
+            ]),
         );
     }
 
@@ -174,7 +186,10 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
             )
             .with_ip(ip)
             .with_port(port)
-            .with_service("HTTP"),
+            .with_service("HTTP")
+            .with_references(vec![
+                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773".to_owned(),
+            ]),
         );
     }
 
@@ -262,7 +277,10 @@ pub fn classify_http_methods(ip: IpAddr, port: u16, allow_header: &str) -> Vec<F
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_cwe("CWE-749"),
+            .with_cwe("CWE-749")
+            .with_references(vec![
+                "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods".to_owned(),
+            ]),
         );
     }
 
@@ -711,6 +729,498 @@ fn format_auth_evidence(signals: &[AuthSignal]) -> String {
     parts.join(". ")
 }
 
+// ── Content-Security-Policy deep analysis ───────────────────────
+//
+// Instead of just checking CSP presence, we parse the header value into
+// structured directives and analyse each for known weaknesses:
+// `unsafe-inline`, `unsafe-eval`, `data:` URIs, wildcard sources, and
+// missing critical directives like `object-src`, `base-uri`, and
+// `frame-ancestors`.
+
+/// A parsed CSP directive: name + list of source expressions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CspDirective {
+    pub name: String,
+    pub sources: Vec<String>,
+}
+
+/// Parse a `Content-Security-Policy` header into structured directives.
+///
+/// CSP syntax: `directive-name src1 src2; directive-name2 src3`
+/// All names and sources are lowercased for comparison.
+pub fn parse_csp(header: &str) -> Vec<CspDirective> {
+    header
+        .split(';')
+        .filter_map(|d| {
+            let trimmed = d.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let name = parts.next()?.to_lowercase();
+            let sources: Vec<String> = parts.map(str::to_lowercase).collect();
+            Some(CspDirective { name, sources })
+        })
+        .collect()
+}
+
+/// Find the effective sources for a directive, falling back to `default-src`.
+///
+/// CSP specifies that any unmentioned fetch directive inherits from
+/// `default-src`.  This helper models that fallback chain.
+fn csp_effective_sources<'a>(
+    directives: &'a [CspDirective],
+    name: &str,
+) -> Option<&'a [String]> {
+    directives
+        .iter()
+        .find(|d| d.name == name)
+        .or_else(|| directives.iter().find(|d| d.name == "default-src"))
+        .map(|d| d.sources.as_slice())
+}
+
+/// Check if a source list is restrictive enough that missing specific
+/// directives are not a concern (`'none'` or `'self'` only).
+fn is_restrictive(sources: &[String]) -> bool {
+    !sources.is_empty() && sources.iter().all(|s| s == "'none'" || s == "'self'")
+}
+
+/// Analyse a `Content-Security-Policy` header for weaknesses.
+///
+/// Only call this when a CSP header *is* present — we already generate a
+/// separate "missing CSP" finding.  `has_x_frame_options` suppresses the
+/// `frame-ancestors` finding when XFO already provides clickjacking defence.
+#[allow(clippy::too_many_lines)]
+pub fn analyze_csp(
+    ip: IpAddr,
+    port: u16,
+    header: &str,
+    has_x_frame_options: bool,
+) -> Vec<Finding> {
+    let directives = parse_csp(header);
+    if directives.is_empty() {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+
+    // ── script-src analysis (most impactful) ──
+    if let Some(sources) = csp_effective_sources(&directives, "script-src") {
+        if sources.iter().any(|s| s == "'unsafe-inline'") {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("CSP allows unsafe-inline scripts on {ip}:{port}"),
+                    "The Content-Security-Policy includes 'unsafe-inline' in the \
+                     script source directive. This defeats XSS protection because \
+                     inline <script> tags and event handlers are allowed.",
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-79")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+
+        if sources.iter().any(|s| s == "'unsafe-eval'") {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("CSP allows unsafe-eval on {ip}:{port}"),
+                    "The Content-Security-Policy includes 'unsafe-eval' in the \
+                     script source directive, permitting dynamic code execution \
+                     which is a common XSS attack vector.",
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-79")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+
+        if sources.iter().any(|s| s == "data:") {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("CSP allows data: URIs in scripts on {ip}:{port}"),
+                    "The Content-Security-Policy allows data: URIs as script \
+                     sources. An attacker can inject data:text/javascript,... \
+                     to execute arbitrary code, bypassing the CSP.",
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-79")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+    }
+
+    // ── Wildcard sources in any directive ──
+    let wildcard_directives: Vec<&str> = directives
+        .iter()
+        .filter(|d| d.sources.iter().any(|s| s == "*"))
+        .map(|d| d.name.as_str())
+        .collect();
+
+    if !wildcard_directives.is_empty() {
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("CSP wildcard source on {ip}:{port}"),
+                &format!(
+                    "The Content-Security-Policy uses wildcard (*) sources in: {}. \
+                     Wildcards allow loading resources from any origin, providing \
+                     minimal security benefit.",
+                    wildcard_directives.join(", ")
+                ),
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-16"),
+        );
+    }
+
+    // ── Missing object-src without restrictive default ──
+    let has_object_src = directives.iter().any(|d| d.name == "object-src");
+    if !has_object_src {
+        let default_restrictive = directives
+            .iter()
+            .find(|d| d.name == "default-src")
+            .is_some_and(|d| is_restrictive(&d.sources));
+        if !default_restrictive {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("CSP missing object-src on {ip}:{port}"),
+                    "The Content-Security-Policy does not define object-src and \
+                     the default-src is not restrictive. Without object-src, \
+                     plugin content (Flash, Java) may be injectable.",
+                    Severity::Low,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-79")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+    }
+
+    // ── Missing base-uri ──
+    if !directives.iter().any(|d| d.name == "base-uri") {
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("CSP missing base-uri on {ip}:{port}"),
+                "The Content-Security-Policy does not restrict base-uri. An \
+                 attacker who can inject HTML could add a <base> tag to redirect \
+                 all relative URLs to a malicious domain.",
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-79"),
+        );
+    }
+
+    // ── Missing frame-ancestors when no XFO either ──
+    if !directives.iter().any(|d| d.name == "frame-ancestors") && !has_x_frame_options {
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("CSP missing frame-ancestors on {ip}:{port}"),
+                "Neither frame-ancestors in CSP nor X-Frame-Options is set. \
+                 The page can be embedded in an attacker-controlled iframe for \
+                 clickjacking attacks.",
+                Severity::Low,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-1021"),
+        );
+    }
+
+    findings
+}
+
+// ── CORS analysis ───────────────────────────────────────────────
+//
+// Cross-Origin Resource Sharing misconfigurations allow any website to
+// interact with network device APIs.  On a home network, this means a
+// malicious webpage could read router status, change settings, or
+// exfiltrate data from NAS devices.
+
+/// Analyse CORS headers for misconfigurations.
+pub fn analyze_cors(
+    ip: IpAddr,
+    port: u16,
+    allow_origin: Option<&str>,
+    allow_credentials: bool,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let Some(origin) = allow_origin else {
+        return findings;
+    };
+
+    if origin == "*" {
+        if allow_credentials {
+            // Spec-invalid combination (browsers reject it), but signals
+            // fundamentally broken CORS config.
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("CORS wildcard with credentials on {ip}:{port}"),
+                    "Access-Control-Allow-Origin is set to '*' alongside \
+                     Access-Control-Allow-Credentials: true. Modern browsers \
+                     reject this combination, but it indicates a fundamental \
+                     CORS misconfiguration that may work in older clients.",
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-942")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        } else {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!("Permissive CORS policy on {ip}:{port}"),
+                    "Access-Control-Allow-Origin is set to '*', allowing any \
+                     website to make cross-origin requests. On a network device, \
+                     this means a malicious webpage could query its API while \
+                     you browse the internet.",
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-942")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+    } else if origin == "null" {
+        // The `null` origin can be forged via sandboxed iframes and data:
+        // URIs, so trusting it is effectively an open CORS policy.
+        findings.push(
+            Finding::new(
+                "http_audit",
+                &format!("CORS allows null origin on {ip}:{port}"),
+                "Access-Control-Allow-Origin is set to 'null'. The null origin \
+                 can be forged via sandboxed iframes and data: URIs, making \
+                 this effectively an open CORS policy.",
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_cwe("CWE-942")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+            ]),
+        );
+    }
+
+    findings
+}
+
+// ── Cookie security attribute analysis ──────────────────────────
+//
+// Session cookies without Secure, HttpOnly, or SameSite attributes are
+// vulnerable to interception, XSS theft, and CSRF attacks respectively.
+
+/// Security-relevant attributes parsed from a `Set-Cookie` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieAttributes {
+    pub name: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: Option<String>,
+}
+
+/// Parse a single `Set-Cookie` header value into security attributes.
+pub fn parse_set_cookie(header: &str) -> CookieAttributes {
+    // Cookie name is everything before first '='
+    let name = header
+        .split('=')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    // Attributes follow the value, separated by ';'
+    let lower = header.to_lowercase();
+    let parts: Vec<&str> = lower.split(';').map(str::trim).collect();
+
+    let secure = parts.contains(&"secure");
+    let http_only = parts.contains(&"httponly");
+    let same_site = parts
+        .iter()
+        .find_map(|p| p.strip_prefix("samesite=").map(|v| v.trim().to_owned()));
+
+    CookieAttributes {
+        name,
+        secure,
+        http_only,
+        same_site,
+    }
+}
+
+/// Check if a cookie name indicates a session or authentication cookie.
+fn is_security_relevant_cookie(name: &str) -> bool {
+    name == "sid"
+        || name.contains("session")
+        || name.contains("jsessionid")
+        || name.contains("auth")
+        || name.contains("token")
+        || name.starts_with("__host-")
+        || name.starts_with("__secure-")
+}
+
+/// Analyse session cookies for missing security attributes.
+#[allow(clippy::too_many_lines)]
+pub fn analyze_cookies(
+    ip: IpAddr,
+    port: u16,
+    is_https: bool,
+    cookies: &[CookieAttributes],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    for cookie in cookies {
+        if !is_security_relevant_cookie(&cookie.name) {
+            continue;
+        }
+
+        // Missing Secure on HTTPS — session can leak over HTTP
+        if is_https && !cookie.secure {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!(
+                        "Session cookie '{}' missing Secure flag on {ip}:{port}",
+                        cookie.name
+                    ),
+                    &format!(
+                        "The '{}' cookie is set over HTTPS without the Secure \
+                         attribute. The browser may send it over plain HTTP \
+                         connections, exposing the session to interception.",
+                        cookie.name
+                    ),
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-614")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+
+        // Missing HttpOnly — XSS can steal the cookie
+        if !cookie.http_only {
+            findings.push(
+                Finding::new(
+                    "http_audit",
+                    &format!(
+                        "Session cookie '{}' missing HttpOnly on {ip}:{port}",
+                        cookie.name
+                    ),
+                    &format!(
+                        "The '{}' cookie lacks the HttpOnly attribute. JavaScript \
+                         (including XSS payloads) can read it via document.cookie.",
+                        cookie.name
+                    ),
+                    Severity::Low,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_cwe("CWE-1004")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html".to_owned(),
+                ]),
+            );
+        }
+
+        // Missing or weak SameSite
+        match cookie.same_site.as_deref() {
+            None => {
+                findings.push(
+                    Finding::new(
+                        "http_audit",
+                        &format!(
+                            "Session cookie '{}' missing SameSite on {ip}:{port}",
+                            cookie.name
+                        ),
+                        &format!(
+                            "The '{}' cookie does not set SameSite. While modern \
+                             browsers default to Lax, older browsers send it with \
+                             all cross-site requests, enabling CSRF attacks.",
+                            cookie.name
+                        ),
+                        Severity::Info,
+                    )
+                    .with_ip(ip)
+                    .with_port(port)
+                    .with_service("HTTP")
+                    .with_cwe("CWE-352"),
+                );
+            }
+            Some("none") => {
+                findings.push(
+                    Finding::new(
+                        "http_audit",
+                        &format!(
+                            "Session cookie '{}' has SameSite=None on {ip}:{port}",
+                            cookie.name
+                        ),
+                        &format!(
+                            "The '{}' cookie uses SameSite=None, allowing it to be \
+                             sent with all cross-site requests. On a network device \
+                             session cookie, this increases CSRF risk.",
+                            cookie.name
+                        ),
+                        Severity::Low,
+                    )
+                    .with_ip(ip)
+                    .with_port(port)
+                    .with_service("HTTP")
+                    .with_cwe("CWE-352"),
+                );
+            }
+            Some(_) => { /* Lax or Strict — good */ }
+        }
+    }
+
+    findings
+}
+
 /// Extract header-level auth signals from a `reqwest::Response` before
 /// the body is consumed.
 fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSignals {
@@ -820,6 +1330,36 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
 
+        // ── Extract deep-analysis headers before consuming the body ──
+
+        // CSP raw value for deep parsing (presence already checked above)
+        let csp_value = resp
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+
+        // CORS headers
+        let cors_origin = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+        let cors_credentials = resp
+            .headers()
+            .get("access-control-allow-credentials")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
+        // Parse all Set-Cookie headers for cookie attribute analysis
+        let cookies: Vec<CookieAttributes> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(parse_set_cookie)
+            .collect();
+
         // Check body for default pages and framework fingerprinting
         if let Ok(body) = resp.text().await {
             if is_default_page(&body) {
@@ -852,6 +1392,9 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_port(port)
                     .with_service("HTTP")
                     .with_cwe("CWE-548")
+                    .with_references(vec![
+                        "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information".to_owned(),
+                    ])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.http_audit.directory-listing",
                         &[],
@@ -864,6 +1407,26 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                 findings.push(fw_finding);
             }
         }
+
+        // ── Deep header analysis (CSP, CORS, cookies) ──
+
+        // CSP deep analysis: only when CSP IS present (missing CSP is already
+        // flagged by classify_missing_headers above).
+        if let Some(ref csp) = csp_value {
+            findings.extend(analyze_csp(ip, port, csp, headers.has_x_frame_options));
+        }
+
+        // CORS misconfiguration check
+        findings.extend(analyze_cors(
+            ip,
+            port,
+            cors_origin.as_deref(),
+            cors_credentials,
+        ));
+
+        // Session cookie attribute analysis
+        let is_https = scheme == "https";
+        findings.extend(analyze_cookies(ip, port, is_https, &cookies));
     }
 
     // OPTIONS method enumeration
@@ -906,6 +1469,9 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
+                            .with_references(vec![
+                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                            ])
                             .with_opt_remediation(crate::remediation::get(
                                 "rikitikitavi.http_audit.admin-no-auth",
                                 &[],
@@ -1573,6 +2139,345 @@ mod tests {
         ));
     }
 
+    // ── CSP parsing tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_csp_basic() {
+        let directives = parse_csp("default-src 'self'; script-src 'unsafe-inline' cdn.example.com");
+        assert_eq!(directives.len(), 2);
+        assert_eq!(directives[0].name, "default-src");
+        assert_eq!(directives[0].sources, vec!["'self'"]);
+        assert_eq!(directives[1].name, "script-src");
+        assert_eq!(
+            directives[1].sources,
+            vec!["'unsafe-inline'", "cdn.example.com"]
+        );
+    }
+
+    #[test]
+    fn test_parse_csp_trailing_semicolons() {
+        let directives = parse_csp("default-src 'none';;; ");
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0].name, "default-src");
+    }
+
+    #[test]
+    fn test_parse_csp_empty() {
+        assert!(parse_csp("").is_empty());
+        assert!(parse_csp("   ").is_empty());
+        assert!(parse_csp(";;;").is_empty());
+    }
+
+    #[test]
+    fn test_parse_csp_case_insensitive() {
+        let directives = parse_csp("Script-Src 'UNSAFE-INLINE' CDN.EXAMPLE.COM");
+        assert_eq!(directives[0].name, "script-src");
+        assert_eq!(directives[0].sources[0], "'unsafe-inline'");
+    }
+
+    #[test]
+    fn test_analyze_csp_unsafe_inline() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "script-src 'unsafe-inline' 'self'", true);
+        assert!(findings.iter().any(|f| f.title.contains("unsafe-inline")));
+    }
+
+    #[test]
+    fn test_analyze_csp_unsafe_eval() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "script-src 'self' 'unsafe-eval'", true);
+        assert!(findings.iter().any(|f| f.title.contains("unsafe-eval")));
+    }
+
+    #[test]
+    fn test_analyze_csp_data_uri() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "script-src 'self' data:", true);
+        assert!(findings.iter().any(|f| f.title.contains("data: URIs")));
+    }
+
+    #[test]
+    fn test_analyze_csp_wildcard() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "default-src *", true);
+        assert!(findings.iter().any(|f| f.title.contains("wildcard")));
+    }
+
+    #[test]
+    fn test_analyze_csp_missing_object_src() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // default-src is permissive → object-src warning
+        let findings = analyze_csp(ip, 443, "default-src 'self' https:", true);
+        assert!(findings.iter().any(|f| f.title.contains("object-src")));
+    }
+
+    #[test]
+    fn test_analyze_csp_object_src_ok_with_restrictive_default() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // default-src 'none' covers object-src implicitly
+        let findings = analyze_csp(ip, 443, "default-src 'none'; script-src 'self'", true);
+        assert!(!findings.iter().any(|f| f.title.contains("object-src")));
+    }
+
+    #[test]
+    fn test_analyze_csp_explicit_object_src() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Explicit object-src → no finding regardless of default-src
+        let findings = analyze_csp(
+            ip,
+            443,
+            "default-src https:; object-src 'none'",
+            true,
+        );
+        assert!(!findings.iter().any(|f| f.title.contains("object-src")));
+    }
+
+    #[test]
+    fn test_analyze_csp_missing_base_uri() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "default-src 'self'", true);
+        assert!(findings.iter().any(|f| f.title.contains("base-uri")));
+    }
+
+    #[test]
+    fn test_analyze_csp_has_base_uri() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(ip, 443, "default-src 'self'; base-uri 'self'", true);
+        assert!(!findings.iter().any(|f| f.title.contains("base-uri")));
+    }
+
+    #[test]
+    fn test_analyze_csp_missing_frame_ancestors_with_xfo() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // XFO present → no frame-ancestors finding
+        let findings = analyze_csp(ip, 443, "default-src 'self'", true);
+        assert!(!findings
+            .iter()
+            .any(|f| f.title.contains("frame-ancestors")));
+    }
+
+    #[test]
+    fn test_analyze_csp_missing_frame_ancestors_without_xfo() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Neither XFO nor frame-ancestors → finding
+        let findings = analyze_csp(ip, 443, "default-src 'self'", false);
+        assert!(findings
+            .iter()
+            .any(|f| f.title.contains("frame-ancestors")));
+    }
+
+    #[test]
+    fn test_analyze_csp_default_src_fallback() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // No explicit script-src → falls back to default-src
+        let findings = analyze_csp(
+            ip,
+            443,
+            "default-src 'self' 'unsafe-inline'",
+            true,
+        );
+        assert!(findings.iter().any(|f| f.title.contains("unsafe-inline")));
+    }
+
+    #[test]
+    fn test_analyze_csp_strict_policy_minimal_findings() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_csp(
+            ip,
+            443,
+            "default-src 'none'; script-src 'self'; style-src 'self'; \
+             base-uri 'self'; frame-ancestors 'self'; object-src 'none'",
+            true,
+        );
+        // Well-configured CSP → should produce zero findings
+        assert!(findings.is_empty(), "strict CSP produced: {findings:?}");
+    }
+
+    // ── CORS tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_analyze_cors_wildcard() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_cors(ip, 80, Some("*"), false);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_analyze_cors_wildcard_with_credentials() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_cors(ip, 80, Some("*"), true);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn test_analyze_cors_null_origin() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_cors(ip, 80, Some("null"), false);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].title.contains("null origin"));
+    }
+
+    #[test]
+    fn test_analyze_cors_specific_origin() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // A specific origin is fine
+        let findings = analyze_cors(ip, 80, Some("https://example.com"), false);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_cors_no_header() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = analyze_cors(ip, 80, None, false);
+        assert!(findings.is_empty());
+    }
+
+    // ── Cookie attribute tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_set_cookie_full() {
+        let cookie = parse_set_cookie(
+            "session_id=abc123; Path=/; HttpOnly; Secure; SameSite=Strict",
+        );
+        assert_eq!(cookie.name, "session_id");
+        assert!(cookie.secure);
+        assert!(cookie.http_only);
+        assert_eq!(cookie.same_site.as_deref(), Some("strict"));
+    }
+
+    #[test]
+    fn test_parse_set_cookie_minimal() {
+        let cookie = parse_set_cookie("token=xyz");
+        assert_eq!(cookie.name, "token");
+        assert!(!cookie.secure);
+        assert!(!cookie.http_only);
+        assert!(cookie.same_site.is_none());
+    }
+
+    #[test]
+    fn test_parse_set_cookie_samesite_none() {
+        let cookie = parse_set_cookie("sid=abc; SameSite=None; Secure");
+        assert_eq!(cookie.same_site.as_deref(), Some("none"));
+        assert!(cookie.secure);
+    }
+
+    #[test]
+    fn test_analyze_cookies_missing_secure_on_https() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "session".to_owned(),
+            secure: false,
+            http_only: true,
+            same_site: Some("lax".to_owned()),
+        }];
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.iter().any(|f| f.title.contains("Secure flag")));
+    }
+
+    #[test]
+    fn test_analyze_cookies_secure_not_checked_on_http() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "session".to_owned(),
+            secure: false,
+            http_only: true,
+            same_site: Some("lax".to_owned()),
+        }];
+        // HTTP → don't flag missing Secure (it wouldn't work anyway)
+        let findings = analyze_cookies(ip, 80, false, &cookies);
+        assert!(!findings.iter().any(|f| f.title.contains("Secure flag")));
+    }
+
+    #[test]
+    fn test_analyze_cookies_missing_httponly() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "auth_token".to_owned(),
+            secure: true,
+            http_only: false,
+            same_site: Some("lax".to_owned()),
+        }];
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.iter().any(|f| f.title.contains("HttpOnly")));
+    }
+
+    #[test]
+    fn test_analyze_cookies_missing_samesite() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "sid".to_owned(),
+            secure: true,
+            http_only: true,
+            same_site: None,
+        }];
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.iter().any(|f| f.title.contains("SameSite")));
+        assert_eq!(
+            findings
+                .iter()
+                .find(|f| f.title.contains("SameSite"))
+                .unwrap()
+                .severity,
+            Severity::Info
+        );
+    }
+
+    #[test]
+    fn test_analyze_cookies_samesite_none() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "token".to_owned(),
+            secure: true,
+            http_only: true,
+            same_site: Some("none".to_owned()),
+        }];
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.iter().any(|f| f.title.contains("SameSite=None")));
+    }
+
+    #[test]
+    fn test_analyze_cookies_fully_secured() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "session".to_owned(),
+            secure: true,
+            http_only: true,
+            same_site: Some("strict".to_owned()),
+        }];
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_cookies_ignores_non_session() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cookies = vec![CookieAttributes {
+            name: "_ga".to_owned(),
+            secure: false,
+            http_only: false,
+            same_site: None,
+        }];
+        // Analytics cookie → skip
+        let findings = analyze_cookies(ip, 443, true, &cookies);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_is_security_relevant_cookie_names() {
+        assert!(is_security_relevant_cookie("sid"));
+        assert!(is_security_relevant_cookie("session_id"));
+        assert!(is_security_relevant_cookie("jsessionid"));
+        assert!(is_security_relevant_cookie("auth_token"));
+        assert!(is_security_relevant_cookie("access_token"));
+        assert!(is_security_relevant_cookie("__host-session"));
+        assert!(is_security_relevant_cookie("__secure-auth"));
+        assert!(!is_security_relevant_cookie("_ga"));
+        assert!(!is_security_relevant_cookie("theme"));
+        assert!(!is_security_relevant_cookie("lang"));
+    }
+
     proptest! {
         /// classify_missing_headers never panics with any combination of bools
         #[test]
@@ -1668,6 +2573,56 @@ mod tests {
             let s1 = extract_auth_signals(&body, &headers);
             let s2 = extract_auth_signals(&body, &headers);
             assert_eq!(classify_auth(&s1), classify_auth(&s2));
+        }
+
+        /// `parse_csp` never panics on arbitrary strings
+        #[test]
+        fn prop_parse_csp_no_panic(header in ".*") {
+            let _ = parse_csp(&header);
+        }
+
+        /// `analyze_csp` never panics on arbitrary strings
+        #[test]
+        fn prop_analyze_csp_no_panic(
+            header in ".*",
+            has_xfo in any::<bool>(),
+        ) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = analyze_csp(ip, 443, &header, has_xfo);
+        }
+
+        /// `analyze_cors` never panics on arbitrary inputs
+        #[test]
+        fn prop_analyze_cors_no_panic(
+            origin in proptest::option::of(".*"),
+            creds in any::<bool>(),
+        ) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = analyze_cors(ip, 80, origin.as_deref(), creds);
+        }
+
+        /// `parse_set_cookie` never panics on arbitrary strings
+        #[test]
+        fn prop_parse_set_cookie_no_panic(header in ".*") {
+            let _ = parse_set_cookie(&header);
+        }
+
+        /// `analyze_cookies` never panics on arbitrary cookie attributes
+        #[test]
+        fn prop_analyze_cookies_no_panic(
+            name in "[a-z_]{1,20}",
+            secure in any::<bool>(),
+            http_only in any::<bool>(),
+            is_https in any::<bool>(),
+        ) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let cookies = vec![CookieAttributes {
+                name,
+                secure,
+                http_only,
+                same_site: None,
+            }];
+            let _ = analyze_cookies(ip, 443, is_https, &cookies);
         }
 
         /// Classification matches the computed score

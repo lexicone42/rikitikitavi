@@ -515,6 +515,9 @@ impl Scanner for SmbScanner {
                                     .with_port(445)
                                     .with_service("SMB")
                                     .with_cwe("CWE-327")
+                                    .with_references(vec![
+                                        "https://attack.mitre.org/techniques/T1210/".to_owned(),
+                                    ])
                                     .with_opt_remediation(
                                         crate::remediation::get(
                                             "rikitikitavi.smb.smbv1-enabled",
@@ -661,6 +664,9 @@ impl Scanner for SmbScanner {
                     .with_port(139)
                     .with_service("NetBIOS")
                     .with_cwe("CWE-200")
+                    .with_references(vec![
+                        "https://attack.mitre.org/techniques/T1046/".to_owned(),
+                    ])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.smb.netbios-exposed",
                         &[],

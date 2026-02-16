@@ -595,20 +595,185 @@ fn parse_os_from_ssh_banner(banner: &str) -> Option<String> {
     if lower.contains("dropbear") {
         return Some("Linux (embedded)".to_owned());
     }
-    // OpenSSH_X.Yp1 Debian-...
+    // OpenSSH_X.Yp1 Debian-5+deb11u5 → extract deb version
     if lower.contains("debian") {
+        if let Some(detail) = parse_debian_version(banner) {
+            return Some(detail);
+        }
         return Some("Linux (Debian)".to_owned());
     }
-    // OpenSSH_X.Yp1 Ubuntu-...
+    // OpenSSH_X.Yp1 Ubuntu-3ubuntu0.4 → extract Ubuntu version from OpenSSH mapping
     if lower.contains("ubuntu") {
+        if let Some(detail) = parse_ubuntu_version(banner) {
+            return Some(detail);
+        }
         return Some("Linux (Ubuntu)".to_owned());
     }
-    // OpenSSH_X.Yp1 FreeBSD-...
+    // OpenSSH_X.Yp1 FreeBSD-20230316 → extract FreeBSD version
     if lower.contains("freebsd") {
         return Some("FreeBSD".to_owned());
     }
-    // Bare OpenSSH without OS suffix — too ambiguous
     None
+}
+
+/// OS fingerprint with optional EOL information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsFingerprint {
+    /// Distro name + version (e.g. "Debian 11 Bullseye").
+    pub display: String,
+    /// EOL date if known (YYYY-MM-DD).
+    pub eol_date: Option<&'static str>,
+    /// Whether the distro is currently EOL.
+    pub is_eol: bool,
+}
+
+/// Parse Debian version from SSH banner suffix.
+///
+/// Format: `Debian-N+debXXuY` where XX is the Debian major version.
+/// Examples:
+///   - `Debian-5+deb11u5` → Debian 11 Bullseye
+///   - `Debian-2+deb12u1` → Debian 12 Bookworm
+fn parse_debian_version(banner: &str) -> Option<String> {
+    // Look for +deb\d+ pattern (the actual Debian version suffix, not "Debian" word)
+    let lower = banner.to_lowercase();
+    let deb_idx = lower.find("+deb")?;
+    let after_deb = &lower[deb_idx + 4..];
+    let version_str: String = after_deb.chars().take_while(char::is_ascii_digit).collect();
+    let version: u32 = version_str.parse().ok()?;
+
+    let (codename, eol) = debian_version_info(version);
+    Some(codename.map_or_else(
+        || format!("Linux (Debian {version})"),
+        |name| format!("Linux (Debian {version} {name}, EOL: {eol})"),
+    ))
+}
+
+/// Map Debian major version to codename and EOL date.
+const fn debian_version_info(version: u32) -> (Option<&'static str>, &'static str) {
+    match version {
+        8 => (Some("Jessie"), "2020-06-30"),
+        9 => (Some("Stretch"), "2022-07-01"),
+        10 => (Some("Buster"), "2024-06-30"),
+        11 => (Some("Bullseye"), "2026-06-30"),
+        12 => (Some("Bookworm"), "2028-06-30"),
+        13 => (Some("Trixie"), "2030-06-30"),
+        _ => (None, "unknown"),
+    }
+}
+
+/// Parse Ubuntu version from SSH banner. The SSH package version
+/// encodes which Ubuntu release it belongs to.
+///
+/// We map the OpenSSH version bundled with each Ubuntu release:
+///   - `OpenSSH_8.9p1` → Ubuntu 22.04 Jammy
+///   - `OpenSSH_9.3p1` → Ubuntu 23.10 Mantic
+///   - `OpenSSH_9.6p1` → Ubuntu 24.04 Noble
+fn parse_ubuntu_version(banner: &str) -> Option<String> {
+    // Extract the OpenSSH version to map to Ubuntu release
+    let (major, minor) = extract_ssh_version(banner)?;
+    let (release, codename, eol) = ubuntu_from_openssh(major, minor)?;
+    Some(format!("Linux (Ubuntu {release} {codename}, EOL: {eol})"))
+}
+
+/// Map `OpenSSH` (major, minor) to Ubuntu release, codename, and EOL date.
+///
+/// Ubuntu ships specific `OpenSSH` versions with each release. This mapping
+/// is not 100% precise (PPAs can override), but the combination of
+/// `OpenSSH` version + "Ubuntu" in the banner makes it reliable.
+const fn ubuntu_from_openssh(major: u32, minor: u32) -> Option<(&'static str, &'static str, &'static str)> {
+    match (major, minor) {
+        (7, 2) => Some(("18.04", "Bionic", "2028-04-30")),
+        (7, 6) => Some(("18.10", "Cosmic", "2019-07-18")),
+        (7, 9) => Some(("19.04", "Disco", "2020-01-23")),
+        (8, 0) => Some(("19.10", "Eoan", "2020-07-17")),
+        (8, 2) => Some(("20.04", "Focal", "2030-04-30")),
+        (8, 4) => Some(("20.10", "Groovy", "2021-07-22")),
+        (8, 6) => Some(("21.10", "Impish", "2022-07-14")),
+        (8, 9) => Some(("22.04", "Jammy", "2032-04-30")),
+        (9, 0) => Some(("22.10", "Kinetic", "2023-07-20")),
+        (9, 3) => Some(("23.10", "Mantic", "2024-07-11")),
+        (9, 6 | 7) => Some(("24.04", "Noble", "2034-04-30")),
+        (9, 9) => Some(("24.10", "Oracular", "2025-07-10")),
+        _ => None,
+    }
+}
+
+/// Check whether an OS fingerprint from an SSH banner indicates an EOL distro,
+/// and if so, generate a finding.
+pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
+    let lower = banner.to_lowercase();
+
+    // Debian: extract version from +deb\d+ pattern
+    if lower.contains("debian") {
+        let deb_idx = lower.find("+deb")?;
+        let after_deb = &lower[deb_idx + 4..];
+        let version_str: String = after_deb.chars().take_while(char::is_ascii_digit).collect();
+        let version: u32 = version_str.parse().ok()?;
+
+        let (codename, eol_date) = debian_version_info(version);
+        if is_date_past(eol_date) {
+            let name = codename.unwrap_or("unknown");
+            return Some(
+                Finding::new(
+                    "services",
+                    &format!("End-of-life OS on {ip}:{port}"),
+                    &format!(
+                        "SSH banner indicates Debian {version} {name} which reached end-of-life \
+                         on {eol_date}. EOL operating systems receive no security patches. \
+                         Banner: {banner}"
+                    ),
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("SSH")
+                .with_cwe("CWE-1104"),
+            );
+        }
+        return None;
+    }
+
+    // Ubuntu: map OpenSSH version → release → EOL
+    if lower.contains("ubuntu") {
+        let (major, minor) = extract_ssh_version(banner)?;
+        let (release, codename, eol_date) = ubuntu_from_openssh(major, minor)?;
+        if is_date_past(eol_date) {
+            return Some(
+                Finding::new(
+                    "services",
+                    &format!("End-of-life OS on {ip}:{port}"),
+                    &format!(
+                        "SSH banner indicates Ubuntu {release} {codename} which reached \
+                         end-of-life on {eol_date}. EOL operating systems receive no \
+                         security patches. Banner: {banner}"
+                    ),
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("SSH")
+                .with_cwe("CWE-1104"),
+            );
+        }
+        return None;
+    }
+
+    None
+}
+
+/// Check if a YYYY-MM-DD date is in the past.
+fn is_date_past(date_str: &str) -> bool {
+    let parts: Vec<&str> = date_str.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let y: i32 = parts[0].parse().unwrap_or(9999);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let d: u32 = parts[2].parse().unwrap_or(1);
+
+    chrono::NaiveDate::from_ymd_opt(y, m, d).is_some_and(|eol| {
+        eol < chrono::Utc::now().date_naive()
+    })
 }
 
 /// Classify a banner finding based on the service and version info.
@@ -716,6 +881,78 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             );
         }
 
+        // Full version-aware CVE analysis
+        if let Some((major, minor)) = extract_ssh_version(banner) {
+            let cves = check_openssh_cves(major, minor);
+            if !cves.is_empty() {
+                // Use the highest severity CVE for the finding
+                let max_severity = cves
+                    .iter()
+                    .map(|c| c.2)
+                    .max()
+                    .unwrap_or(Severity::Low);
+
+                let cve_list: Vec<String> = cves
+                    .iter()
+                    .map(|(id, desc, sev)| format!("{id} ({sev:?}): {desc}"))
+                    .collect();
+
+                let cve_ids: Vec<String> = cves
+                    .iter()
+                    .map(|(id, _, _)| (*id).to_owned())
+                    .collect();
+
+                let cve_refs: Vec<String> = cves
+                    .iter()
+                    .map(|(id, _, _)| format!("https://nvd.nist.gov/vuln/detail/{id}"))
+                    .collect();
+
+                let title = if max_severity >= Severity::High {
+                    format!("Vulnerable OpenSSH on {ip}:{port}")
+                } else {
+                    format!("OpenSSH with known CVEs on {ip}:{port}")
+                };
+
+                let mut finding = Finding::new(
+                    "services",
+                    &title,
+                    &format!(
+                        "OpenSSH {major}.{minor} at {ip}:{port} is affected by {} known \
+                         vulnerabilities:\n{}",
+                        cves.len(),
+                        cve_list.join("\n")
+                    ),
+                    max_severity,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("SSH")
+                .with_cwe("CWE-1104")
+                .with_cve_ids(cve_ids)
+                .with_references(cve_refs)
+                .with_evidence(banner);
+
+                if max_severity >= Severity::High {
+                    finding = finding.with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.services.eol-openssh",
+                        &[],
+                    ));
+                } else {
+                    finding = finding.with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.services.outdated-ssh",
+                        &[],
+                    ));
+                }
+
+                if let Some(os) = parse_os_from_ssh_banner(banner) {
+                    finding = finding.with_device_hint(DeviceHint::new().with_os_guess(os));
+                }
+
+                return Some(finding);
+            }
+        }
+
+        // No known CVEs — basic version disclosure
         let severity = if banner_lower.contains("openssh") {
             match extract_ssh_major_version(banner) {
                 Some(v) if v < 7 => Severity::High,
@@ -726,42 +963,15 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             Severity::Low
         };
 
-        let title = match severity {
-            Severity::High => format!("EOL OpenSSH version on {ip}:{port}"),
-            Severity::Medium => format!("Outdated SSH version on {ip}:{port}"),
-            _ => format!("SSH version disclosure on {ip}:{port}"),
-        };
-
-        let description = match severity {
-            Severity::High => format!(
-                "OpenSSH < 7.0 detected at {ip}:{port}. This version is end-of-life and \
-                 vulnerable to CVE-2018-15473 (user enumeration) and other known issues. \
-                 Banner: {banner}"
-            ),
-            _ => format!("SSH banner: {banner}"),
-        };
-
-        let mut finding = Finding::new("services", &title, &description, severity)
-            .with_ip(ip)
-            .with_port(port)
-            .with_service("SSH");
-
-        if severity == Severity::High {
-            finding = finding
-                .with_cwe("CWE-200")
-                .with_references(vec![
-                    "https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_owned()
-                ])
-                .with_opt_remediation(crate::remediation::get(
-                    "rikitikitavi.services.eol-openssh",
-                    &[],
-                ));
-        } else if severity == Severity::Medium {
-            finding = finding.with_opt_remediation(crate::remediation::get(
-                "rikitikitavi.services.outdated-ssh",
-                &[],
-            ));
-        }
+        let mut finding = Finding::new(
+            "services",
+            &format!("SSH version disclosure on {ip}:{port}"),
+            &format!("SSH banner: {banner}"),
+            severity,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("SSH");
 
         if let Some(os) = parse_os_from_ssh_banner(banner) {
             finding = finding.with_device_hint(DeviceHint::new().with_os_guess(os));
@@ -804,16 +1014,434 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
 
 /// Try to extract the major version number from an OpenSSH banner.
 fn extract_ssh_major_version(banner: &str) -> Option<u32> {
-    // Typical: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
+    let (major, _) = extract_ssh_version(banner)?;
+    Some(major)
+}
+
+/// Parsed `OpenSSH` version from a banner string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch_label: String,
+}
+
+/// Extract full `OpenSSH` version (major, minor) from a banner.
+///
+/// Typical format: `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4`
+/// Returns `(major, minor)`.
+fn extract_ssh_version(banner: &str) -> Option<(u32, u32)> {
     let lower = banner.to_lowercase();
     let idx = lower.find("openssh_")?;
     let rest = &banner[idx + 8..];
-    let version_str: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    version_str.parse().ok()
+    let version_chunk: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let parts: Vec<&str> = version_chunk.split('.').collect();
+    let major: u32 = parts.first()?.parse().ok()?;
+    let minor: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor))
 }
 
-/// Classify an HTTP Server header.
+/// Check an `OpenSSH` version for known CVEs.
+///
+/// Returns a list of `(CVE-ID, description, severity)` tuples for the given version.
+pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static str, Severity)> {
+    let mut cves = Vec::new();
+
+    // CVE-2024-6387 "regreSSHion" — OpenSSH 8.5p1..9.7p1 (glibc-based Linux)
+    // Signal handler race condition → unauthenticated RCE
+    if (major == 8 && minor >= 5) || (major == 9 && minor <= 7) {
+        cves.push((
+            "CVE-2024-6387",
+            "regreSSHion: signal handler race condition allowing unauthenticated \
+             remote code execution on glibc-based Linux systems",
+            Severity::Critical,
+        ));
+    }
+
+    // CVE-2023-38408 — OpenSSH < 9.3p2, PKCS#11 remote code execution via forwarded agent
+    if major < 9 || (major == 9 && minor < 3) {
+        cves.push((
+            "CVE-2023-38408",
+            "PKCS#11 provider loading via forwarded ssh-agent allows remote code execution",
+            Severity::High,
+        ));
+    }
+
+    // CVE-2023-48795 "Terrapin" — OpenSSH < 9.6, prefix truncation attack on chacha20-poly1305
+    if major < 9 || (major == 9 && minor < 6) {
+        cves.push((
+            "CVE-2023-48795",
+            "Terrapin attack: prefix truncation on chacha20-poly1305 and \
+             CBC-mode with encrypt-then-MAC allows message manipulation",
+            Severity::Medium,
+        ));
+    }
+
+    // CVE-2021-41617 — OpenSSH 6.2..8.7, privilege separation bypass
+    if (major == 6 && minor >= 2) || major == 7 || (major == 8 && minor <= 7) {
+        cves.push((
+            "CVE-2021-41617",
+            "AuthorizedKeysCommand/AuthorizedPrincipalsCommand privilege escalation \
+             when run as a different user",
+            Severity::Medium,
+        ));
+    }
+
+    // CVE-2018-15473 — OpenSSH < 7.8, user enumeration
+    if major < 7 || (major == 7 && minor < 8) {
+        cves.push((
+            "CVE-2018-15473",
+            "User enumeration via malformed authentication request timing differences",
+            Severity::Medium,
+        ));
+    }
+
+    cves
+}
+
+// ── HTTP Server header version intelligence ─────────────────────────
+
+/// Parsed version from a Server header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerVersion {
+    /// Canonical product name (lowercase).
+    pub product: String,
+    /// Major version number.
+    pub major: u32,
+    /// Minor version number.
+    pub minor: u32,
+    /// Patch version number (0 if absent).
+    pub patch: u32,
+    /// Raw version string as reported.
+    pub raw: String,
+}
+
+/// Parse an HTTP `Server` header into a structured product/version.
+///
+/// Handles common formats:
+/// - `nginx/1.18.0`
+/// - `Apache/2.4.41 (Ubuntu)`
+/// - `lighttpd/1.4.55`
+/// - `Microsoft-IIS/10.0`
+/// - `MiniServ/1.950` (Webmin)
+/// - `Jetty(9.4.31.v20200723)`
+/// - `openresty/1.19.9.1`
+pub fn parse_server_header(header: &str) -> Option<ServerVersion> {
+    let trimmed = header.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Try product/version format (most common)
+    if let Some((product, version_rest)) = trimmed.split_once('/') {
+        let product_clean = product.trim().to_lowercase();
+        if let Some(ver) = parse_version_numbers(version_rest) {
+            return Some(ServerVersion {
+                product: product_clean,
+                major: ver.0,
+                minor: ver.1,
+                patch: ver.2,
+                raw: trimmed.to_owned(),
+            });
+        }
+    }
+
+    // Try Jetty(version) format
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("jetty(") || lower.starts_with("jetty/") {
+        let rest = &trimmed[6..];
+        let version_part = rest.trim_end_matches(')');
+        if let Some(ver) = parse_version_numbers(version_part) {
+            return Some(ServerVersion {
+                product: "jetty".to_owned(),
+                major: ver.0,
+                minor: ver.1,
+                patch: ver.2,
+                raw: trimmed.to_owned(),
+            });
+        }
+    }
+
+    None
+}
+
+/// Extract (major, minor, patch) from a version string like "1.18.0", "2.4.41 (Ubuntu)", "10.0".
+fn parse_version_numbers(version: &str) -> Option<(u32, u32, u32)> {
+    let cleaned: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+
+    let parts: Vec<&str> = cleaned.split('.').collect();
+    let major: u32 = parts.first()?.parse().ok()?;
+    let minor: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    Some((major, minor, patch))
+}
+
+/// Known EOL / vulnerable server version ranges.
+///
+/// Returns `(severity, description, optional_cwe, optional_cve_refs)` if the version
+/// is known-bad, or `None` if the version is acceptable/unknown.
+#[allow(clippy::too_many_lines)]
+pub fn check_server_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    match sv.product.as_str() {
+        "nginx" => check_nginx_version(sv),
+        "apache" => check_apache_version(sv),
+        "lighttpd" => check_lighttpd_version(sv),
+        "microsoft-iis" => check_iis_version(sv),
+        "openresty" => check_openresty_version(sv),
+        "mini_httpd" | "mini-httpd" | "minihttpd" => Some(ServerVersionIssue {
+            severity: Severity::Medium,
+            description: format!(
+                "mini_httpd {} is lightweight embedded HTTP server often shipped \
+                 with default configs and no security updates. Review if this is \
+                 intentionally exposed.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: Vec::new(),
+        }),
+        "miniserv" => check_miniserv_version(sv),
+        "jetty" => check_jetty_version(sv),
+        _ => None,
+    }
+}
+
+/// Issue found for a specific server version.
+#[derive(Debug, Clone)]
+pub struct ServerVersionIssue {
+    pub severity: Severity,
+    pub description: String,
+    pub cwe: Option<&'static str>,
+    pub cve_refs: Vec<String>,
+}
+
+fn check_nginx_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // nginx 1.24 is current stable (Apr 2023), 1.25 is mainline
+    // Anything below 1.22 is EOL
+    if sv.major == 1 && sv.minor < 22 {
+        let mut refs = Vec::new();
+        // nginx < 1.17.7 vulnerable to request smuggling (CVE-2019-20372)
+        if sv.minor < 17 || (sv.minor == 17 && sv.patch < 7) {
+            refs.push("https://nvd.nist.gov/vuln/detail/CVE-2019-20372".to_owned());
+        }
+        // nginx < 1.21.0 vulnerable to DNS resolver (CVE-2021-23017)
+        if sv.minor < 21 {
+            refs.push("https://nvd.nist.gov/vuln/detail/CVE-2021-23017".to_owned());
+        }
+        return Some(ServerVersionIssue {
+            severity: if sv.minor < 18 {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
+            description: format!(
+                "nginx {} is end-of-life. Current stable is 1.26.x. EOL versions \
+                 do not receive security patches.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: refs,
+        });
+    }
+    None
+}
+
+fn check_apache_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // Apache 2.4 is the only active branch; 2.2 EOL since 2017
+    if sv.major == 2 && sv.minor <= 2 {
+        let refs = vec!["https://nvd.nist.gov/vuln/detail/CVE-2017-9798".to_owned()];
+        return Some(ServerVersionIssue {
+            severity: Severity::High,
+            description: format!(
+                "Apache {} is end-of-life (2.2.x EOL since Dec 2017). Vulnerable to \
+                 multiple known exploits including Optionsbleed (CVE-2017-9798). \
+                 Upgrade to Apache 2.4.x.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: refs,
+        });
+    }
+    // Apache 2.4.x — check for known vulnerable patch levels
+    if sv.major == 2 && sv.minor == 4 {
+        let mut refs = Vec::new();
+        // < 2.4.49: path traversal CVE-2021-41773 (only affects 2.4.49 with specific config,
+        // but < 2.4.49 has other issues)
+        // < 2.4.52: CVE-2021-44790 (mod_lua buffer overflow)
+        if sv.patch < 52 {
+            refs.push("https://nvd.nist.gov/vuln/detail/CVE-2021-44790".to_owned());
+        }
+        // < 2.4.54: CVE-2022-31813 (X-Forwarded-For bypass)
+        if sv.patch < 54 {
+            refs.push("https://nvd.nist.gov/vuln/detail/CVE-2022-31813".to_owned());
+        }
+        if !refs.is_empty() {
+            return Some(ServerVersionIssue {
+                severity: Severity::Medium,
+                description: format!(
+                    "Apache {} has known vulnerabilities. Current stable is 2.4.62+.",
+                    sv.raw
+                ),
+                cwe: Some("CWE-1104"),
+                cve_refs: refs,
+            });
+        }
+    }
+    None
+}
+
+fn check_lighttpd_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // lighttpd 1.4.76+ is current; anything < 1.4.56 has CVE-2022-22707
+    if sv.major == 1 && sv.minor == 4 && sv.patch < 56 {
+        return Some(ServerVersionIssue {
+            severity: Severity::Medium,
+            description: format!(
+                "lighttpd {} is outdated. Versions < 1.4.56 are vulnerable to \
+                 CVE-2022-22707 (use-after-free). Current stable is 1.4.76+.",
+                sv.raw
+            ),
+            cwe: Some("CWE-416"),
+            cve_refs: vec!["https://nvd.nist.gov/vuln/detail/CVE-2022-22707".to_owned()],
+        });
+    }
+    None
+}
+
+fn check_iis_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // IIS 10.0 is current (Windows Server 2016+); IIS 7.5 → Server 2008 R2 (EOL)
+    if sv.major < 8 {
+        return Some(ServerVersionIssue {
+            severity: Severity::High,
+            description: format!(
+                "IIS {} runs on an EOL Windows Server version. \
+                 IIS 7.5 = Server 2008 R2 (EOL Jan 2020), \
+                 IIS 7.0 = Server 2008 (EOL Jan 2020), \
+                 IIS 6.0 = Server 2003 (EOL Jul 2015). \
+                 No security patches are available.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: Vec::new(),
+        });
+    }
+    if sv.major == 8 {
+        return Some(ServerVersionIssue {
+            severity: Severity::Medium,
+            description: format!(
+                "IIS {} (Windows Server 2012) reached extended support end. \
+                 Consider upgrading to a supported Windows Server version.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: Vec::new(),
+        });
+    }
+    None
+}
+
+fn check_openresty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // OpenResty bundles nginx; version correlates with nginx version
+    // OpenResty < 1.19 bundles nginx < 1.19 which is EOL
+    if sv.major == 1 && sv.minor < 19 {
+        return Some(ServerVersionIssue {
+            severity: Severity::Medium,
+            description: format!(
+                "OpenResty {} bundles an outdated nginx version. \
+                 Current stable is 1.25.x. Upgrade to receive security patches.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: Vec::new(),
+        });
+    }
+    None
+}
+
+fn check_miniserv_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // MiniServ is Webmin's HTTP server
+    // Webmin < 1.990 vulnerable to CVE-2022-0824 (RCE)
+    // Version format: MiniServ/1.950 (patch is really minor for Webmin)
+    let webmin_version = sv.major * 1000 + sv.minor;
+    if webmin_version < 1990 {
+        return Some(ServerVersionIssue {
+            severity: Severity::High,
+            description: format!(
+                "Webmin/MiniServ {} is outdated. Versions before 1.990 are vulnerable \
+                 to CVE-2022-0824 (authenticated RCE). Current stable is 2.1+.",
+                sv.raw
+            ),
+            cwe: Some("CWE-78"),
+            cve_refs: vec!["https://nvd.nist.gov/vuln/detail/CVE-2022-0824".to_owned()],
+        });
+    }
+    None
+}
+
+fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    // Jetty 9.4.x is EOL (community support ended Jun 2023)
+    // Jetty 10.0/11.0/12.0 are active
+    if sv.major <= 9 {
+        let mut refs = Vec::new();
+        // Jetty < 9.4.51: CVE-2023-26048 (header overflow)
+        if sv.major < 9 || (sv.major == 9 && sv.minor < 4)
+            || (sv.major == 9 && sv.minor == 4 && sv.patch < 51)
+        {
+            refs.push("https://nvd.nist.gov/vuln/detail/CVE-2023-26048".to_owned());
+        }
+        return Some(ServerVersionIssue {
+            severity: Severity::Medium,
+            description: format!(
+                "Jetty {} is end-of-life. The 9.x branch no longer receives \
+                 security updates. Upgrade to Jetty 12.x.",
+                sv.raw
+            ),
+            cwe: Some("CWE-1104"),
+            cve_refs: refs,
+        });
+    }
+    None
+}
+
+/// Classify an HTTP Server header with version intelligence.
+///
+/// Parses the Server header to extract product/version, then checks against
+/// known EOL and vulnerable version databases. Returns a higher-severity
+/// finding when the software version has known security issues.
 fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
+    if let Some(sv) = parse_server_header(server) {
+        if let Some(issue) = check_server_version(&sv) {
+            let mut finding = Finding::new(
+                "services",
+                &format!(
+                    "Outdated {} on {ip}:{port}",
+                    sv.product
+                ),
+                &issue.description,
+                issue.severity,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("HTTP")
+            .with_evidence(server);
+
+            if let Some(cwe) = issue.cwe {
+                finding = finding.with_cwe(cwe);
+            }
+            if !issue.cve_refs.is_empty() {
+                finding = finding.with_references(issue.cve_refs);
+            }
+
+            return finding;
+        }
+    }
+
+    // Fallback: plain version disclosure
     Finding::new(
         "services",
         &format!("HTTP server version disclosure on {ip}:{port}"),
@@ -897,6 +1525,9 @@ impl Scanner for ServicesScanner {
                             if let Some(finding) = classify_banner(ip, port, &banner) {
                                 findings.push(finding);
                             }
+                            if let Some(os_finding) = check_os_eol(ip, port, &banner) {
+                                findings.push(os_finding);
+                            }
                         }
                         // Deep protocol probes for specific services
                         // (skipped in Passive mode for speed)
@@ -916,6 +1547,9 @@ impl Scanner for ServicesScanner {
                         if let Some(banner) = grab_banner(ip, port).await {
                             if let Some(finding) = classify_banner(ip, port, &banner) {
                                 findings.push(finding);
+                            }
+                            if let Some(os_finding) = check_os_eol(ip, port, &banner) {
+                                findings.push(os_finding);
                             }
                         }
                     }
@@ -959,6 +1593,9 @@ impl Scanner for ServicesScanner {
                 if let Some(banner) = grab_banner(ip, port).await {
                     if let Some(finding) = classify_banner(ip, port, &banner) {
                         findings.push(finding);
+                    }
+                    if let Some(os_finding) = check_os_eol(ip, port, &banner) {
+                        findings.push(os_finding);
                     }
                 }
             }
@@ -1007,14 +1644,12 @@ mod tests {
             parse_os_from_ssh_banner("SSH-2.0-dropbear_2020.81"),
             Some("Linux (embedded)".to_owned())
         );
-        assert_eq!(
-            parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"),
-            Some("Linux (Debian)".to_owned())
-        );
-        assert_eq!(
-            parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"),
-            Some("Linux (Ubuntu)".to_owned())
-        );
+        // Debian version extraction from deb11
+        let debian_result = parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1");
+        assert!(debian_result.as_ref().is_some_and(|s| s.contains("Debian 11") && s.contains("Bullseye")));
+        // Ubuntu version extraction from OpenSSH version mapping
+        let ubuntu_result = parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4");
+        assert!(ubuntu_result.as_ref().is_some_and(|s| s.contains("Ubuntu 22.04") && s.contains("Jammy")));
         assert_eq!(
             parse_os_from_ssh_banner("SSH-2.0-OpenSSH_9.0 FreeBSD-20230316"),
             Some("FreeBSD".to_owned())
@@ -1027,13 +1662,16 @@ mod tests {
     fn test_classify_ssh_banner_old() {
         let ip = "192.168.1.1".parse().unwrap();
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_7.4").unwrap();
-        assert_eq!(finding.severity, Severity::Medium);
+        // OpenSSH 7.4 now correctly flagged High (CVE-2023-38408 PKCS#11 RCE)
+        assert!(finding.severity >= Severity::High);
+        assert!(!finding.references.is_empty());
     }
 
     #[test]
     fn test_classify_ssh_banner_current() {
         let ip = "192.168.1.1".parse().unwrap();
-        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.5").unwrap();
+        // Use 9.9 (latest) which has no known CVEs
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.9").unwrap();
         assert_eq!(finding.severity, Severity::Low);
     }
 
@@ -1042,7 +1680,9 @@ mod tests {
         let ip = "192.168.1.10".parse().unwrap();
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1").unwrap();
         let hint = finding.device_hint.as_ref().unwrap();
-        assert_eq!(hint.os_guess.as_deref(), Some("Linux (Debian)"));
+        let os = hint.os_guess.as_deref().unwrap();
+        assert!(os.contains("Debian 11"), "expected Debian 11, got: {os}");
+        assert!(os.contains("Bullseye"), "expected Bullseye, got: {os}");
     }
 
     #[test]
@@ -1070,12 +1710,22 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_http_server_info() {
+    fn test_classify_http_server_eol_nginx() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         let finding = classify_http_server(ip, 80, "nginx/1.18.0");
-        assert_eq!(finding.severity, Severity::Info);
+        // nginx 1.18 is EOL → now correctly Medium+
+        assert!(finding.severity >= Severity::Medium);
         assert_eq!(finding.scanner, "services");
         assert_eq!(finding.affected_port, Some(80));
+        assert!(finding.cwe_id.is_some());
+    }
+
+    #[test]
+    fn test_classify_http_server_current_nginx() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 80, "nginx/1.26.0");
+        // Current version → Info disclosure only
+        assert_eq!(finding.severity, Severity::Info);
     }
 
     #[test]
@@ -1346,6 +1996,414 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Info);
     }
 
+    // ── Server header parsing tests ──────────────────────────────────
+
+    #[test]
+    fn test_parse_server_nginx() {
+        let sv = parse_server_header("nginx/1.18.0").unwrap();
+        assert_eq!(sv.product, "nginx");
+        assert_eq!(sv.major, 1);
+        assert_eq!(sv.minor, 18);
+        assert_eq!(sv.patch, 0);
+    }
+
+    #[test]
+    fn test_parse_server_apache_with_os() {
+        let sv = parse_server_header("Apache/2.4.41 (Ubuntu)").unwrap();
+        assert_eq!(sv.product, "apache");
+        assert_eq!(sv.major, 2);
+        assert_eq!(sv.minor, 4);
+        assert_eq!(sv.patch, 41);
+    }
+
+    #[test]
+    fn test_parse_server_iis() {
+        let sv = parse_server_header("Microsoft-IIS/10.0").unwrap();
+        assert_eq!(sv.product, "microsoft-iis");
+        assert_eq!(sv.major, 10);
+        assert_eq!(sv.minor, 0);
+    }
+
+    #[test]
+    fn test_parse_server_lighttpd() {
+        let sv = parse_server_header("lighttpd/1.4.55").unwrap();
+        assert_eq!(sv.product, "lighttpd");
+        assert_eq!(sv.major, 1);
+        assert_eq!(sv.minor, 4);
+        assert_eq!(sv.patch, 55);
+    }
+
+    #[test]
+    fn test_parse_server_miniserv() {
+        let sv = parse_server_header("MiniServ/1.950").unwrap();
+        assert_eq!(sv.product, "miniserv");
+        assert_eq!(sv.major, 1);
+        assert_eq!(sv.minor, 950);
+    }
+
+    #[test]
+    fn test_parse_server_openresty() {
+        let sv = parse_server_header("openresty/1.19.9.1").unwrap();
+        assert_eq!(sv.product, "openresty");
+        assert_eq!(sv.major, 1);
+        assert_eq!(sv.minor, 19);
+        assert_eq!(sv.patch, 9);
+    }
+
+    #[test]
+    fn test_parse_server_jetty_parens() {
+        let sv = parse_server_header("Jetty(9.4.31.v20200723)").unwrap();
+        assert_eq!(sv.product, "jetty");
+        assert_eq!(sv.major, 9);
+        assert_eq!(sv.minor, 4);
+        assert_eq!(sv.patch, 31);
+    }
+
+    #[test]
+    fn test_parse_server_empty() {
+        assert!(parse_server_header("").is_none());
+    }
+
+    #[test]
+    fn test_parse_server_no_version() {
+        assert!(parse_server_header("cloudflare").is_none());
+    }
+
+    #[test]
+    fn test_parse_server_bare_product_slash() {
+        // e.g. "AkamaiGHost/" — no version digits
+        assert!(parse_server_header("AkamaiGHost/").is_none());
+    }
+
+    // ── Server version checks ─────────────────────────────────────────
+
+    #[test]
+    fn test_check_nginx_eol() {
+        let sv = parse_server_header("nginx/1.16.1").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::High);
+        assert!(!issue.cve_refs.is_empty());
+    }
+
+    #[test]
+    fn test_check_nginx_recent_eol() {
+        let sv = parse_server_header("nginx/1.20.2").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_check_nginx_current() {
+        let sv = parse_server_header("nginx/1.26.0").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_apache_22_eol() {
+        let sv = parse_server_header("Apache/2.2.34").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_check_apache_24_outdated() {
+        let sv = parse_server_header("Apache/2.4.41").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+        assert!(!issue.cve_refs.is_empty());
+    }
+
+    #[test]
+    fn test_check_apache_24_current() {
+        let sv = parse_server_header("Apache/2.4.62").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_iis_6_eol() {
+        let sv = parse_server_header("Microsoft-IIS/6.0").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_check_iis_10_current() {
+        let sv = parse_server_header("Microsoft-IIS/10.0").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_lighttpd_vulnerable() {
+        let sv = parse_server_header("lighttpd/1.4.48").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+        assert!(!issue.cve_refs.is_empty());
+    }
+
+    #[test]
+    fn test_check_lighttpd_patched() {
+        let sv = parse_server_header("lighttpd/1.4.76").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_miniserv_vulnerable() {
+        let sv = parse_server_header("MiniServ/1.950").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_check_miniserv_patched() {
+        let sv = parse_server_header("MiniServ/2.100").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_jetty_eol() {
+        let sv = parse_server_header("Jetty(9.4.31.v20200723)").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_check_jetty_current() {
+        let sv = parse_server_header("Jetty(12.0.3)").unwrap();
+        assert!(check_server_version(&sv).is_none());
+    }
+
+    #[test]
+    fn test_check_openresty_eol() {
+        let sv = parse_server_header("openresty/1.17.8.2").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+    }
+
+    // ── classify_http_server integration tests ────────────────────────
+
+    #[test]
+    fn test_classify_http_server_nginx_eol() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 80, "nginx/1.14.2");
+        assert!(finding.severity >= Severity::Medium);
+        assert!(finding.cwe_id.is_some());
+    }
+
+    #[test]
+    fn test_classify_http_server_unknown_product() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 80, "SynoHTTP/1.0");
+        // Unknown product → plain version disclosure (Info)
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_http_server_no_version() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_http_server(ip, 80, "cloudflare");
+        assert_eq!(finding.severity, Severity::Info);
+    }
+
+    // ── SSH version extraction tests ──────────────────────────────────
+
+    #[test]
+    fn test_extract_ssh_version_full() {
+        assert_eq!(
+            extract_ssh_version("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"),
+            Some((8, 9))
+        );
+        assert_eq!(extract_ssh_version("SSH-2.0-OpenSSH_7.4"), Some((7, 4)));
+        assert_eq!(extract_ssh_version("SSH-2.0-OpenSSH_9.5"), Some((9, 5)));
+        assert_eq!(extract_ssh_version("SSH-2.0-OpenSSH_9.6"), Some((9, 6)));
+    }
+
+    #[test]
+    fn test_extract_ssh_version_non_openssh() {
+        assert_eq!(extract_ssh_version("SSH-2.0-dropbear_2020.81"), None);
+    }
+
+    // ── OpenSSH CVE checks ────────────────────────────────────────────
+
+    #[test]
+    fn test_openssh_cves_regresshion() {
+        let cves = check_openssh_cves(9, 7);
+        assert!(cves.iter().any(|(id, _, _)| *id == "CVE-2024-6387"));
+    }
+
+    #[test]
+    fn test_openssh_cves_9_8_no_regresshion() {
+        let cves = check_openssh_cves(9, 8);
+        assert!(!cves.iter().any(|(id, _, _)| *id == "CVE-2024-6387"));
+    }
+
+    #[test]
+    fn test_openssh_cves_8_4_no_regresshion() {
+        // regreSSHion only affects 8.5+
+        let cves = check_openssh_cves(8, 4);
+        assert!(!cves.iter().any(|(id, _, _)| *id == "CVE-2024-6387"));
+    }
+
+    #[test]
+    fn test_openssh_cves_terrapin() {
+        let cves = check_openssh_cves(9, 5);
+        assert!(cves.iter().any(|(id, _, _)| *id == "CVE-2023-48795"));
+    }
+
+    #[test]
+    fn test_openssh_cves_9_6_no_terrapin() {
+        let cves = check_openssh_cves(9, 6);
+        assert!(!cves.iter().any(|(id, _, _)| *id == "CVE-2023-48795"));
+    }
+
+    #[test]
+    fn test_openssh_cves_user_enum() {
+        let cves = check_openssh_cves(7, 4);
+        assert!(cves.iter().any(|(id, _, _)| *id == "CVE-2018-15473"));
+    }
+
+    #[test]
+    fn test_openssh_cves_7_8_no_user_enum() {
+        let cves = check_openssh_cves(7, 8);
+        assert!(!cves.iter().any(|(id, _, _)| *id == "CVE-2018-15473"));
+    }
+
+    #[test]
+    fn test_openssh_cves_latest_clean() {
+        // OpenSSH 9.9 should have no CVEs in our database
+        let cves = check_openssh_cves(9, 9);
+        assert!(cves.is_empty(), "expected no CVEs for 9.9, got: {cves:?}");
+    }
+
+    #[test]
+    fn test_classify_ssh_banner_with_cves() {
+        let ip = "192.168.1.1".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4").unwrap();
+        // OpenSSH 8.9 has regreSSHion (Critical), Terrapin, PKCS#11
+        assert!(finding.severity >= Severity::High);
+        assert!(!finding.references.is_empty());
+    }
+
+    #[test]
+    fn test_classify_ssh_banner_9_6_has_regresshion() {
+        let ip = "192.168.1.1".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.6").unwrap();
+        // 9.6 is in the regreSSHion range (8.5..9.7) → Critical
+        assert_eq!(finding.severity, Severity::Critical);
+        assert!(finding.references.iter().any(|r| r.contains("CVE-2024-6387")));
+    }
+
+    #[test]
+    fn test_classify_ssh_banner_9_8_clean() {
+        let ip = "192.168.1.1".parse().unwrap();
+        let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.8").unwrap();
+        // 9.8 is patched for all known CVEs → Low (simple disclosure)
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    // ── OS fingerprinting and EOL detection ────────────────────────────
+
+    #[test]
+    fn test_parse_debian_version() {
+        let result = parse_debian_version("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u5");
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("Debian 11"));
+        assert!(s.contains("Bullseye"));
+        assert!(s.contains("2026-06-30"));
+    }
+
+    #[test]
+    fn test_parse_debian_version_bookworm() {
+        let result = parse_debian_version("SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3");
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("Debian 12"));
+        assert!(s.contains("Bookworm"));
+    }
+
+    #[test]
+    fn test_parse_ubuntu_version() {
+        let result = parse_ubuntu_version("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4");
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("Ubuntu 22.04"));
+        assert!(s.contains("Jammy"));
+    }
+
+    #[test]
+    fn test_check_os_eol_debian_buster() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Debian 10 Buster is EOL
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_7.9p1 Debian-10+deb10u4");
+        assert!(finding.is_some());
+        let f = finding.unwrap();
+        assert_eq!(f.severity, Severity::High);
+        assert!(f.title.contains("End-of-life OS"));
+        assert!(f.description.contains("Debian 10"));
+    }
+
+    #[test]
+    fn test_check_os_eol_debian_bullseye_not_eol() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Debian 11 Bullseye EOL is June 2026 — still alive as of Feb 2026
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u5");
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_check_os_eol_ubuntu_cosmic_eol() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Ubuntu 18.10 Cosmic is EOL (2019-07-18)
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.3");
+        assert!(finding.is_some());
+        let f = finding.unwrap();
+        assert_eq!(f.severity, Severity::High);
+        assert!(f.description.contains("Ubuntu 18.10"));
+    }
+
+    #[test]
+    fn test_check_os_eol_ubuntu_noble_not_eol() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Ubuntu 24.04 Noble EOL is 2034
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5");
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_check_os_eol_no_os_info() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // Bare OpenSSH — no OS info
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.5");
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_debian_version_info() {
+        let (name, eol) = debian_version_info(11);
+        assert_eq!(name, Some("Bullseye"));
+        assert_eq!(eol, "2026-06-30");
+    }
+
+    #[test]
+    fn test_ubuntu_from_openssh() {
+        assert_eq!(
+            ubuntu_from_openssh(8, 9),
+            Some(("22.04", "Jammy", "2032-04-30"))
+        );
+        assert_eq!(
+            ubuntu_from_openssh(9, 6),
+            Some(("24.04", "Noble", "2034-04-30"))
+        );
+        assert_eq!(ubuntu_from_openssh(10, 0), None);
+    }
+
+    #[test]
+    fn test_is_date_past() {
+        assert!(is_date_past("2020-01-01"));
+        assert!(!is_date_past("2099-12-31"));
+        assert!(!is_date_past("invalid"));
+    }
+
     proptest! {
         /// classify_http_server never panics on arbitrary strings
         #[test]
@@ -1367,6 +2425,18 @@ mod tests {
             let _ = extract_ssh_major_version(&banner);
         }
 
+        /// `parse_server_header` never panics on arbitrary strings
+        #[test]
+        fn prop_parse_server_header_no_panic(header in ".*") {
+            let _ = parse_server_header(&header);
+        }
+
+        /// `check_openssh_cves` never panics on any version
+        #[test]
+        fn prop_check_openssh_cves_no_panic(major in 0_u32..100_u32, minor in 0_u32..100_u32) {
+            let _ = check_openssh_cves(major, minor);
+        }
+
         /// `parse_ssh_kex_init` never panics on arbitrary bytes
         #[test]
         fn prop_parse_ssh_kex_init_no_panic(data in proptest::collection::vec(any::<u8>(), 0..512)) {
@@ -1383,6 +2453,19 @@ mod tests {
         #[test]
         fn prop_parse_ftp_feat_no_panic(response in ".*") {
             let _ = parse_ftp_feat(&response);
+        }
+
+        /// `check_os_eol` never panics on arbitrary banners
+        #[test]
+        fn prop_check_os_eol_no_panic(banner in ".*", port in 1_u16..=65535_u16) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let _ = check_os_eol(ip, port, &banner);
+        }
+
+        /// `parse_os_from_ssh_banner` never panics on arbitrary strings
+        #[test]
+        fn prop_parse_os_from_ssh_banner_no_panic(banner in ".*") {
+            let _ = parse_os_from_ssh_banner(&banner);
         }
     }
 }

@@ -27,6 +27,8 @@ serde_yaml_ng.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+chrono.workspace = true
+x509-parser.workspace = true
 pcap = { workspace = true, optional = true }
 
 [dev-dependencies]

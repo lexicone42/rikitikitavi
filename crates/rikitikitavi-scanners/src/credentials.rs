@@ -165,13 +165,20 @@ fn parse_ftp_response(response: &str) -> Option<(u16, String)> {
     let mut lines_iter = response.lines();
     let first_line = lines_iter.next()?;
 
-    // FTP codes are always 3 ASCII digits — guard against multi-byte chars
+    // FTP codes are always 3 ASCII digits followed by a space or dash.
+    // Reject early if the first 4 bytes aren't all ASCII — this prevents
+    // slicing inside multi-byte UTF-8 characters at index 4.
     let bytes = first_line.as_bytes();
     if bytes.len() < 3 || !bytes[..3].iter().all(u8::is_ascii_digit) {
         return None;
     }
+    // The separator (byte 3) must be ASCII space or dash; if it's a
+    // multi-byte char leader we can't safely slice at index 4.
+    if bytes.len() >= 4 && !bytes[3].is_ascii() {
+        return None;
+    }
 
-    // Safe to slice: first 3 bytes are guaranteed ASCII
+    // Safe to slice: first 3 bytes are guaranteed ASCII digits
     let code: u16 = first_line[..3].parse().ok()?;
     let mut text_parts = Vec::new();
 
@@ -1041,6 +1048,9 @@ impl Scanner for CredentialScanner {
                     .with_port(23)
                     .with_service("Telnet")
                     .with_cwe("CWE-319")
+                    .with_references(vec![
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                    ])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.credentials.telnet-default",
                         &[],
@@ -1074,6 +1084,9 @@ impl Scanner for CredentialScanner {
                         .with_port(445)
                         .with_service("SMB")
                         .with_cwe("CWE-287")
+                        .with_references(vec![
+                            "https://attack.mitre.org/techniques/T1021/002/".to_owned(),
+                        ])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.smb-exposed",
                             &[],
@@ -1098,6 +1111,9 @@ impl Scanner for CredentialScanner {
                         .with_port(3389)
                         .with_service("RDP")
                         .with_cwe("CWE-287")
+                        .with_references(vec![
+                            "https://attack.mitre.org/techniques/T1021/001/".to_owned(),
+                        ])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.rdp-exposed",
                             &[],
@@ -1134,6 +1150,9 @@ impl Scanner for CredentialScanner {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
+                            .with_references(vec![
+                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                            ])
                             .with_opt_remediation(
                                 crate::remediation::get(
                                     "rikitikitavi.credentials.http-no-auth",

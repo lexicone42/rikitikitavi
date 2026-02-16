@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use x509_parser::prelude::*;
 
 use crate::Scanner;
 
@@ -205,6 +206,434 @@ struct TlsHandshakeInfo {
     cipher_suite: String,
     /// Number of certificates in the peer's chain.
     cert_chain_length: usize,
+    /// DER-encoded leaf certificate (if available).
+    leaf_cert_der: Option<Vec<u8>>,
+}
+
+// ── X.509 certificate deep analysis ────────────────────────────────
+
+/// Parsed certificate details for security analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertDetails {
+    /// Subject Common Name.
+    pub subject_cn: Option<String>,
+    /// Issuer Common Name.
+    pub issuer_cn: Option<String>,
+    /// Not-before date (YYYY-MM-DD).
+    pub not_before: String,
+    /// Not-after date (YYYY-MM-DD).
+    pub not_after: String,
+    /// Days until expiry (negative = expired).
+    pub days_until_expiry: i64,
+    /// Public key algorithm (RSA, EC, Ed25519, etc.).
+    pub key_algorithm: String,
+    /// Key size in bits (RSA: 1024/2048/4096, EC: 256/384, etc.).
+    pub key_bits: u32,
+    /// Signature algorithm (sha256WithRSAEncryption, etc.).
+    pub signature_algorithm: String,
+    /// Whether the signature uses SHA-1.
+    pub uses_sha1_signature: bool,
+    /// Subject Alternative Names (DNS entries).
+    pub san_dns: Vec<String>,
+    /// Whether the cert is self-signed (subject == issuer).
+    pub is_self_signed: bool,
+}
+
+/// Parse a DER-encoded X.509 certificate into structured details.
+pub fn parse_cert_details(der: &[u8]) -> Option<CertDetails> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+
+    let subject_cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok().map(ToOwned::to_owned));
+
+    let issuer_cn = cert
+        .issuer()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok().map(ToOwned::to_owned));
+
+    let validity = cert.validity();
+    let not_before = format_asn1_time(&validity.not_before);
+    let not_after = format_asn1_time(&validity.not_after);
+
+    // Days until expiry
+    let now_epoch = chrono::Utc::now().timestamp();
+    let expiry_epoch = validity.not_after.timestamp();
+    let days_until_expiry = (expiry_epoch - now_epoch) / 86400;
+
+    // Public key info
+    let spki = cert.public_key();
+    let (key_algorithm, key_bits) = classify_public_key(spki);
+
+    // Signature algorithm
+    let sig_alg = cert.signature_algorithm.algorithm.to_string();
+    let sig_name = oid_to_sig_name(&sig_alg);
+    let uses_sha1_signature = sig_name.contains("sha1") || sig_name.contains("SHA1");
+
+    // Subject Alternative Names
+    let san_dns = cert
+        .extensions()
+        .iter()
+        .filter_map(|ext| {
+            if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
+                Some(san)
+            } else {
+                None
+            }
+        })
+        .flat_map(|san| san.general_names.iter())
+        .filter_map(|name| {
+            if let GeneralName::DNSName(dns) = name {
+                Some((*dns).to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let is_self_signed = cert.subject() == cert.issuer();
+
+    Some(CertDetails {
+        subject_cn,
+        issuer_cn,
+        not_before,
+        not_after,
+        days_until_expiry,
+        key_algorithm,
+        key_bits,
+        signature_algorithm: sig_name,
+        uses_sha1_signature,
+        san_dns,
+        is_self_signed,
+    })
+}
+
+/// Format an ASN.1 time as YYYY-MM-DD.
+fn format_asn1_time(time: &ASN1Time) -> String {
+    let ts = time.timestamp();
+    chrono::DateTime::from_timestamp(ts, 0).map_or_else(
+        || format!("{time}"),
+        |dt: chrono::DateTime<chrono::Utc>| dt.format("%Y-%m-%d").to_string(),
+    )
+}
+
+/// Classify a public key into algorithm name and bit size.
+fn classify_public_key(spki: &SubjectPublicKeyInfo<'_>) -> (String, u32) {
+    let oid = spki.algorithm.algorithm.to_string();
+
+    // RSA: OID 1.2.840.113549.1.1.1
+    if oid.contains("1.2.840.113549.1.1.1") {
+        let bit_size = u32::try_from(spki.subject_public_key.data.len() * 8).unwrap_or(0);
+        // RSA key size in the SPKI is the modulus + exponent in DER encoding;
+        // the actual modulus is slightly smaller. Approximate to standard sizes.
+        let approx_bits = match bit_size {
+            0..=1200 => 1024,
+            1201..=2200 => 2048,
+            2201..=3200 => 3072,
+            3201..=4200 => 4096,
+            _ => bit_size,
+        };
+        return ("RSA".to_owned(), approx_bits);
+    }
+
+    // EC: OID 1.2.840.10045.2.1
+    if oid.contains("1.2.840.10045.2.1") {
+        // Determine curve from parameters
+        let curve_bits = spki.algorithm.parameters.as_ref().map_or(256, |params| {
+            let param_str = format!("{params:?}");
+            if param_str.contains("1.2.840.10045.3.1.7") {
+                256 // P-256 / prime256v1
+            } else if param_str.contains("1.3.132.0.34") {
+                384 // P-384 / secp384r1
+            } else if param_str.contains("1.3.132.0.35") {
+                521 // P-521 / secp521r1
+            } else {
+                256 // default guess
+            }
+        });
+        return ("EC".to_owned(), curve_bits);
+    }
+
+    // Ed25519: OID 1.3.101.112
+    if oid.contains("1.3.101.112") {
+        return ("Ed25519".to_owned(), 256);
+    }
+
+    // Ed448: OID 1.3.101.113
+    if oid.contains("1.3.101.113") {
+        return ("Ed448".to_owned(), 448);
+    }
+
+    ("Unknown".to_owned(), 0)
+}
+
+/// Map OID strings to human-readable signature algorithm names.
+fn oid_to_sig_name(oid: &str) -> String {
+    // Common signature algorithm OIDs
+    if oid.contains("1.2.840.113549.1.1.5") {
+        return "sha1WithRSAEncryption".to_owned();
+    }
+    if oid.contains("1.2.840.113549.1.1.11") {
+        return "sha256WithRSAEncryption".to_owned();
+    }
+    if oid.contains("1.2.840.113549.1.1.12") {
+        return "sha384WithRSAEncryption".to_owned();
+    }
+    if oid.contains("1.2.840.113549.1.1.13") {
+        return "sha512WithRSAEncryption".to_owned();
+    }
+    if oid.contains("1.2.840.10045.4.3.2") {
+        return "ecdsaWithSHA256".to_owned();
+    }
+    if oid.contains("1.2.840.10045.4.3.3") {
+        return "ecdsaWithSHA384".to_owned();
+    }
+    if oid.contains("1.2.840.10045.4.3.4") {
+        return "ecdsaWithSHA512".to_owned();
+    }
+    if oid.contains("1.3.101.112") {
+        return "Ed25519".to_owned();
+    }
+    oid.to_owned()
+}
+
+/// Compute total validity period in days from `not_before` to `not_after`.
+fn compute_total_validity_days(cert: &CertDetails) -> i64 {
+    // Parse YYYY-MM-DD dates to compute span
+    let parse = |s: &str| -> Option<i64> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let d: u32 = parts[2].parse().ok()?;
+        chrono::NaiveDate::from_ymd_opt(y, m, d)
+            .and_then(|date| date.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp()))
+    };
+
+    match (parse(&cert.not_before), parse(&cert.not_after)) {
+        (Some(before), Some(after)) => (after - before) / 86400,
+        _ => cert.days_until_expiry, // fallback: assume it started ~now
+    }
+}
+
+/// Analyze a parsed certificate and produce security findings.
+#[allow(clippy::too_many_lines)]
+pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    // 1. Expired certificate
+    if cert.days_until_expiry < 0 {
+        let days_ago = -cert.days_until_expiry;
+        findings.push(
+            Finding::new(
+                "ssl",
+                &format!("Expired certificate on {ip}:{port}"),
+                &format!(
+                    "TLS certificate on {ip}:{port} expired {} days ago (not-after: {}). \
+                     Subject: {}. Expired certificates cause connection warnings and may \
+                     indicate abandoned or unmaintained services.",
+                    days_ago,
+                    cert.not_after,
+                    cert.subject_cn.as_deref().unwrap_or("(none)"),
+                ),
+                Severity::High,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-295")
+            .with_evidence(format!(
+                "Subject: {}, Issuer: {}, Expired: {}, Key: {} {}bit",
+                cert.subject_cn.as_deref().unwrap_or("?"),
+                cert.issuer_cn.as_deref().unwrap_or("?"),
+                cert.not_after,
+                cert.key_algorithm,
+                cert.key_bits,
+            )),
+        );
+    }
+    // 2. Expiring soon (within 30 days)
+    else if cert.days_until_expiry <= 30 {
+        findings.push(
+            Finding::new(
+                "ssl",
+                &format!("Certificate expiring soon on {ip}:{port}"),
+                &format!(
+                    "TLS certificate on {ip}:{port} expires in {} days (not-after: {}). \
+                     Subject: {}. Renew before it expires to avoid service disruption.",
+                    cert.days_until_expiry,
+                    cert.not_after,
+                    cert.subject_cn.as_deref().unwrap_or("(none)"),
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-295"),
+        );
+    }
+
+    // 3. Weak RSA key (< 2048 bits)
+    if cert.key_algorithm == "RSA" && cert.key_bits < 2048 {
+        findings.push(
+            Finding::new(
+                "ssl",
+                &format!("Weak {}-bit RSA key on {ip}:{port}", cert.key_bits),
+                &format!(
+                    "TLS certificate on {ip}:{port} uses a {}-bit RSA key. \
+                     NIST recommends minimum 2048-bit RSA. Keys under 2048 bits \
+                     are considered breakable with sufficient resources.",
+                    cert.key_bits,
+                ),
+                Severity::High,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-326"),
+        );
+    }
+
+    // 4. SHA-1 signature
+    if cert.uses_sha1_signature {
+        findings.push(
+            Finding::new(
+                "ssl",
+                &format!("SHA-1 certificate signature on {ip}:{port}"),
+                &format!(
+                    "TLS certificate on {ip}:{port} is signed with {} (SHA-1). \
+                     SHA-1 is broken for collision resistance (SHAttered attack, 2017). \
+                     All major browsers reject SHA-1 certificates.",
+                    cert.signature_algorithm,
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("TLS")
+            .with_cwe("CWE-328")
+            .with_references(vec![
+                "https://shattered.io/".to_owned(),
+            ]),
+        );
+    }
+
+    // 5. Self-signed certificate
+    if cert.is_self_signed {
+        let (severity, desc) = if crate::dns::is_private_ip(ip) {
+            (
+                Severity::Low,
+                format!(
+                    "TLS certificate on {ip}:{port} is self-signed (subject and issuer: {}). \
+                     This is common on LAN devices that cannot obtain CA-signed certificates \
+                     for private IP addresses, but it prevents proper certificate validation.",
+                    cert.subject_cn.as_deref().unwrap_or("(none)"),
+                ),
+            )
+        } else {
+            (
+                Severity::Medium,
+                format!(
+                    "TLS certificate on {ip}:{port} is self-signed (subject and issuer: {}). \
+                     Self-signed certificates prevent verification and train users to accept \
+                     security warnings.",
+                    cert.subject_cn.as_deref().unwrap_or("(none)"),
+                ),
+            )
+        };
+        findings.push(
+            Finding::new("ssl", &format!("Self-signed certificate on {ip}:{port}"), &desc, severity)
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("TLS")
+                .with_cwe("CWE-295")
+                .with_references(vec![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+                ]),
+        );
+    }
+
+    // 6. Excessive certificate validity (>825 days / ~27 months per CA/B Forum baseline)
+    // IoT devices often ship with 10-50 year certs that will never be rotated.
+    if cert.days_until_expiry > 825 {
+        // Calculate total validity in days from not_before to not_after
+        let total_validity_days = compute_total_validity_days(cert);
+        if total_validity_days > 825 {
+            let years = total_validity_days / 365;
+            let severity = if total_validity_days > 3650 {
+                Severity::Medium // >10 years: almost certainly never-rotated IoT cert
+            } else {
+                Severity::Low // 2-10 years: long but less extreme
+            };
+            findings.push(
+                Finding::new(
+                    "ssl",
+                    &format!("Excessive certificate validity on {ip}:{port}"),
+                    &format!(
+                        "TLS certificate on {ip}:{port} has a {years}-year validity period \
+                         ({} to {}). CA/Browser Forum limits public certs to 398 days. \
+                         Long-lived certificates on IoT/embedded devices indicate the cert \
+                         will never be rotated, increasing risk if the key is compromised.",
+                        cert.not_before, cert.not_after,
+                    ),
+                    severity,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("TLS")
+                .with_cwe("CWE-324")
+                .with_references(vec![
+                    "https://cabforum.org/working-groups/server/baseline-requirements/".to_owned(),
+                ]),
+            );
+        }
+    }
+
+    // 7. Certificate details (Info-level)
+    findings.push(
+        Finding::new(
+            "ssl",
+            &format!("Certificate details for {ip}:{port}"),
+            &format!(
+                "Subject: {}, Issuer: {}, Valid: {} to {} ({} days remaining), \
+                 Key: {} {}-bit, Signature: {}, SANs: {}, Self-signed: {}",
+                cert.subject_cn.as_deref().unwrap_or("(none)"),
+                cert.issuer_cn.as_deref().unwrap_or("(none)"),
+                cert.not_before,
+                cert.not_after,
+                cert.days_until_expiry,
+                cert.key_algorithm,
+                cert.key_bits,
+                cert.signature_algorithm,
+                if cert.san_dns.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    cert.san_dns.join(", ")
+                },
+                cert.is_self_signed,
+            ),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("TLS")
+        .with_evidence(format!(
+            "CN={} Key={}/{} Sig={} Expiry={}",
+            cert.subject_cn.as_deref().unwrap_or("?"),
+            cert.key_algorithm,
+            cert.key_bits,
+            cert.signature_algorithm,
+            cert.not_after,
+        )),
+    );
+
+    findings
 }
 
 /// Classify a cipher suite as weak, acceptable, or strong.
@@ -227,7 +656,10 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-327"),
+            .with_cwe("CWE-327")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            ]),
         );
     }
 
@@ -246,7 +678,10 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-328"),
+            .with_cwe("CWE-328")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            ]),
         );
     }
 
@@ -267,7 +702,10 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-326"),
+            .with_cwe("CWE-326")
+            .with_references(vec![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            ]),
         );
     }
 
@@ -315,12 +753,15 @@ async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> 
         .negotiated_cipher_suite()
         .map_or_else(|| "unknown".to_owned(), |cs| format!("{:?}", cs.suite()));
 
-    let cert_chain_length = conn.peer_certificates().map_or(0, <[_]>::len);
+    let certs = conn.peer_certificates();
+    let cert_chain_length = certs.map_or(0, <[_]>::len);
+    let leaf_cert_der = certs.and_then(|c| c.first()).map(|c| c.to_vec());
 
     Some(TlsHandshakeInfo {
         protocol_version,
         cipher_suite,
         cert_chain_length,
+        leaf_cert_der,
     })
 }
 
@@ -420,8 +861,16 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
             findings.push(finding);
         }
 
-        // Single-cert chain may indicate self-signed
-        if info.cert_chain_length == 1 {
+        // Deep certificate analysis via X.509 parsing
+        if let Some(der) = &info.leaf_cert_der {
+            if let Some(cert_details) = parse_cert_details(der) {
+                findings.extend(analyze_certificate(ip, port, &cert_details));
+            } else if info.cert_chain_length == 1 {
+                // Fallback: couldn't parse cert but chain length = 1 → likely self-signed
+                findings.push(classify_cert_issue(ip, port, "self-signed"));
+            }
+        } else if info.cert_chain_length == 1 {
+            // No cert DER available but chain length = 1
             findings.push(classify_cert_issue(ip, port, "self-signed"));
         }
     }
@@ -448,7 +897,10 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_ip(ip)
                     .with_port(port)
                     .with_service("HTTPS")
-                    .with_cwe("CWE-319"),
+                    .with_cwe("CWE-319")
+                    .with_references(vec![
+                        "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html".to_owned(),
+                    ]),
                 );
             }
         }
@@ -650,6 +1102,273 @@ mod tests {
         assert!(finding.is_none());
     }
 
+    // ── Certificate analysis tests ────────────────────────────────────
+
+    #[test]
+    fn test_analyze_cert_expired() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("router.local".to_owned()),
+            issuer_cn: Some("router.local".to_owned()),
+            not_before: "2020-01-01".to_owned(),
+            not_after: "2023-01-01".to_owned(),
+            days_until_expiry: -730,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        assert!(
+            findings.iter().any(|f| f.title.contains("Expired") && f.severity == Severity::High),
+            "expected expired cert finding"
+        );
+    }
+
+    #[test]
+    fn test_analyze_cert_expiring_soon() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("nas.local".to_owned()),
+            issuer_cn: Some("nas.local".to_owned()),
+            not_before: "2024-01-01".to_owned(),
+            not_after: "2026-03-01".to_owned(),
+            days_until_expiry: 14,
+            key_algorithm: "EC".to_owned(),
+            key_bits: 256,
+            signature_algorithm: "ecdsaWithSHA256".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec!["nas.local".to_owned()],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        assert!(findings
+            .iter()
+            .any(|f| f.title.contains("expiring soon") && f.severity == Severity::Medium));
+    }
+
+    #[test]
+    fn test_analyze_cert_weak_rsa_key() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("iot-device".to_owned()),
+            issuer_cn: Some("iot-device".to_owned()),
+            not_before: "2024-01-01".to_owned(),
+            not_after: "2027-01-01".to_owned(),
+            days_until_expiry: 365,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 1024,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        assert!(findings
+            .iter()
+            .any(|f| f.title.contains("1024-bit RSA") && f.severity == Severity::High));
+    }
+
+    #[test]
+    fn test_analyze_cert_sha1_signature() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("printer.local".to_owned()),
+            issuer_cn: Some("printer.local".to_owned()),
+            not_before: "2024-01-01".to_owned(),
+            not_after: "2027-01-01".to_owned(),
+            days_until_expiry: 365,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha1WithRSAEncryption".to_owned(),
+            uses_sha1_signature: true,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        assert!(findings
+            .iter()
+            .any(|f| f.title.contains("SHA-1") && f.severity == Severity::Medium));
+    }
+
+    #[test]
+    fn test_analyze_cert_healthy_ca_signed() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("healthy.local".to_owned()),
+            issuer_cn: Some("My CA".to_owned()),
+            not_before: "2025-01-01".to_owned(),
+            not_after: "2027-01-01".to_owned(),
+            days_until_expiry: 365,
+            key_algorithm: "EC".to_owned(),
+            key_bits: 256,
+            signature_algorithm: "ecdsaWithSHA256".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec!["healthy.local".to_owned()],
+            is_self_signed: false,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // CA-signed, valid, strong key → only Info-level details
+        assert!(findings.iter().all(|f| f.severity == Severity::Info));
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn test_analyze_cert_self_signed_private_ip() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("router.local".to_owned()),
+            issuer_cn: Some("router.local".to_owned()),
+            not_before: "2025-01-01".to_owned(),
+            not_after: "2027-01-01".to_owned(),
+            days_until_expiry: 365,
+            key_algorithm: "EC".to_owned(),
+            key_bits: 256,
+            signature_algorithm: "ecdsaWithSHA256".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // Self-signed on private IP → Low + Info details
+        assert!(findings.iter().any(|f| f.title.contains("Self-signed") && f.severity == Severity::Low));
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn test_analyze_cert_multiple_issues() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("old-device".to_owned()),
+            issuer_cn: Some("old-device".to_owned()),
+            not_before: "2018-01-01".to_owned(),
+            not_after: "2022-01-01".to_owned(),
+            days_until_expiry: -1460,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 1024,
+            signature_algorithm: "sha1WithRSAEncryption".to_owned(),
+            uses_sha1_signature: true,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // expired + weak key + SHA-1 + self-signed + details = 5 findings
+        assert_eq!(findings.len(), 5);
+        assert!(findings.iter().any(|f| f.title.contains("Expired")));
+        assert!(findings.iter().any(|f| f.title.contains("1024-bit")));
+        assert!(findings.iter().any(|f| f.title.contains("Self-signed")));
+        assert!(findings.iter().any(|f| f.title.contains("SHA-1")));
+    }
+
+    #[test]
+    fn test_oid_to_sig_name_known() {
+        assert_eq!(
+            oid_to_sig_name("1.2.840.113549.1.1.11"),
+            "sha256WithRSAEncryption"
+        );
+        assert_eq!(
+            oid_to_sig_name("1.2.840.113549.1.1.5"),
+            "sha1WithRSAEncryption"
+        );
+        assert_eq!(oid_to_sig_name("1.2.840.10045.4.3.2"), "ecdsaWithSHA256");
+    }
+
+    #[test]
+    fn test_oid_to_sig_name_unknown() {
+        assert_eq!(oid_to_sig_name("1.2.3.4.5"), "1.2.3.4.5");
+    }
+
+    #[test]
+    fn test_analyze_cert_excessive_validity_iot() {
+        let ip: IpAddr = "192.168.1.34".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("Sound United".to_owned()),
+            issuer_cn: Some("Sound United".to_owned()),
+            not_before: "2019-03-12".to_owned(),
+            not_after: "2069-02-27".to_owned(),
+            days_until_expiry: 15717,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // 50-year cert → Medium excessive validity + self-signed Low + Info details
+        assert!(findings.iter().any(|f| f.title.contains("Excessive")));
+        let excessive = findings.iter().find(|f| f.title.contains("Excessive")).unwrap();
+        assert_eq!(excessive.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_analyze_cert_moderate_validity() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("device".to_owned()),
+            issuer_cn: Some("device".to_owned()),
+            not_before: "2024-01-01".to_owned(),
+            not_after: "2029-01-01".to_owned(),
+            days_until_expiry: 1400,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // 5-year cert → Low excessive validity
+        assert!(findings.iter().any(|f| f.title.contains("Excessive")));
+        let excessive = findings.iter().find(|f| f.title.contains("Excessive")).unwrap();
+        assert_eq!(excessive.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_analyze_cert_normal_validity() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let cert = CertDetails {
+            subject_cn: Some("device".to_owned()),
+            issuer_cn: Some("My CA".to_owned()),
+            not_before: "2025-06-01".to_owned(),
+            not_after: "2027-06-01".to_owned(),
+            days_until_expiry: 730,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec!["device.local".to_owned()],
+            is_self_signed: false,
+        };
+        let findings = analyze_certificate(ip, 443, &cert);
+        // 2-year cert, CA-signed → no excessive validity, no self-signed
+        assert!(!findings.iter().any(|f| f.title.contains("Excessive")));
+        assert!(!findings.iter().any(|f| f.title.contains("Self-signed")));
+        assert_eq!(findings.len(), 1); // only Info details
+    }
+
+    #[test]
+    fn test_compute_total_validity_days() {
+        let cert = CertDetails {
+            subject_cn: None,
+            issuer_cn: None,
+            not_before: "2019-03-12".to_owned(),
+            not_after: "2069-02-27".to_owned(),
+            days_until_expiry: 15717,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: true,
+        };
+        let days = compute_total_validity_days(&cert);
+        // ~50 years ≈ 18249 days (give or take leap years)
+        assert!(days > 18000 && days < 18500);
+    }
+
     proptest! {
         /// `classify_tls_version` never panics on arbitrary strings
         #[test]
@@ -670,6 +1389,40 @@ mod tests {
         fn prop_classify_cipher_suite_no_panic(cipher in ".*", port in 1_u16..=65535_u16) {
             let ip: IpAddr = "10.0.0.1".parse().unwrap();
             let _ = classify_cipher_suite(ip, port, &cipher);
+        }
+
+        /// `parse_cert_details` never panics on arbitrary bytes
+        #[test]
+        fn prop_parse_cert_details_no_panic(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = parse_cert_details(&data);
+        }
+
+        /// `analyze_certificate` never panics on any `CertDetails` combinations
+        #[test]
+        fn prop_analyze_cert_no_panic(
+            days in -3650_i64..3650_i64,
+            key_bits in 0_u32..8192_u32,
+            sha1 in proptest::bool::ANY,
+        ) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            let cert = CertDetails {
+                subject_cn: Some("test".to_owned()),
+                issuer_cn: Some("test".to_owned()),
+                not_before: "2020-01-01".to_owned(),
+                not_after: "2030-01-01".to_owned(),
+                days_until_expiry: days,
+                key_algorithm: "RSA".to_owned(),
+                key_bits,
+                signature_algorithm: if sha1 {
+                    "sha1WithRSAEncryption".to_owned()
+                } else {
+                    "sha256WithRSAEncryption".to_owned()
+                },
+                uses_sha1_signature: sha1,
+                san_dns: vec![],
+                is_self_signed: true,
+            };
+            let _ = analyze_certificate(ip, 443, &cert);
         }
     }
 }

@@ -121,6 +121,13 @@ impl Finding {
         self
     }
 
+    /// Builder-style setter for CVE IDs (e.g. `["CVE-2024-6387"]`).
+    #[must_use]
+    pub fn with_cve_ids(mut self, ids: Vec<String>) -> Self {
+        self.cve_ids = ids;
+        self
+    }
+
     /// Builder-style setter for external references.
     #[must_use]
     pub fn with_references(mut self, refs: Vec<String>) -> Self {
