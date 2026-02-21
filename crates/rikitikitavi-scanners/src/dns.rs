@@ -27,8 +27,96 @@ fn parse_resolv_conf(contents: &str) -> Vec<IpAddr> {
         .collect()
 }
 
-/// Read nameservers from `/etc/resolv.conf`.
+/// Parse macOS `scutil --dns` output to extract nameservers from the default resolver.
+///
+/// The output contains numbered resolver blocks. The default resolver is `resolver #1`.
+/// Each block may contain `nameserver[N] : <ip>` lines.
+#[cfg(any(target_os = "macos", test))]
+fn parse_scutil_dns_nameservers(contents: &str) -> Vec<IpAddr> {
+    let mut nameservers = Vec::new();
+    let mut in_default_resolver = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("resolver #1") {
+            in_default_resolver = true;
+            continue;
+        }
+        // Any subsequent "resolver #N" (N > 1) ends the default block.
+        if in_default_resolver && trimmed.starts_with("resolver #") {
+            break;
+        }
+
+        if in_default_resolver {
+            if let Some(rest) = trimmed.strip_prefix("nameserver[") {
+                // Format: "nameserver[0] : 192.168.1.1" or "nameserver[1] : fd00::1"
+                // Split on " : " (the scutil delimiter), not bare ":" which breaks IPv6.
+                if let Some(ip_str) = rest.split_once(" : ").map(|(_, v)| v) {
+                    if let Ok(ip) = ip_str.trim().parse() {
+                        nameservers.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    nameservers
+}
+
+/// Parse macOS `scutil --dns` output to extract the search domain from the default resolver.
+#[cfg(any(target_os = "macos", test))]
+fn parse_scutil_dns_search_domain(contents: &str) -> Option<String> {
+    let mut in_default_resolver = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("resolver #1") {
+            in_default_resolver = true;
+            continue;
+        }
+        if in_default_resolver && trimmed.starts_with("resolver #") {
+            break;
+        }
+
+        if in_default_resolver {
+            if let Some(rest) = trimmed.strip_prefix("search domain[") {
+                // Format: "search domain[0] : home.arpa"
+                if let Some(domain) = rest.split_once(" : ").map(|(_, v)| v.trim()) {
+                    if !domain.is_empty() && domain.contains('.') {
+                        return Some(domain.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Read the system's configured DNS nameservers.
+///
+/// On Linux, reads `/etc/resolv.conf`. On macOS, uses `scutil --dns` to query
+/// the system resolver (`mDNSResponder`), falling back to `/etc/resolv.conf`.
 fn read_nameservers() -> Vec<IpAddr> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("scutil")
+            .arg("--dns")
+            .output()
+        {
+            if output.status.success() {
+                let contents = String::from_utf8_lossy(&output.stdout);
+                let ns = parse_scutil_dns_nameservers(&contents);
+                if !ns.is_empty() {
+                    return ns;
+                }
+                tracing::debug!("scutil --dns returned no nameservers, falling back to resolv.conf");
+            }
+        }
+    }
+
     match std::fs::read_to_string("/etc/resolv.conf") {
         Ok(contents) => parse_resolv_conf(&contents),
         Err(e) => {
@@ -409,8 +497,27 @@ fn parse_search_domain(contents: &str) -> Option<String> {
     None
 }
 
-/// Read the search domain from `/etc/resolv.conf`.
+/// Read the search domain from the system DNS configuration.
+///
+/// On macOS, queries `scutil --dns` first (authoritative source), falling back
+/// to `/etc/resolv.conf`. On Linux, reads `/etc/resolv.conf` directly.
 fn read_search_domain() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("scutil")
+            .arg("--dns")
+            .output()
+        {
+            if output.status.success() {
+                let contents = String::from_utf8_lossy(&output.stdout);
+                let domain = parse_scutil_dns_search_domain(&contents);
+                if domain.is_some() {
+                    return domain;
+                }
+            }
+        }
+    }
+
     std::fs::read_to_string("/etc/resolv.conf")
         .ok()
         .and_then(|contents| parse_search_domain(&contents))
@@ -442,12 +549,19 @@ impl Scanner for DnsScanner {
         let nameservers = read_nameservers();
 
         if nameservers.is_empty() {
+            let description = if cfg!(target_os = "macos") {
+                "No nameservers found via scutil --dns or /etc/resolv.conf. \
+                 DNS resolution may not be working. This is unusual on macOS — \
+                 mDNSResponder normally configures DNS automatically via DHCP."
+            } else {
+                "No nameservers found in /etc/resolv.conf. DNS resolution may \
+                 not be working, or the system uses an alternative resolver \
+                 (e.g. systemd-resolved)."
+            };
             findings.push(Finding::new(
                 "dns",
                 "No DNS servers configured",
-                "No nameservers found in /etc/resolv.conf. DNS resolution may \
-                 not be working, or the system uses an alternative resolver \
-                 (e.g. systemd-resolved).",
+                description,
                 Severity::High,
             ));
             return Ok(findings);
@@ -539,7 +653,7 @@ impl Scanner for DnsScanner {
                         Severity::Medium,
                     )
                     .with_cwe("CWE-350")
-                    .with_references(vec!["https://dnssec-failed.org/".to_owned()])
+                    .with_references(refs!["https://dnssec-failed.org/"])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.dns.dnssec-not-enforced",
                         &[],
@@ -737,6 +851,88 @@ nameserver 9.9.9.9
         assert!(parse_search_domain(contents).is_none());
     }
 
+    // ── macOS scutil --dns parser tests ────────────────────────────
+
+    const SAMPLE_SCUTIL_DNS: &str = "\
+DNS configuration
+
+resolver #1
+  search domain[0] : home.arpa
+  nameserver[0] : 192.168.1.1
+  nameserver[1] : fd00::1
+  if_index : 13 (en0)
+  flags    : Request A records, Request AAAA records
+  reach    : 0x00020002 (Reachable,Directly Reachable Address)
+
+resolver #2
+  domain   : local
+  options  : mdns
+  timeout  : 5
+  flags    : Request A records, Request AAAA records
+  reach    : 0x00000000 (Not Reachable)
+  order    : 300000
+
+resolver #3
+  domain   : 254.169.in-addr.arpa
+  options  : mdns
+  timeout  : 5
+  flags    : Request A records, Request AAAA records
+  reach    : 0x00000000 (Not Reachable)
+  order    : 300200
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  search domain[0] : home.arpa
+  nameserver[0] : 192.168.1.1
+  nameserver[1] : fd00::1
+  if_index : 13 (en0)
+  flags    : Scoped, Request A records, Request AAAA records
+  reach    : 0x00020002 (Reachable,Directly Reachable Address)
+";
+
+    #[test]
+    fn test_parse_scutil_dns_nameservers() {
+        let ns = parse_scutil_dns_nameservers(SAMPLE_SCUTIL_DNS);
+        assert_eq!(ns.len(), 2);
+        assert_eq!(ns[0], "192.168.1.1".parse::<IpAddr>().unwrap());
+        assert_eq!(ns[1], "fd00::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_parse_scutil_dns_nameservers_empty() {
+        let ns = parse_scutil_dns_nameservers("DNS configuration\n\nresolver #1\n  domain : local\n");
+        assert!(ns.is_empty());
+    }
+
+    #[test]
+    fn test_parse_scutil_dns_ignores_scoped_resolvers() {
+        // Only resolver #1 from the main section, not the scoped one
+        let ns = parse_scutil_dns_nameservers(SAMPLE_SCUTIL_DNS);
+        // Should NOT have 4 entries (2 main + 2 scoped), just the first 2
+        assert_eq!(ns.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_scutil_dns_search_domain() {
+        let domain = parse_scutil_dns_search_domain(SAMPLE_SCUTIL_DNS);
+        assert_eq!(domain, Some("home.arpa".to_owned()));
+    }
+
+    #[test]
+    fn test_parse_scutil_dns_search_domain_none() {
+        let domain = parse_scutil_dns_search_domain(
+            "DNS configuration\n\nresolver #1\n  nameserver[0] : 8.8.8.8\n",
+        );
+        assert!(domain.is_none());
+    }
+
+    #[test]
+    fn test_parse_scutil_dns_no_resolver() {
+        let ns = parse_scutil_dns_nameservers("DNS configuration\n\n");
+        assert!(ns.is_empty());
+    }
+
     // ── Proptests ───────────────────────────────────────────────────
 
     proptest! {
@@ -777,6 +973,12 @@ nameserver 9.9.9.9
         #[test]
         fn prop_parse_search_domain_no_panic(contents in ".*") {
             let _ = parse_search_domain(&contents);
+        }
+
+        #[test]
+        fn prop_parse_scutil_dns_no_panic(contents in ".*") {
+            let _ = parse_scutil_dns_nameservers(&contents);
+            let _ = parse_scutil_dns_search_domain(&contents);
         }
     }
 }

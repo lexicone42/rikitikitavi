@@ -169,8 +169,8 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_port(port)
             .with_service("SSH")
             .with_cwe("CWE-327")
-            .with_references(vec![
-                "https://nvd.nist.gov/vuln/detail/CVE-2008-5161".to_owned()
+            .with_references(refs![
+                "https://nvd.nist.gov/vuln/detail/CVE-2008-5161"
             ]),
         );
     }

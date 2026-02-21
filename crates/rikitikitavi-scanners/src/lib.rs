@@ -1,3 +1,17 @@
+/// Shorthand for building a `Vec<String>` of reference URLs.
+///
+/// # Examples
+///
+/// ```ignore
+/// .with_references(refs!["https://owasp.org/..."])
+/// .with_references(refs!["https://a.example", "https://b.example"])
+/// ```
+macro_rules! refs {
+    ($($url:expr),+ $(,)?) => {
+        vec![$($url.to_owned()),+]
+    };
+}
+
 pub mod remediation;
 pub mod traits;
 

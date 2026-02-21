@@ -296,8 +296,8 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_references(vec![
-            "https://www.upnp-hacks.org/".to_owned(),
+        .with_references(refs![
+            "https://www.upnp-hacks.org/",
         ])
         .with_opt_remediation(crate::remediation::get(
             "rikitikitavi.ports.upnp-exposed",
@@ -329,8 +329,8 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_references(vec![
-            "https://owasp.org/www-project-internet-of-things/".to_owned(),
+        .with_references(refs![
+            "https://owasp.org/www-project-internet-of-things/",
         ]),
 
         _ => Finding::new(
@@ -490,8 +490,8 @@ impl Scanner for PortScanner {
                     )
                     .with_ip(*ip)
                     .with_cwe("CWE-284")
-                    .with_references(vec![
-                        "https://attack.mitre.org/techniques/T1046/".to_owned(),
+                    .with_references(refs![
+                        "https://attack.mitre.org/techniques/T1046/",
                     ]),
                 );
             }

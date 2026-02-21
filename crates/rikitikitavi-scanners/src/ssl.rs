@@ -518,8 +518,8 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-328")
-            .with_references(vec![
-                "https://shattered.io/".to_owned(),
+            .with_references(refs![
+                "https://shattered.io/",
             ]),
         );
     }
@@ -553,8 +553,8 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
                 .with_port(port)
                 .with_service("TLS")
                 .with_cwe("CWE-295")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
                 ]),
         );
     }
@@ -588,8 +588,8 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
                 .with_port(port)
                 .with_service("TLS")
                 .with_cwe("CWE-324")
-                .with_references(vec![
-                    "https://cabforum.org/working-groups/server/baseline-requirements/".to_owned(),
+                .with_references(refs![
+                    "https://cabforum.org/working-groups/server/baseline-requirements/",
                 ]),
             );
         }
@@ -657,8 +657,8 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-327")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
             ]),
         );
     }
@@ -679,8 +679,8 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-328")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
             ]),
         );
     }
@@ -703,8 +703,8 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-326")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
             ]),
         );
     }
@@ -898,8 +898,8 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_port(port)
                     .with_service("HTTPS")
                     .with_cwe("CWE-319")
-                    .with_references(vec![
-                        "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html".to_owned(),
+                    .with_references(refs![
+                        "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
                     ]),
                 );
             }

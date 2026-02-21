@@ -61,8 +61,8 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-319")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
             ])
             .with_opt_remediation(crate::remediation::get(
                 "rikitikitavi.http_audit.missing-hsts",
@@ -85,8 +85,8 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-1021")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html",
             ]),
         );
     }
@@ -104,8 +104,8 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-79")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
             ]),
         );
     }
@@ -124,8 +124,8 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-16")
-            .with_references(vec![
-                "https://owasp.org/www-project-secure-headers/".to_owned(),
+            .with_references(refs![
+                "https://owasp.org/www-project-secure-headers/",
             ]),
         );
     }
@@ -187,8 +187,8 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_references(vec![
-                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773".to_owned(),
+            .with_references(refs![
+                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
             ]),
         );
     }
@@ -278,8 +278,8 @@ pub fn classify_http_methods(ip: IpAddr, port: u16, allow_header: &str) -> Vec<F
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-749")
-            .with_references(vec![
-                "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods".to_owned(),
+            .with_references(refs![
+                "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods",
             ]),
         );
     }
@@ -819,8 +819,8 @@ pub fn analyze_csp(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-79")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -839,8 +839,8 @@ pub fn analyze_csp(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-79")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -859,8 +859,8 @@ pub fn analyze_csp(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-79")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -914,8 +914,8 @@ pub fn analyze_csp(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-79")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -998,8 +998,8 @@ pub fn analyze_cors(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-942")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html",
                 ]),
             );
         } else {
@@ -1017,8 +1017,8 @@ pub fn analyze_cors(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-942")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -1038,8 +1038,8 @@ pub fn analyze_cors(
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-942")
-            .with_references(vec![
-                "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html".to_owned(),
+            .with_references(refs![
+                "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html",
             ]),
         );
     }
@@ -1136,8 +1136,8 @@ pub fn analyze_cookies(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-614")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -1162,8 +1162,8 @@ pub fn analyze_cookies(
                 .with_port(port)
                 .with_service("HTTP")
                 .with_cwe("CWE-1004")
-                .with_references(vec![
-                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html".to_owned(),
+                .with_references(refs![
+                    "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
                 ]),
             );
         }
@@ -1392,8 +1392,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_port(port)
                     .with_service("HTTP")
                     .with_cwe("CWE-548")
-                    .with_references(vec![
-                        "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information".to_owned(),
+                    .with_references(refs![
+                        "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information",
                     ])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.http_audit.directory-listing",
@@ -1469,8 +1469,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
-                            .with_references(vec![
-                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                            .with_references(refs![
+                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
                             ])
                             .with_opt_remediation(crate::remediation::get(
                                 "rikitikitavi.http_audit.admin-no-auth",

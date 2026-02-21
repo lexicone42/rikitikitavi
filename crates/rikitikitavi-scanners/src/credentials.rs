@@ -1048,8 +1048,8 @@ impl Scanner for CredentialScanner {
                     .with_port(23)
                     .with_service("Telnet")
                     .with_cwe("CWE-319")
-                    .with_references(vec![
-                        "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                    .with_references(refs![
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
                     ])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.credentials.telnet-default",
@@ -1084,8 +1084,8 @@ impl Scanner for CredentialScanner {
                         .with_port(445)
                         .with_service("SMB")
                         .with_cwe("CWE-287")
-                        .with_references(vec![
-                            "https://attack.mitre.org/techniques/T1021/002/".to_owned(),
+                        .with_references(refs![
+                            "https://attack.mitre.org/techniques/T1021/002/",
                         ])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.smb-exposed",
@@ -1111,8 +1111,8 @@ impl Scanner for CredentialScanner {
                         .with_port(3389)
                         .with_service("RDP")
                         .with_cwe("CWE-287")
-                        .with_references(vec![
-                            "https://attack.mitre.org/techniques/T1021/001/".to_owned(),
+                        .with_references(refs![
+                            "https://attack.mitre.org/techniques/T1021/001/",
                         ])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.rdp-exposed",
@@ -1150,8 +1150,8 @@ impl Scanner for CredentialScanner {
                             .with_port(port)
                             .with_service("HTTP")
                             .with_cwe("CWE-306")
-                            .with_references(vec![
-                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html".to_owned(),
+                            .with_references(refs![
+                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
                             ])
                             .with_opt_remediation(
                                 crate::remediation::get(

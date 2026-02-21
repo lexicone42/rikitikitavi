@@ -244,7 +244,7 @@ impl Scanner for RouterScanner {
                 .with_ip(gateway)
                 .with_service("UPnP")
                 .with_cwe("CWE-284")
-                .with_references(vec!["https://www.upnp-hacks.org/".to_owned()])
+                .with_references(refs!["https://www.upnp-hacks.org/"])
                 .with_opt_remediation(crate::remediation::get(
                     "rikitikitavi.router.upnp-enabled",
                     &[],

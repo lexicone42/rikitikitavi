@@ -124,8 +124,8 @@ impl Scanner for NetworkScanner {
                     Severity::Low,
                 )
                 .with_cwe("CWE-653")
-                .with_references(vec![
-                    "https://cwe.mitre.org/data/definitions/1008.html".to_owned(),
+                .with_references(refs![
+                    "https://cwe.mitre.org/data/definitions/1008.html",
                 ]),
             );
         }
