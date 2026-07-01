@@ -279,6 +279,12 @@ impl Scanner for UniFiScanner {
             return Ok(findings);
         };
 
+        // SAFETY (TLS): `new_insecure` is deliberate here and safe because this is
+        // an UNAUTHENTICATED probe — we only check whether a controller login page
+        // is reachable and never send credentials on this client. UniFi controllers
+        // almost always present a self-signed cert, so validation would just break
+        // detection. Do NOT copy this into any path that calls `login()` — use
+        // `UniFiClient::connect(url, site, insecure)` (validation on by default) there.
         let client =
             UniFiClient::new_insecure(&url, "default").map_err(|e| ScanError::ScannerFailed {
                 scanner: "unifi".to_owned(),

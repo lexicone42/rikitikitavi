@@ -988,13 +988,15 @@ impl Scanner for CredentialScanner {
 
                 // Telnet: flag cleartext protocol + test default credentials
                 if has_port(23) {
-                    let is_active = ctx
-                        .config
-                        .intensity
-                        .at_least(rikitikitavi_models::config::ScanIntensity::Active);
+                    use rikitikitavi_models::config::ScanIntensity;
+                    // Non-destructive banner/prompt capture is allowed at Active.
+                    let is_active = ctx.config.intensity.at_least(ScanIntensity::Active);
+                    // Actively guessing default passwords can lock accounts and trip
+                    // an IDS, so it is gated behind Aggressive (explicit --aggressive),
+                    // not the Active default. Detection/flagging below still runs.
+                    let attempt_login = ctx.config.intensity.at_least(ScanIntensity::Aggressive);
 
-                    // In Active mode, attempt default credential login
-                    let login_result = if is_active {
+                    let login_result = if attempt_login {
                         check_telnet_default_creds(ip).await
                     } else {
                         None

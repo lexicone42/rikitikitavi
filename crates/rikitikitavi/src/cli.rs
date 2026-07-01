@@ -212,6 +212,10 @@ pub enum UniFiCommand {
         /// Site name.
         #[arg(long, default_value = "default")]
         site: String,
+        /// Disable TLS certificate validation (self-signed controllers).
+        /// WARNING: exposes admin credentials to on-path attackers.
+        #[arg(long)]
+        insecure: bool,
         /// Output file path.
         #[arg(short, long)]
         output: Option<PathBuf>,

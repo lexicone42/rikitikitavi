@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn cmd_scan(
     args: cli::ScanArgs,
     app_config: &rikitikitavi_models::config::AppConfig,
@@ -96,11 +97,22 @@ async fn cmd_scan(
 
     // Perform network discovery to populate context
     if !args.quiet {
+        // Active scanning without authorization can be illegal and disruptive.
+        // Surface a one-line reminder at runtime (not just in SECURITY.md).
+        eprintln!(
+            "Note: only scan networks you own or are explicitly authorized to test. \
+             Active/aggressive modes probe and (with --aggressive) attempt logins."
+        );
         println!("{}", intensity.profile_name());
         println!("Discovering network...");
     }
     let devices = runner::discover_network(&mut ctx);
     ctx.discovered_devices = devices;
+
+    // The ARP cache alone is often nearly empty (cold cache / fresh boot). Active
+    // mode does a bounded TCP-connect sweep so a scan doesn't silently report ~0
+    // devices. Passive mode stays read-only and skips this.
+    let swept = runner::active_host_discovery(&mut ctx).await;
 
     if !args.quiet {
         if let Some(gw) = ctx.gateway {
@@ -109,8 +121,21 @@ async fn cmd_scan(
         if let Some(net) = &ctx.target_network {
             println!("  Network:  {net}");
         }
-        println!("  Devices:  {}", ctx.discovered_devices.len());
+        println!(
+            "  Devices:  {} ({swept} via active sweep)",
+            ctx.discovered_devices.len()
+        );
         println!();
+
+        // Never present a near-empty result as a clean network — say why.
+        if ctx.discovered_devices.len() <= 1 {
+            eprintln!(
+                "Warning: found {} host(s). If this looks too low, the ARP cache may be \
+                 cold and the sweep found little — check you are on the right interface, \
+                 run with --aggressive, or ensure the network allows TCP probing.",
+                ctx.discovered_devices.len()
+            );
+        }
     }
 
     if args.dry_run {
@@ -560,7 +585,7 @@ fn cmd_report(args: &cli::ReportArgs, _app_config: &rikitikitavi_models::config:
 #[cfg(feature = "unifi")]
 async fn cmd_unifi(
     args: cli::UniFiArgs,
-    _app_config: &rikitikitavi_models::config::AppConfig,
+    app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
     match args.command {
         cli::UniFiCommand::Scan {
@@ -570,9 +595,20 @@ async fn cmd_unifi(
             password,
             token,
             site,
+            insecure,
             output,
         } => {
-            cmd_unifi_scan(local, controller, user, password, token, &site, output).await?;
+            // Opt into insecure TLS via either the CLI flag or the config file.
+            let insecure = insecure
+                || app_config
+                    .unifi
+                    .controller
+                    .as_ref()
+                    .is_some_and(|c| c.insecure);
+            cmd_unifi_scan(
+                local, controller, user, password, token, &site, insecure, output,
+            )
+            .await?;
         }
         cli::UniFiCommand::Devices => {
             println!("Device listing requires a controller connection.");
@@ -614,6 +650,7 @@ async fn cmd_unifi_scan(
     password: Option<String>,
     token: Option<String>,
     site: &str,
+    insecure: bool,
     output: Option<std::path::PathBuf>,
 ) -> Result<()> {
     use rikitikitavi_unifi::UniFiClient;
@@ -637,7 +674,7 @@ async fn cmd_unifi_scan(
 
     println!("Connecting to UniFi controller at {url}...");
 
-    let mut client = UniFiClient::new_insecure(&url, site)?;
+    let mut client = UniFiClient::connect(&url, site, insecure)?;
 
     // Authenticate
     if let Some(tok) = token {

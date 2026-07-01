@@ -51,6 +51,31 @@ impl UniFiClient {
         })
     }
 
+    /// Create a client, choosing TLS validation based on `insecure`.
+    ///
+    /// This is the constructor callers should prefer: it validates certificates
+    /// by default (protecting the admin credentials `POSTed` during login) and only
+    /// bypasses validation when the operator explicitly opts in, emitting a loud
+    /// warning when it does. Many `UniFi` controllers ship self-signed certs, so the
+    /// insecure path exists — but it must be a deliberate choice, not the default.
+    pub fn connect(base_url: &str, site: &str, insecure: bool) -> Result<Self> {
+        if insecure {
+            tracing::warn!(
+                %base_url,
+                "TLS certificate validation DISABLED for UniFi connection — \
+                 admin credentials sent during login are exposed to on-path \
+                 attackers. Only use --insecure on a trusted network."
+            );
+            eprintln!(
+                "WARNING: TLS certificate validation is disabled for {base_url}. \
+                 Your UniFi admin credentials are not protected against interception."
+            );
+            Self::new_insecure(base_url, site)
+        } else {
+            Self::new(base_url, site)
+        }
+    }
+
     /// Create a client that accepts self-signed certificates.
     pub fn new_insecure(base_url: &str, site: &str) -> Result<Self> {
         let client = Client::builder()
@@ -277,6 +302,13 @@ mod tests {
     fn test_client_insecure() {
         let client = UniFiClient::new_insecure("https://192.168.1.1:443", "default");
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_connect_builds_both_modes() {
+        // Secure (validation on) is the default path; insecure is opt-in.
+        assert!(UniFiClient::connect("https://192.168.1.1", "default", false).is_ok());
+        assert!(UniFiClient::connect("https://192.168.1.1", "default", true).is_ok());
     }
 
     #[test]

@@ -76,6 +76,45 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
     devices
 }
 
+/// Actively sweep the target network for live hosts and merge any newly found
+/// ones into `ctx.discovered_devices`.
+///
+/// Reading the ARP cache alone misses everything the machine has not recently
+/// talked to (a cold cache on a fresh boot is nearly empty), so without this a
+/// scan can report ~0 devices and look "clean." The sweep is a bounded,
+/// unprivileged TCP-connect probe. It is skipped in Passive mode (which is meant
+/// to be read-only) and when no IPv4 target network was detected.
+///
+/// Returns the number of hosts newly added by the sweep.
+pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
+    use rikitikitavi_models::config::ScanIntensity;
+
+    if !ctx.config.intensity.at_least(ScanIntensity::Active) {
+        return 0;
+    }
+    let Some(network) = ctx.target_network else {
+        return 0;
+    };
+
+    let found =
+        rikitikitavi_network::tcp_sweep(&network, std::time::Duration::from_millis(400), 256).await;
+
+    let mut added = 0;
+    for ip in found {
+        if !ctx.discovered_devices.iter().any(|d| d.ip == ip) {
+            let mut dev = Device::new(ip);
+            if ctx.gateway == Some(ip) {
+                dev = dev.with_device_type(DeviceType::Router);
+            }
+            ctx.discovered_devices.push(dev);
+            added += 1;
+        }
+    }
+
+    tracing::info!(added, "active TCP host sweep complete");
+    added
+}
+
 /// Orchestrate a full scan run across all applicable scanner modules.
 ///
 /// The scan runs in two phases:
