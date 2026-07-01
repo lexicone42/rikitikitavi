@@ -115,6 +115,36 @@ pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
     added
 }
 
+/// Run one scanner with a per-scanner timeout backstop.
+///
+/// Individual network I/O is already bounded by its own timeouts; this guards
+/// against a scanner that iterates an unexpectedly large target set (or is
+/// otherwise slow to return) stalling the entire run. The budget scales with the
+/// scanner's own estimate, clamped to a sane range.
+async fn run_scanner_bounded(
+    scanner: &dyn rikitikitavi_scanners::Scanner,
+    ctx: &ScanContext,
+) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+    let budget = std::time::Duration::from_secs(
+        scanner
+            .estimated_duration_secs()
+            .saturating_mul(4)
+            .clamp(60, 600),
+    );
+    tokio::time::timeout(budget, scanner.scan(ctx))
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                scanner = scanner.id(),
+                budget_secs = budget.as_secs(),
+                "scanner exceeded its time budget, skipping"
+            );
+            Err(rikitikitavi_core::ScanError::Timeout {
+                target: scanner.id().to_owned(),
+            })
+        })
+}
+
 /// Orchestrate a full scan run across all applicable scanner modules.
 ///
 /// The scan runs in two phases:
@@ -164,7 +194,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
             "running Phase 1 scanner"
         );
 
-        match scanner.scan(ctx).await {
+        match run_scanner_bounded(*scanner, ctx).await {
             Ok(findings) => {
                 tracing::info!(
                     scanner = scanner.id(),
@@ -251,7 +281,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
             name = scanner.name(),
             "running Phase 2 scanner"
         );
-        (scanner.id(), scanner.scan(ctx).await)
+        (scanner.id(), run_scanner_bounded(*scanner, ctx).await)
     }))
     .await;
 

@@ -185,7 +185,8 @@ async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
         .ok()?;
 
     let resp = client.get(location).send().await.ok()?;
-    let body = resp.text().await.ok()?;
+    // Cap the body: UPnP device descriptions come from untrusted LAN devices.
+    let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
     let info = parse_upnp_device_xml(&body);
 
     // Only return if we actually got useful data

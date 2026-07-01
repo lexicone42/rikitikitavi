@@ -1,11 +1,11 @@
 use async_trait::async_trait;
+use futures::stream::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::config::PortRange;
 use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
 
 use crate::Scanner;
 
@@ -409,7 +409,6 @@ impl Scanner for PortScanner {
             Duration::from_secs(1)
         };
         let parallelism = ctx.config.parallelism.max(1);
-        let semaphore = std::sync::Arc::new(Semaphore::new(parallelism));
 
         tracing::info!(
             target_count = targets.len(),
@@ -423,40 +422,43 @@ impl Scanner for PortScanner {
             .intensity
             .at_least(rikitikitavi_models::config::ScanIntensity::Active);
 
-        // Build all probe tasks
-        let mut tasks = Vec::new();
-        for &ip in &targets {
-            for &port in &ports {
-                let sem = semaphore.clone();
-                let task = tokio::spawn(async move {
-                    let _permit = sem.acquire().await;
-                    let addr = SocketAddr::new(ip, port);
-                    let open = tcp_connect_probe(addr, timeout).await;
-                    let banner = if open && do_banner {
-                        grab_banner(addr).await
-                    } else {
-                        None
-                    };
-                    PortResult {
-                        ip,
-                        port,
-                        open,
-                        banner,
-                    }
-                });
-                tasks.push(task);
-            }
-        }
+        // Probe every (host, port) pair with bounded concurrency. `buffer_unordered`
+        // keeps at most `parallelism` probes in flight at once — unlike spawning one
+        // task per pair up front, which on a `--ports full` scan of a populated
+        // subnet would allocate millions of parked tasks and exhaust memory. The
+        // pair list is a small, bounded allocation by comparison.
+        let pairs: Vec<(IpAddr, u16)> = targets
+            .iter()
+            .flat_map(|&ip| ports.iter().map(move |&port| (ip, port)))
+            .collect();
+
+        let results: Vec<PortResult> = futures::stream::iter(pairs)
+            .map(|(ip, port)| async move {
+                let addr = SocketAddr::new(ip, port);
+                let open = tcp_connect_probe(addr, timeout).await;
+                let banner = if open && do_banner {
+                    grab_banner(addr).await
+                } else {
+                    None
+                };
+                PortResult {
+                    ip,
+                    port,
+                    open,
+                    banner,
+                }
+            })
+            .buffer_unordered(parallelism)
+            .collect()
+            .await;
 
         // Collect results
         let mut findings = Vec::new();
         let mut open_ports_per_host: std::collections::HashMap<IpAddr, Vec<u16>> =
             std::collections::HashMap::new();
 
-        for task in tasks {
-            if let Ok(result) = task.await
-                && result.open
-            {
+        for result in results {
+            if result.open {
                 tracing::debug!(ip = %result.ip, port = result.port, "port open");
                 open_ports_per_host
                     .entry(result.ip)

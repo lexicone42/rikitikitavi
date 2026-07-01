@@ -23,6 +23,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod exposure;
 pub mod http_audit;
+pub mod http_util;
 pub mod isolation;
 pub mod mdns;
 pub mod neighbor;

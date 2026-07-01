@@ -1339,8 +1339,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             .map(parse_set_cookie)
             .collect();
 
-        // Check body for default pages and framework fingerprinting
-        if let Ok(body) = resp.text().await {
+        // Check body for default pages and framework fingerprinting. Cap the read:
+        // the response is from an untrusted device and could be arbitrarily large.
+        let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
+        {
             if is_default_page(&body) {
                 findings.push(
                     Finding::new(
@@ -1422,7 +1424,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             && resp.status().as_u16() == 200
         {
             let header_signals = extract_response_header_signals(&resp);
-            let body = resp.text().await.unwrap_or_default();
+            let body =
+                crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
             let signals = extract_auth_signals(&body, &header_signals);
             let classification = classify_auth(&signals);
 
