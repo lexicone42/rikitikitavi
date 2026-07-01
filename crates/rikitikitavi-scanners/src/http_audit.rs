@@ -124,9 +124,7 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
             .with_port(port)
             .with_service("HTTP")
             .with_cwe("CWE-16")
-            .with_references(refs![
-                "https://owasp.org/www-project-secure-headers/",
-            ]),
+            .with_references(refs!["https://owasp.org/www-project-secure-headers/",]),
         );
     }
 
@@ -187,9 +185,7 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
-            .with_references(refs![
-                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
-            ]),
+            .with_references(refs!["https://nvd.nist.gov/vuln/detail/CVE-2021-41773",]),
         );
     }
 
@@ -617,7 +613,8 @@ fn has_login_form_elements(lower: &str) -> bool {
 fn has_client_redirect_to_auth(lower: &str) -> bool {
     let has_js_redirect = lower.contains("window.location") || lower.contains("document.location");
     let has_meta_refresh = lower.contains("meta http-equiv=\"refresh\"");
-    let has_auth_target = lower.contains("login") || lower.contains("auth") || lower.contains("signin");
+    let has_auth_target =
+        lower.contains("login") || lower.contains("auth") || lower.contains("signin");
     (has_js_redirect || has_meta_refresh) && has_auth_target
 }
 
@@ -676,7 +673,10 @@ fn has_admin_structural_content(lower: &str) -> bool {
     if !lower.contains("<table") && !lower.contains("<tr") && !lower.contains("<dl") {
         return false;
     }
-    let count = ADMIN_KEYWORDS.iter().filter(|kw| lower.contains(*kw)).count();
+    let count = ADMIN_KEYWORDS
+        .iter()
+        .filter(|kw| lower.contains(*kw))
+        .count();
     count >= 2
 }
 
@@ -698,11 +698,7 @@ fn extract_title_lower(lower: &str) -> Option<&str> {
     let start = lower.find("<title>").map(|i| i + 7)?;
     let end = lower[start..].find("</title>").map(|i| i + start)?;
     let title = lower[start..end].trim();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 /// Format auth signals as human-readable evidence for finding descriptions.
@@ -768,10 +764,7 @@ pub fn parse_csp(header: &str) -> Vec<CspDirective> {
 ///
 /// CSP specifies that any unmentioned fetch directive inherits from
 /// `default-src`.  This helper models that fallback chain.
-fn csp_effective_sources<'a>(
-    directives: &'a [CspDirective],
-    name: &str,
-) -> Option<&'a [String]> {
+fn csp_effective_sources<'a>(directives: &'a [CspDirective], name: &str) -> Option<&'a [String]> {
     directives
         .iter()
         .find(|d| d.name == name)
@@ -791,12 +784,7 @@ fn is_restrictive(sources: &[String]) -> bool {
 /// separate "missing CSP" finding.  `has_x_frame_options` suppresses the
 /// `frame-ancestors` finding when XFO already provides clickjacking defence.
 #[allow(clippy::too_many_lines)]
-pub fn analyze_csp(
-    ip: IpAddr,
-    port: u16,
-    header: &str,
-    has_x_frame_options: bool,
-) -> Vec<Finding> {
+pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: bool) -> Vec<Finding> {
     let directives = parse_csp(header);
     if directives.is_empty() {
         return Vec::new();
@@ -1064,12 +1052,7 @@ pub struct CookieAttributes {
 /// Parse a single `Set-Cookie` header value into security attributes.
 pub fn parse_set_cookie(header: &str) -> CookieAttributes {
     // Cookie name is everything before first '='
-    let name = header
-        .split('=')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+    let name = header.split('=').next().unwrap_or("").trim().to_lowercase();
 
     // Attributes follow the value, separated by ';'
     let lower = header.to_lowercase();
@@ -1240,15 +1223,11 @@ fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSi
             });
 
     // Session cookie: set-cookie header with a session-like name.
-    let has_session_cookie = resp
-        .headers()
-        .get_all("set-cookie")
-        .iter()
-        .any(|v| {
-            v.to_str()
-                .ok()
-                .is_some_and(|s| is_session_cookie_value(&s.to_lowercase()))
-        });
+    let has_session_cookie = resp.headers().get_all("set-cookie").iter().any(|v| {
+        v.to_str()
+            .ok()
+            .is_some_and(|s| is_session_cookie_value(&s.to_lowercase()))
+    });
 
     ResponseHeaderSignals {
         has_www_authenticate,
@@ -1317,10 +1296,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         }
 
         // Server header analysis
-        if let Some(ref server) = headers.server {
-            if let Some(finding) = classify_server_header(ip, port, server) {
-                findings.push(finding);
-            }
+        if let Some(ref server) = headers.server
+            && let Some(finding) = classify_server_header(ip, port, server)
+        {
+            findings.push(finding);
         }
 
         // X-Powered-By framework detection
@@ -1430,29 +1409,30 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
     }
 
     // OPTIONS method enumeration
-    if let Ok(resp) = client.request(reqwest::Method::OPTIONS, &url).send().await {
-        if let Some(allow) = resp.headers().get("allow").and_then(|v| v.to_str().ok()) {
-            findings.extend(classify_http_methods(ip, port, allow));
-        }
+    if let Ok(resp) = client.request(reqwest::Method::OPTIONS, &url).send().await
+        && let Some(allow) = resp.headers().get("allow").and_then(|v| v.to_str().ok())
+    {
+        findings.extend(classify_http_methods(ip, port, allow));
     }
 
     // Probe admin paths with signal-based auth classification
     for path in ADMIN_PATHS {
         let admin_url = format!("{scheme}://{ip}:{port}{path}");
-        if let Ok(resp) = client.get(&admin_url).send().await {
-            if resp.status().as_u16() == 200 {
-                let header_signals = extract_response_header_signals(&resp);
-                let body = resp.text().await.unwrap_or_default();
-                let signals = extract_auth_signals(&body, &header_signals);
-                let classification = classify_auth(&signals);
+        if let Ok(resp) = client.get(&admin_url).send().await
+            && resp.status().as_u16() == 200
+        {
+            let header_signals = extract_response_header_signals(&resp);
+            let body = resp.text().await.unwrap_or_default();
+            let signals = extract_auth_signals(&body, &header_signals);
+            let classification = classify_auth(&signals);
 
-                match classification {
-                    AuthClassification::Protected => {
-                        // Auth detected (login form, OAuth, etc.) — no finding
-                    }
-                    AuthClassification::Exposed => {
-                        let evidence = format_auth_evidence(&signals);
-                        findings.push(
+            match classification {
+                AuthClassification::Protected => {
+                    // Auth detected (login form, OAuth, etc.) — no finding
+                }
+                AuthClassification::Exposed => {
+                    let evidence = format_auth_evidence(&signals);
+                    findings.push(
                             Finding::new(
                                 "http_audit",
                                 &format!(
@@ -1477,32 +1457,29 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                                 &[],
                             )),
                         );
-                    }
-                    AuthClassification::Ambiguous => {
-                        let evidence = format_auth_evidence(&signals);
-                        findings.push(
-                            Finding::new(
-                                "http_audit",
-                                &format!(
-                                    "Possibly exposed admin page at {ip}:{port}{path}"
-                                ),
-                                &format!(
-                                    "The admin path '{path}' on {ip}:{port} returned \
+                }
+                AuthClassification::Ambiguous => {
+                    let evidence = format_auth_evidence(&signals);
+                    findings.push(
+                        Finding::new(
+                            "http_audit",
+                            &format!("Possibly exposed admin page at {ip}:{port}{path}"),
+                            &format!(
+                                "The admin path '{path}' on {ip}:{port} returned \
                                      HTTP 200 but authentication state could not be \
                                      confidently determined. Review manually. {evidence}"
-                                ),
-                                Severity::Medium,
-                            )
-                            .with_ip(ip)
-                            .with_port(port)
-                            .with_service("HTTP")
-                            .with_cwe("CWE-306")
-                            .with_opt_remediation(crate::remediation::get(
-                                "rikitikitavi.http_audit.admin-no-auth",
-                                &[],
-                            )),
-                        );
-                    }
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(ip)
+                        .with_port(port)
+                        .with_service("HTTP")
+                        .with_cwe("CWE-306")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.http_audit.admin-no-auth",
+                            &[],
+                        )),
+                    );
                 }
             }
         }
@@ -2143,7 +2120,8 @@ mod tests {
 
     #[test]
     fn test_parse_csp_basic() {
-        let directives = parse_csp("default-src 'self'; script-src 'unsafe-inline' cdn.example.com");
+        let directives =
+            parse_csp("default-src 'self'; script-src 'unsafe-inline' cdn.example.com");
         assert_eq!(directives.len(), 2);
         assert_eq!(directives[0].name, "default-src");
         assert_eq!(directives[0].sources, vec!["'self'"]);
@@ -2223,12 +2201,7 @@ mod tests {
     fn test_analyze_csp_explicit_object_src() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         // Explicit object-src → no finding regardless of default-src
-        let findings = analyze_csp(
-            ip,
-            443,
-            "default-src https:; object-src 'none'",
-            true,
-        );
+        let findings = analyze_csp(ip, 443, "default-src https:; object-src 'none'", true);
         assert!(!findings.iter().any(|f| f.title.contains("object-src")));
     }
 
@@ -2251,9 +2224,7 @@ mod tests {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         // XFO present → no frame-ancestors finding
         let findings = analyze_csp(ip, 443, "default-src 'self'", true);
-        assert!(!findings
-            .iter()
-            .any(|f| f.title.contains("frame-ancestors")));
+        assert!(!findings.iter().any(|f| f.title.contains("frame-ancestors")));
     }
 
     #[test]
@@ -2261,21 +2232,14 @@ mod tests {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         // Neither XFO nor frame-ancestors → finding
         let findings = analyze_csp(ip, 443, "default-src 'self'", false);
-        assert!(findings
-            .iter()
-            .any(|f| f.title.contains("frame-ancestors")));
+        assert!(findings.iter().any(|f| f.title.contains("frame-ancestors")));
     }
 
     #[test]
     fn test_analyze_csp_default_src_fallback() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         // No explicit script-src → falls back to default-src
-        let findings = analyze_csp(
-            ip,
-            443,
-            "default-src 'self' 'unsafe-inline'",
-            true,
-        );
+        let findings = analyze_csp(ip, 443, "default-src 'self' 'unsafe-inline'", true);
         assert!(findings.iter().any(|f| f.title.contains("unsafe-inline")));
     }
 
@@ -2338,9 +2302,8 @@ mod tests {
 
     #[test]
     fn test_parse_set_cookie_full() {
-        let cookie = parse_set_cookie(
-            "session_id=abc123; Path=/; HttpOnly; Secure; SameSite=Strict",
-        );
+        let cookie =
+            parse_set_cookie("session_id=abc123; Path=/; HttpOnly; Secure; SameSite=Strict");
         assert_eq!(cookie.name, "session_id");
         assert!(cookie.secure);
         assert!(cookie.http_only);

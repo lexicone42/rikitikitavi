@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rikitikitavi_models::ocsf::OcsfFinding;
 use rikitikitavi_models::ScanResults;
+use rikitikitavi_models::ocsf::OcsfFinding;
 
 /// Export scan results as OCSF-compliant NDJSON to a file.
 ///

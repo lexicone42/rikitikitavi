@@ -296,9 +296,7 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_references(refs![
-            "https://www.upnp-hacks.org/",
-        ])
+        .with_references(refs!["https://www.upnp-hacks.org/",])
         .with_opt_remediation(crate::remediation::get(
             "rikitikitavi.ports.upnp-exposed",
             &[],
@@ -329,9 +327,7 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_references(refs![
-            "https://owasp.org/www-project-internet-of-things/",
-        ]),
+        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]),
 
         _ => Finding::new(
             "ports",
@@ -458,19 +454,19 @@ impl Scanner for PortScanner {
             std::collections::HashMap::new();
 
         for task in tasks {
-            if let Ok(result) = task.await {
-                if result.open {
-                    tracing::debug!(ip = %result.ip, port = result.port, "port open");
-                    open_ports_per_host
-                        .entry(result.ip)
-                        .or_default()
-                        .push(result.port);
-                    findings.push(classify_port(
-                        result.ip,
-                        result.port,
-                        result.banner.as_deref(),
-                    ));
-                }
+            if let Ok(result) = task.await
+                && result.open
+            {
+                tracing::debug!(ip = %result.ip, port = result.port, "port open");
+                open_ports_per_host
+                    .entry(result.ip)
+                    .or_default()
+                    .push(result.port);
+                findings.push(classify_port(
+                    result.ip,
+                    result.port,
+                    result.banner.as_deref(),
+                ));
             }
         }
 
@@ -490,9 +486,7 @@ impl Scanner for PortScanner {
                     )
                     .with_ip(*ip)
                     .with_cwe("CWE-284")
-                    .with_references(refs![
-                        "https://attack.mitre.org/techniques/T1046/",
-                    ]),
+                    .with_references(refs!["https://attack.mitre.org/techniques/T1046/",]),
                 );
             }
         }

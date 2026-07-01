@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use rikitikitavi_models::Finding;
 
@@ -11,10 +11,7 @@ use crate::theme::Palette;
 
 /// The Rikki-Tikki-Tavi mascot — four-pawed mongoose with a cobra in its jaws!
 /// Lines above the animated snake line.
-const MONGOOSE_TOP: &[&str] = &[
-    r"     .-------.            ",
-    r"    / o    o  \           ",
-];
+const MONGOOSE_TOP: &[&str] = &[r"     .-------.            ", r"    / o    o  \           "];
 
 /// The mongoose's jaw clenching the cobra — static part before the wiggling tip.
 const SNAKE_FACE: &str = r"   (    .w.    >--~";
@@ -358,7 +355,7 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
 
     // Sort by severity descending so Critical/High appear first
     let mut sorted_findings: Vec<&Finding> = findings.iter().collect();
-    sorted_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+    sorted_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 
     #[allow(clippy::cast_possible_truncation)]
     let snake_frame = (app.tick / 4 % 4) as usize;

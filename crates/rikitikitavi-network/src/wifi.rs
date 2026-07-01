@@ -90,15 +90,15 @@ fn scan_wifi_platform() -> Result<Vec<WifiNetwork>> {
             let mut networks = parse_iwconfig_output(&contents);
 
             // Also try iwlist scan (requires sudo but may already be cached)
-            if let Ok(scan_out) = std::process::Command::new("iwlist").args(["scan"]).output() {
-                if scan_out.status.success() {
-                    let scan_contents = String::from_utf8_lossy(&scan_out.stdout);
-                    let scanned = parse_iwlist_output(&scan_contents);
-                    // Merge, avoiding duplicates by BSSID
-                    for net in scanned {
-                        if !networks.iter().any(|n| n.bssid == net.bssid) {
-                            networks.push(net);
-                        }
+            if let Ok(scan_out) = std::process::Command::new("iwlist").args(["scan"]).output()
+                && scan_out.status.success()
+            {
+                let scan_contents = String::from_utf8_lossy(&scan_out.stdout);
+                let scanned = parse_iwlist_output(&scan_contents);
+                // Merge, avoiding duplicates by BSSID
+                for net in scanned {
+                    if !networks.iter().any(|n| n.bssid == net.bssid) {
+                        networks.push(net);
                     }
                 }
             }
@@ -605,12 +605,11 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
             if let Some(ghz) = rest
                 .strip_suffix(" GHz")
                 .or_else(|| rest.find(" GHz").map(|i| &rest[..i]))
+                && let Ok(freq_ghz) = ghz.trim().parse::<f64>()
             {
-                if let Ok(freq_ghz) = ghz.trim().parse::<f64>() {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        current_freq = (freq_ghz * 1000.0) as u32;
-                    }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    current_freq = (freq_ghz * 1000.0) as u32;
                 }
             }
         }

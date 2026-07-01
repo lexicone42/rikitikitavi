@@ -75,16 +75,17 @@ async fn is_hairpin_nat(public_ip: IpAddr, port: u16, internal_devices: &[IpAddr
 
     // Check if any internal device has the same banner on this port
     for &internal_ip in internal_devices {
-        if let Some(internal_banner) = grab_banner(internal_ip, port).await {
-            if !internal_banner.is_empty() && internal_banner == public_banner {
-                tracing::info!(
-                    %internal_ip,
-                    %public_ip,
-                    port,
-                    "hairpin NAT detected: internal and public banners match"
-                );
-                return true;
-            }
+        if let Some(internal_banner) = grab_banner(internal_ip, port).await
+            && !internal_banner.is_empty()
+            && internal_banner == public_banner
+        {
+            tracing::info!(
+                %internal_ip,
+                %public_ip,
+                port,
+                "hairpin NAT detected: internal and public banners match"
+            );
+            return true;
         }
     }
 

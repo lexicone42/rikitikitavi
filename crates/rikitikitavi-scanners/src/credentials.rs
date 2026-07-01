@@ -364,10 +364,10 @@ fn match_wuftpd(text: &str, raw: &str) -> Option<FtpBanner> {
 /// Classify a `vsFTPd` version — versions below 3.0 have known vulnerabilities.
 fn classify_vsftpd_version_eol(version: &str) -> bool {
     let parts: Vec<&str> = version.split('.').collect();
-    if let Some(major_str) = parts.first() {
-        if let Ok(major) = major_str.parse::<u32>() {
-            return major < 3;
-        }
+    if let Some(major_str) = parts.first()
+        && let Ok(major) = major_str.parse::<u32>()
+    {
+        return major < 3;
     }
     false
 }
@@ -802,11 +802,7 @@ fn extract_html_title(body: &str) -> Option<String> {
     let start = lower.find("<title>")? + 7;
     let end = lower[start..].find("</title>")? + start;
     let title = body[start..end].trim().to_owned();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 /// Parse an FTP PASV response to extract the data port address.
@@ -863,28 +859,27 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
             }
 
             // Old vsFTPd version check
-            if banner.software == "vsFTPd" {
-                if let Some(ref version) = banner.version {
-                    if classify_vsftpd_version_eol(version) {
-                        findings.push(
-                            Finding::new(
-                                "credentials",
-                                &format!("vsFTPd {version} has known vulnerabilities on {ip}"),
-                                &format!(
-                                    "FTP server at {ip}:21 is running vsFTPd {version}. \
+            if banner.software == "vsFTPd"
+                && let Some(ref version) = banner.version
+                && classify_vsftpd_version_eol(version)
+            {
+                findings.push(
+                    Finding::new(
+                        "credentials",
+                        &format!("vsFTPd {version} has known vulnerabilities on {ip}"),
+                        &format!(
+                            "FTP server at {ip}:21 is running vsFTPd {version}. \
                                      Versions below 3.0 have known security vulnerabilities \
                                      including the infamous vsftpd 2.3.4 backdoor. Upgrade \
                                      to vsFTPd 3.0 or later.",
-                                ),
-                                Severity::Medium,
-                            )
-                            .with_ip(ip)
-                            .with_port(21)
-                            .with_service("FTP")
-                            .with_cwe("CWE-1104"),
-                        );
-                    }
-                }
+                        ),
+                        Severity::Medium,
+                    )
+                    .with_ip(ip)
+                    .with_port(21)
+                    .with_service("FTP")
+                    .with_cwe("CWE-1104"),
+                );
             }
         }
 
@@ -1023,7 +1018,7 @@ impl Scanner for CredentialScanner {
                             .with_port(23)
                             .with_service("Telnet")
                             .with_cwe("CWE-1393")
-                            .with_evidence(format!("Post-login output: {}", result.post_login,))
+                            .with_evidence(format!("Post-login output: {}", result.post_login))
                             .with_opt_remediation(
                                 crate::remediation::get(
                                     "rikitikitavi.credentials.telnet-default-confirmed",
@@ -1084,9 +1079,7 @@ impl Scanner for CredentialScanner {
                         .with_port(445)
                         .with_service("SMB")
                         .with_cwe("CWE-287")
-                        .with_references(refs![
-                            "https://attack.mitre.org/techniques/T1021/002/",
-                        ])
+                        .with_references(refs!["https://attack.mitre.org/techniques/T1021/002/",])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.smb-exposed",
                             &[],
@@ -1111,9 +1104,7 @@ impl Scanner for CredentialScanner {
                         .with_port(3389)
                         .with_service("RDP")
                         .with_cwe("CWE-287")
-                        .with_references(refs![
-                            "https://attack.mitre.org/techniques/T1021/001/",
-                        ])
+                        .with_references(refs!["https://attack.mitre.org/techniques/T1021/001/",])
                         .with_opt_remediation(crate::remediation::get(
                             "rikitikitavi.credentials.rdp-exposed",
                             &[],
@@ -1130,14 +1121,15 @@ impl Scanner for CredentialScanner {
                     .collect();
 
                 for port in http_ports {
-                    if let Some(result) = check_http_no_auth(ip, port).await {
-                        if result.no_auth {
-                            let label = if ctx.gateway == Some(ip) {
-                                "Router admin panel"
-                            } else {
-                                "Web admin panel"
-                            };
-                            let mut finding = Finding::new(
+                    if let Some(result) = check_http_no_auth(ip, port).await
+                        && result.no_auth
+                    {
+                        let label = if ctx.gateway == Some(ip) {
+                            "Router admin panel"
+                        } else {
+                            "Web admin panel"
+                        };
+                        let mut finding = Finding::new(
                                 "credentials",
                                 &format!("{label} without auth on {ip}:{port}"),
                                 &format!(
@@ -1159,11 +1151,10 @@ impl Scanner for CredentialScanner {
                                     &[],
                                 ),
                             );
-                            if let Some(evidence) = result.evidence {
-                                finding = finding.with_evidence(evidence);
-                            }
-                            findings.push(finding);
+                        if let Some(evidence) = result.evidence {
+                            finding = finding.with_evidence(evidence);
                         }
+                        findings.push(finding);
                     }
                 }
             }
@@ -1198,32 +1189,30 @@ impl Scanner for CredentialScanner {
 
             if ctx.gateway == Some(ip) {
                 for &port in &[80, 443, 8080, 8443] {
-                    if let Some(result) = check_http_no_auth(ip, port).await {
-                        if result.no_auth {
-                            let mut finding = Finding::new(
-                                "credentials",
-                                &format!("Router admin panel without auth on {ip}:{port}"),
-                                &format!(
-                                    "The router admin panel at {ip}:{port} returned \
+                    if let Some(result) = check_http_no_auth(ip, port).await
+                        && result.no_auth
+                    {
+                        let mut finding = Finding::new(
+                            "credentials",
+                            &format!("Router admin panel without auth on {ip}:{port}"),
+                            &format!(
+                                "The router admin panel at {ip}:{port} returned \
                                      HTTP 200 without requiring authentication."
-                                ),
-                                Severity::Medium,
-                            )
-                            .with_ip(ip)
-                            .with_port(port)
-                            .with_service("HTTP")
-                            .with_cwe("CWE-306")
-                            .with_opt_remediation(
-                                crate::remediation::get(
-                                    "rikitikitavi.credentials.http-no-auth",
-                                    &[],
-                                ),
-                            );
-                            if let Some(evidence) = result.evidence {
-                                finding = finding.with_evidence(evidence);
-                            }
-                            findings.push(finding);
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(ip)
+                        .with_port(port)
+                        .with_service("HTTP")
+                        .with_cwe("CWE-306")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.credentials.http-no-auth",
+                            &[],
+                        ));
+                        if let Some(evidence) = result.evidence {
+                            finding = finding.with_evidence(evidence);
                         }
+                        findings.push(finding);
                     }
                 }
             }
@@ -1704,15 +1693,15 @@ mod tests {
 
     #[test]
     fn test_has_session_cookie_header_jsessionid() {
-        let response =
-            "http/1.1 200 ok\r\nset-cookie: jsessionid=xyz; secure\r\n\r\n<html></html>";
+        let response = "http/1.1 200 ok\r\nset-cookie: jsessionid=xyz; secure\r\n\r\n<html></html>";
         assert!(has_session_cookie_header(response));
     }
 
     #[test]
     fn test_has_session_cookie_header_tracking_cookie() {
         // A tracking cookie should NOT be treated as a session cookie
-        let response = "http/1.1 200 ok\r\nset-cookie: _ga=ga1.2.12345; path=/\r\n\r\n<html></html>";
+        let response =
+            "http/1.1 200 ok\r\nset-cookie: _ga=ga1.2.12345; path=/\r\n\r\n<html></html>";
         assert!(!has_session_cookie_header(response));
     }
 
@@ -1724,14 +1713,14 @@ mod tests {
 
     #[test]
     fn test_is_thin_redirect_location_replace() {
-        let body = r#"<html><script>location.replace("https://192.168.1.220:5001/")</script></html>"#;
+        let body =
+            r#"<html><script>location.replace("https://192.168.1.220:5001/")</script></html>"#;
         assert!(is_thin_redirect(&body.to_lowercase()));
     }
 
     #[test]
     fn test_is_thin_redirect_location_href() {
-        let body =
-            r#"<html><script>location.href="https://192.168.1.220:5001/"</script></html>"#;
+        let body = r#"<html><script>location.href="https://192.168.1.220:5001/"</script></html>"#;
         assert!(is_thin_redirect(&body.to_lowercase()));
     }
 

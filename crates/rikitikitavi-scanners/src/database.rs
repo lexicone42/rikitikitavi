@@ -67,16 +67,14 @@ async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
             let mut info_buf = vec![0u8; 4096];
             if let Ok(Ok(info_n)) =
                 tokio::time::timeout(READ_TIMEOUT, stream.read(&mut info_buf)).await
+                && info_n > 0
             {
-                if info_n > 0 {
-                    // Parse the RESP bulk string containing INFO output
-                    let info = parse_resp_value(&info_buf[..info_n])
-                        .and_then(|(val, _)| match val {
-                            RespValue::BulkString(s) => Some(parse_redis_info(&s)),
-                            _ => None,
-                        });
-                    return Some(RedisResult::NoAuth(info));
-                }
+                // Parse the RESP bulk string containing INFO output
+                let info = parse_resp_value(&info_buf[..info_n]).and_then(|(val, _)| match val {
+                    RespValue::BulkString(s) => Some(parse_redis_info(&s)),
+                    _ => None,
+                });
+                return Some(RedisResult::NoAuth(info));
             }
         }
         return Some(RedisResult::NoAuth(None));
@@ -228,10 +226,10 @@ fn classify_redis_response(response: &str) -> RedisResult {
 /// security patches.
 fn classify_redis_version_eol(version: &str) -> bool {
     let parts: Vec<&str> = version.split('.').collect();
-    if let Some(major_str) = parts.first() {
-        if let Ok(major) = major_str.parse::<u32>() {
-            return major < 7;
-        }
+    if let Some(major_str) = parts.first()
+        && let Ok(major) = major_str.parse::<u32>()
+    {
+        return major < 7;
     }
     false
 }
@@ -381,8 +379,10 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
         });
     }
 
-    let cap_lower =
-        u32::from(u16::from_le_bytes([packet[cap_lower_pos], packet[cap_lower_pos + 1]]));
+    let cap_lower = u32::from(u16::from_le_bytes([
+        packet[cap_lower_pos],
+        packet[cap_lower_pos + 1],
+    ]));
 
     // character_set(1) + status_flags(2) + capability_flags_upper(2) + auth_plugin_data_len(1) + reserved(10) = 16
     if packet.len() < cap_lower_pos + 2 + 16 {
@@ -400,8 +400,10 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
     let status_pos = cap_lower_pos + 3;
     let status_flags = u16::from_le_bytes([packet[status_pos], packet[status_pos + 1]]);
     let cap_upper_pos = status_pos + 2;
-    let cap_upper =
-        u32::from(u16::from_le_bytes([packet[cap_upper_pos], packet[cap_upper_pos + 1]]));
+    let cap_upper = u32::from(u16::from_le_bytes([
+        packet[cap_upper_pos],
+        packet[cap_upper_pos + 1],
+    ]));
     let capability_flags = cap_lower | (cap_upper << 16);
 
     let auth_plugin_data_len = packet[cap_upper_pos + 2];
@@ -654,25 +656,25 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                 );
 
                 // EOL version finding
-                if let Some(ref version) = info.as_ref().and_then(|i| i.version.clone()) {
-                    if classify_redis_version_eol(version) {
-                        findings.push(
-                            Finding::new(
-                                "database",
-                                &format!("Redis {version} is end-of-life on {ip}:{port}"),
-                                &format!(
-                                    "Redis at {ip}:{port} is running version {version}, \
+                if let Some(ref version) = info.as_ref().and_then(|i| i.version.clone())
+                    && classify_redis_version_eol(version)
+                {
+                    findings.push(
+                        Finding::new(
+                            "database",
+                            &format!("Redis {version} is end-of-life on {ip}:{port}"),
+                            &format!(
+                                "Redis at {ip}:{port} is running version {version}, \
                                      which is end-of-life and no longer receives security \
                                      patches. Upgrade to Redis 7.0 or later.",
-                                ),
-                                Severity::Medium,
-                            )
-                            .with_ip(*ip)
-                            .with_port(port)
-                            .with_service("Redis")
-                            .with_cwe("CWE-1104"),
-                        );
-                    }
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(*ip)
+                        .with_port(port)
+                        .with_service("Redis")
+                        .with_cwe("CWE-1104"),
+                    );
                 }
             }
             RedisResult::AuthRequired => {
@@ -900,20 +902,20 @@ fn check_postgresql_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>
 fn classify_mysql_version(version: &str) -> Severity {
     // Extract major.minor version
     let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() >= 2 {
-        if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-            // MySQL 5.5 and below: end of life
-            if major < 5 || (major == 5 && minor <= 5) {
-                return Severity::High;
-            }
-            // MySQL 5.6: end of life since Feb 2021
-            if major == 5 && minor == 6 {
-                return Severity::High;
-            }
-            // MySQL 5.7: end of life since Oct 2023
-            if major == 5 && minor == 7 {
-                return Severity::Medium;
-            }
+    if parts.len() >= 2
+        && let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+    {
+        // MySQL 5.5 and below: end of life
+        if major < 5 || (major == 5 && minor <= 5) {
+            return Severity::High;
+        }
+        // MySQL 5.6: end of life since Feb 2021
+        if major == 5 && minor == 6 {
+            return Severity::High;
+        }
+        // MySQL 5.7: end of life since Oct 2023
+        if major == 5 && minor == 7 {
+            return Severity::Medium;
         }
     }
     // MariaDB or current MySQL: just informational
@@ -1084,10 +1086,7 @@ used_memory_human:1.23M\r\n";
 
         let info = parse_redis_info(info_text);
         assert_eq!(info.version.as_deref(), Some("7.2.4"));
-        assert_eq!(
-            info.os.as_deref(),
-            Some("Linux 6.1.0-18-amd64 x86_64")
-        );
+        assert_eq!(info.os.as_deref(), Some("Linux 6.1.0-18-amd64 x86_64"));
         assert_eq!(info.tcp_port, Some(6379));
         assert_eq!(info.connected_clients, Some(3));
         assert_eq!(info.used_memory_human.as_deref(), Some("1.23M"));

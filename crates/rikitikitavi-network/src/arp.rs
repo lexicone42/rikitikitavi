@@ -192,9 +192,11 @@ IP address       HW type     Flags       HW address            Mask     Device
     #[test]
     fn test_parse_linux_arp_filters_incomplete() {
         let entries = parse_linux_arp_cache(SAMPLE_LINUX_ARP);
-        assert!(!entries
-            .iter()
-            .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)) }));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)) })
+        );
     }
 
     #[test]
@@ -246,17 +248,21 @@ myhost.local (10.0.0.50) at de:ad:be:ef:00:02 on en1 [ethernet]
     #[test]
     fn test_parse_macos_arp_filters_incomplete() {
         let entries = parse_macos_arp(SAMPLE_MACOS_ARP);
-        assert!(!entries
-            .iter()
-            .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)) }));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)) })
+        );
     }
 
     #[test]
     fn test_parse_macos_arp_filters_broadcast() {
         let entries = parse_macos_arp(SAMPLE_MACOS_ARP);
-        assert!(!entries
-            .iter()
-            .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)) }));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| { e.ip == IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)) })
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! On Linux, creates a virtual monitor interface preserving the existing connection.
 //! On macOS, uses pcap's rfmon mode which disconnects `WiFi`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::Command;
 
 // ── Public types ────────────────────────────────────────────────────────

@@ -17,10 +17,10 @@ pub fn poll_event(timeout: Duration) -> Result<Option<Event>> {
 /// auto-scroll. Filters `Release` events to avoid double-handling on
 /// terminals with kitty keyboard protocol support.
 pub fn as_key_press(event: &Event) -> Option<&KeyEvent> {
-    if let Event::Key(key) = event {
-        if key.kind != crossterm::event::KeyEventKind::Release {
-            return Some(key);
-        }
+    if let Event::Key(key) = event
+        && key.kind != crossterm::event::KeyEventKind::Release
+    {
+        return Some(key);
     }
     None
 }

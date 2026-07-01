@@ -618,7 +618,7 @@ mod tests {
         // Channel: u16 freq + u16 flags (2-byte aligned — after flags+rate=2 bytes, offset is 8+8+2=18, already aligned)
         fields.extend_from_slice(&2437u16.to_le_bytes()); // 2437 MHz = channel 6
         fields.extend_from_slice(&[0x00, 0x00]); // channel flags
-                                                 // Signal: i8
+        // Signal: i8
         fields.push((-50_i8).to_ne_bytes()[0]);
 
         let data = build_radiotap(present, &fields);

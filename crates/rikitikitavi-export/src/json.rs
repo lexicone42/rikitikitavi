@@ -55,10 +55,12 @@ mod tests {
 
     #[test]
     fn test_json_roundtrip() {
-        let findings = vec![Finding::new("scanner", "Test", "Desc", Severity::Medium)
-            .with_ip("10.0.0.1".parse().unwrap())
-            .with_port(443)
-            .with_cwe("CWE-295")];
+        let findings = vec![
+            Finding::new("scanner", "Test", "Desc", Severity::Medium)
+                .with_ip("10.0.0.1".parse().unwrap())
+                .with_port(443)
+                .with_cwe("CWE-295"),
+        ];
         let results = make_results(findings);
         let json = to_json_string(&results).unwrap();
         let recovered: ScanResults = serde_json::from_str(&json).unwrap();

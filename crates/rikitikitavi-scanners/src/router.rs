@@ -59,10 +59,10 @@ async fn check_upnp(ip: IpAddr) -> bool {
     ];
 
     for url in &urls {
-        if let Ok(resp) = client.get(url).send().await {
-            if resp.status().is_success() {
-                return true;
-            }
+        if let Ok(resp) = client.get(url).send().await
+            && resp.status().is_success()
+        {
+            return true;
         }
     }
     false

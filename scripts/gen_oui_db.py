@@ -269,6 +269,10 @@ fn parse_mac_prefix(s: &str) -> Option<[u8; 3]> {{
 
 /// Sorted array of (OUI prefix bytes, vendor name).
 /// Binary search: O(log {len(entries):,}) ≈ {len(entries).bit_length()} comparisons.
+///
+/// `rustfmt::skip` keeps this generated table one-entry-per-line; without it
+/// rustfmt wraps long vendor rows and produces thousands of lines of churn.
+#[rustfmt::skip]
 static OUI_DB: &[([u8; 3], &str)] = &[
 """)
 

@@ -618,33 +618,33 @@ impl Scanner for SmbScanner {
             }
 
             // Check for anonymous/null session access
-            if let Some(result) = check_null_session(ip, 445).await {
-                if result.allowed {
-                    let mut finding = Finding::new(
-                        "smb",
-                        &format!("SMB null session allowed on {ip}:445"),
-                        &format!(
-                            "Host {ip} accepts anonymous SMBv2 session setup (null session). \
+            if let Some(result) = check_null_session(ip, 445).await
+                && result.allowed
+            {
+                let mut finding = Finding::new(
+                    "smb",
+                    &format!("SMB null session allowed on {ip}:445"),
+                    &format!(
+                        "Host {ip} accepts anonymous SMBv2 session setup (null session). \
                              This allows unauthenticated users to enumerate shares, users, \
                              and other sensitive information."
-                        ),
-                        Severity::High,
-                    )
-                    .with_ip(ip)
-                    .with_port(445)
-                    .with_service("SMB")
-                    .with_cwe("CWE-287")
-                    .with_opt_remediation(crate::remediation::get(
-                        "rikitikitavi.smb.null-session",
-                        &[],
+                    ),
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(445)
+                .with_service("SMB")
+                .with_cwe("CWE-287")
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.smb.null-session",
+                    &[],
+                ));
+                if let Some(sid) = result.session_id {
+                    finding = finding.with_evidence(format!(
+                        "Anonymous SMBv2 session established (session ID: {sid:#x})"
                     ));
-                    if let Some(sid) = result.session_id {
-                        finding = finding.with_evidence(format!(
-                            "Anonymous SMBv2 session established (session ID: {sid:#x})"
-                        ));
-                    }
-                    findings.push(finding);
                 }
+                findings.push(finding);
             }
 
             // Check NetBIOS on port 139
@@ -664,9 +664,7 @@ impl Scanner for SmbScanner {
                     .with_port(139)
                     .with_service("NetBIOS")
                     .with_cwe("CWE-200")
-                    .with_references(refs![
-                        "https://attack.mitre.org/techniques/T1046/",
-                    ])
+                    .with_references(refs!["https://attack.mitre.org/techniques/T1046/",])
                     .with_opt_remediation(crate::remediation::get(
                         "rikitikitavi.smb.netbios-exposed",
                         &[],

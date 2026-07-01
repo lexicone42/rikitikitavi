@@ -77,7 +77,10 @@ fn manufacturer_override_device_type(
     upnp_type: DeviceType,
 ) -> DeviceType {
     let mfr_lower = manufacturer.to_lowercase();
-    if mfr_lower.contains("synology") || mfr_lower.contains("qnap") || mfr_lower.contains("western digital") {
+    if mfr_lower.contains("synology")
+        || mfr_lower.contains("qnap")
+        || mfr_lower.contains("western digital")
+    {
         return DeviceType::Nas;
     }
     if mfr_lower.contains("lg electronics") {
@@ -166,9 +169,7 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
             .with_ip(ip)
             .with_service("UPnP")
             .with_cwe("CWE-200")
-            .with_references(refs![
-                "https://owasp.org/www-project-internet-of-things/",
-            ]),
+            .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]),
         );
     }
 
@@ -281,9 +282,7 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     .with_cwe("CWE-284");
 
     if svc_type.contains("InternetGatewayDevice") {
-        finding = finding.with_device_hint(
-            DeviceHint::new().with_device_type(DeviceType::Router),
-        );
+        finding = finding.with_device_hint(DeviceHint::new().with_device_type(DeviceType::Router));
     }
 
     finding
@@ -373,19 +372,22 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
     // Classify by service type
     if svc_type.contains("_ssh._tcp") {
         let mut finding = Finding::new(
-                "mdns",
-                &format!("SSH service advertised: {display_name} on {ip}:{}", service.port),
-                &format!(
-                    "{base_desc} SSH access advertised via mDNS makes this host \
+            "mdns",
+            &format!(
+                "SSH service advertised: {display_name} on {ip}:{}",
+                service.port
+            ),
+            &format!(
+                "{base_desc} SSH access advertised via mDNS makes this host \
                      easily discoverable. Ensure strong authentication (key-based) \
                      is required and password auth is disabled."
-                ),
-                Severity::Low,
-            )
-            .with_ip(ip)
-            .with_port(service.port)
-            .with_service("SSH")
-            .with_cwe("CWE-200");
+            ),
+            Severity::Low,
+        )
+        .with_ip(ip)
+        .with_port(service.port)
+        .with_service("SSH")
+        .with_cwe("CWE-200");
         if let Some(h) = hint_hostname {
             finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
         }
@@ -402,32 +404,37 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         };
 
         let mut finding = Finding::new(
-                "mdns",
-                &format!("HTTP service advertised: {display_name} on {ip}:{}", service.port),
-                &format!(
-                    "{base_desc} HTTP service discovered via mDNS. Web interfaces \
+            "mdns",
+            &format!(
+                "HTTP service advertised: {display_name} on {ip}:{}",
+                service.port
+            ),
+            &format!(
+                "{base_desc} HTTP service discovered via mDNS. Web interfaces \
                      may expose admin panels, configuration pages, or APIs."
-                ),
-                severity,
-            )
-            .with_ip(ip)
-            .with_port(service.port)
-            .with_service("HTTP")
-            .with_cwe("CWE-200")
-            .with_references(refs![
-                "https://owasp.org/www-project-internet-of-things/",
-            ]);
+            ),
+            severity,
+        )
+        .with_ip(ip)
+        .with_port(service.port)
+        .with_service("HTTP")
+        .with_cwe("CWE-200")
+        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]);
         if let Some(h) = hint_hostname {
             finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
         }
         findings.push(finding);
     } else if svc_type.contains("_ipp._tcp") || svc_type.contains("_printer._tcp") {
-        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+        let hint = hint_hostname
+            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
             .with_device_type(DeviceType::Printer);
         findings.push(
             Finding::new(
                 "mdns",
-                &format!("Printer service advertised: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "Printer service advertised: {display_name} on {ip}:{}",
+                    service.port
+                ),
                 &format!(
                     "{base_desc} Network printers can leak document contents, \
                      user information, and internal network details through their \
@@ -439,26 +446,27 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_port(service.port)
             .with_service("IPP")
             .with_cwe("CWE-200")
-            .with_references(refs![
-                "https://owasp.org/www-project-internet-of-things/",
-            ])
+            .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {
         let mut finding = Finding::new(
-                "mdns",
-                &format!("File sharing service: {display_name} on {ip}:{}", service.port),
-                &format!(
-                    "{base_desc} File sharing service discovered via mDNS. \
+            "mdns",
+            &format!(
+                "File sharing service: {display_name} on {ip}:{}",
+                service.port
+            ),
+            &format!(
+                "{base_desc} File sharing service discovered via mDNS. \
                      Shared folders may expose sensitive documents or allow \
                      unauthorized access if permissions are misconfigured."
-                ),
-                Severity::Low,
-            )
-            .with_ip(ip)
-            .with_port(service.port)
-            .with_service("SMB")
-            .with_cwe("CWE-732");
+            ),
+            Severity::Low,
+        )
+        .with_ip(ip)
+        .with_port(service.port)
+        .with_service("SMB")
+        .with_cwe("CWE-732");
         if let Some(h) = hint_hostname {
             finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
         }
@@ -466,12 +474,17 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
     } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
         let airplay_type = if display_name.contains("MacBook") || display_name.contains("macbook") {
             DeviceType::Laptop
-        } else if display_name.contains("iMac") || display_name.contains("Mac Pro") || display_name.contains("Mac mini") || display_name.contains("Mac Studio") {
+        } else if display_name.contains("iMac")
+            || display_name.contains("Mac Pro")
+            || display_name.contains("Mac mini")
+            || display_name.contains("Mac Studio")
+        {
             DeviceType::Desktop
         } else {
             DeviceType::MediaPlayer
         };
-        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+        let hint = hint_hostname
+            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
             .with_device_type(airplay_type);
         findings.push(
             Finding::new(
@@ -490,12 +503,16 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_googlecast._tcp") {
-        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+        let hint = hint_hostname
+            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
             .with_device_type(DeviceType::MediaPlayer);
         findings.push(
             Finding::new(
                 "mdns",
-                &format!("Chromecast/Google Cast: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "Chromecast/Google Cast: {display_name} on {ip}:{}",
+                    service.port
+                ),
                 &format!(
                     "{base_desc} Google Cast device allows media casting from \
                      any device on the network."
@@ -508,7 +525,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_hap._tcp") {
-        let hint = hint_hostname.map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
+        let hint = hint_hostname
+            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
             .with_device_type(DeviceType::IoT);
         findings.push(
             Finding::new(
@@ -530,14 +548,17 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
     } else {
         // Generic mDNS service
         let mut finding = Finding::new(
-                "mdns",
-                &format!("mDNS service: {display_name} ({svc_type}) on {ip}:{}", service.port),
-                &base_desc,
-                Severity::Info,
-            )
-            .with_ip(ip)
-            .with_port(service.port)
-            .with_service("mDNS");
+            "mdns",
+            &format!(
+                "mDNS service: {display_name} ({svc_type}) on {ip}:{}",
+                service.port
+            ),
+            &base_desc,
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(service.port)
+        .with_service("mDNS");
         if let Some(h) = hint_hostname {
             finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
         }
@@ -619,10 +640,7 @@ impl Scanner for MdnsScanner {
         // mDNS discovery — proper DNS packet parsing via network crate
         match rikitikitavi_network::discover_services(3).await {
             Ok(mdns_services) => {
-                tracing::info!(
-                    mdns_count = mdns_services.len(),
-                    "mDNS discovery complete"
-                );
+                tracing::info!(mdns_count = mdns_services.len(), "mDNS discovery complete");
                 for service in &mdns_services {
                     findings.extend(classify_mdns_service(service));
                 }

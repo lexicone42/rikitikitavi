@@ -518,7 +518,8 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
         ptr_records.iter().map(|(_, t)| *t).collect();
 
     let mut services = Vec::new();
-    let mut seen: std::collections::HashSet<(String, u16, String)> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, u16, String)> =
+        std::collections::HashSet::new();
 
     // Build services from PTR → SRV → A/TXT chain
     for (service_type, instance_name) in &ptr_records {
@@ -551,35 +552,31 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     // Build services from direct SRV records (not referenced by any PTR)
     for (_, record) in records {
         if let DnsRecord::Srv {
-            name,
-            target,
-            port,
-            ..
+            name, target, port, ..
         } = record
+            && !ptr_targets.contains(name.as_str())
         {
-            if !ptr_targets.contains(name.as_str()) {
-                let ip = resolve_ip(&a_records, &aaaa_records, target.as_str(), records);
-                let txt = txt_records
-                    .get(name.as_str())
-                    .map_or_else(Vec::new, |e| e.to_vec());
+            let ip = resolve_ip(&a_records, &aaaa_records, target.as_str(), records);
+            let txt = txt_records
+                .get(name.as_str())
+                .map_or_else(Vec::new, |e| e.to_vec());
 
-                let service_type = extract_service_type(name);
-                let key = (ip.to_string(), *port, service_type.clone());
-                if seen.insert(key) {
-                    let friendly_name = name
-                        .strip_suffix(&service_type)
-                        .and_then(|s| s.strip_suffix('.'))
-                        .unwrap_or(name);
+            let service_type = extract_service_type(name);
+            let key = (ip.to_string(), *port, service_type.clone());
+            if seen.insert(key) {
+                let friendly_name = name
+                    .strip_suffix(&service_type)
+                    .and_then(|s| s.strip_suffix('.'))
+                    .unwrap_or(name);
 
-                    services.push(MdnsService {
-                        name: friendly_name.to_owned(),
-                        service_type,
-                        hostname: target.to_owned(),
-                        ip,
-                        port: *port,
-                        txt_records: txt,
-                    });
-                }
+                services.push(MdnsService {
+                    name: friendly_name.to_owned(),
+                    service_type,
+                    hostname: target.to_owned(),
+                    ip,
+                    port: *port,
+                    txt_records: txt,
+                });
             }
         }
     }
@@ -892,11 +889,7 @@ mod tests {
 
     #[test]
     fn test_parse_ptr_record() {
-        let data = build_ptr_record(
-            "_ipp._tcp.local",
-            "My Printer._ipp._tcp.local",
-            4500,
-        );
+        let data = build_ptr_record("_ipp._tcp.local", "My Printer._ipp._tcp.local", 4500);
         let (record, _) = parse_resource_record(&data, 0).unwrap();
         assert_eq!(
             record,
@@ -1000,10 +993,30 @@ mod tests {
         assert_eq!(parsed.records.len(), 4);
 
         // Verify we got one of each type
-        assert!(parsed.records.iter().any(|r| matches!(r, DnsRecord::Ptr { .. })));
-        assert!(parsed.records.iter().any(|r| matches!(r, DnsRecord::Srv { .. })));
-        assert!(parsed.records.iter().any(|r| matches!(r, DnsRecord::Txt { .. })));
-        assert!(parsed.records.iter().any(|r| matches!(r, DnsRecord::A { .. })));
+        assert!(
+            parsed
+                .records
+                .iter()
+                .any(|r| matches!(r, DnsRecord::Ptr { .. }))
+        );
+        assert!(
+            parsed
+                .records
+                .iter()
+                .any(|r| matches!(r, DnsRecord::Srv { .. }))
+        );
+        assert!(
+            parsed
+                .records
+                .iter()
+                .any(|r| matches!(r, DnsRecord::Txt { .. }))
+        );
+        assert!(
+            parsed
+                .records
+                .iter()
+                .any(|r| matches!(r, DnsRecord::A { .. }))
+        );
     }
 
     #[test]
@@ -1023,7 +1036,9 @@ mod tests {
 
         let parsed = parse_dns_packet(&packet).unwrap();
         assert_eq!(parsed.records.len(), 1);
-        assert!(matches!(&parsed.records[0], DnsRecord::Ptr { target, .. } if target == "printer._ipp._tcp.local"));
+        assert!(
+            matches!(&parsed.records[0], DnsRecord::Ptr { target, .. } if target == "printer._ipp._tcp.local")
+        );
     }
 
     #[test]
@@ -1199,10 +1214,7 @@ mod tests {
 
     #[test]
     fn test_extract_service_type_no_instance() {
-        assert_eq!(
-            extract_service_type("_ipp._tcp.local"),
-            "_ipp._tcp.local"
-        );
+        assert_eq!(extract_service_type("_ipp._tcp.local"), "_ipp._tcp.local");
     }
 
     #[test]

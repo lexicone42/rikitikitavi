@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 
-use crate::oui_db::ieee_oui_lookup;
 use crate::Scanner;
+use crate::oui_db::ieee_oui_lookup;
 
 /// Device fingerprinting scanner — identifies device types via MAC OUI lookup
 /// and open port profiling.
@@ -46,7 +46,9 @@ const fn vendor_to_device_type(vendor: &str) -> DeviceType {
         b"Sonos" | b"Roku" | b"D&M" => DeviceType::MediaPlayer,
         b"Sony" | b"Nintendo" => DeviceType::GameConsole,
         b"Ring" => DeviceType::Camera,
-        b"Signify" | b"Philips Lighting" | b"Espressif" | b"AI-Link" | b"TI" | b"Amazon" => DeviceType::IoT,
+        b"Signify" | b"Philips Lighting" | b"Espressif" | b"AI-Link" | b"TI" | b"Amazon" => {
+            DeviceType::IoT
+        }
         b"HP" => DeviceType::Printer,
         b"Raspberry Pi" => DeviceType::Server,
         b"Ubiquiti" => DeviceType::Switch,

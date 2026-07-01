@@ -1,7 +1,8 @@
 use async_trait::async_trait;
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::{Resolver, TokioResolver};
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
 use std::net::IpAddr;
@@ -48,15 +49,13 @@ fn parse_scutil_dns_nameservers(contents: &str) -> Vec<IpAddr> {
             break;
         }
 
-        if in_default_resolver {
-            if let Some(rest) = trimmed.strip_prefix("nameserver[") {
-                // Format: "nameserver[0] : 192.168.1.1" or "nameserver[1] : fd00::1"
-                // Split on " : " (the scutil delimiter), not bare ":" which breaks IPv6.
-                if let Some(ip_str) = rest.split_once(" : ").map(|(_, v)| v) {
-                    if let Ok(ip) = ip_str.trim().parse() {
-                        nameservers.push(ip);
-                    }
-                }
+        if in_default_resolver && let Some(rest) = trimmed.strip_prefix("nameserver[") {
+            // Format: "nameserver[0] : 192.168.1.1" or "nameserver[1] : fd00::1"
+            // Split on " : " (the scutil delimiter), not bare ":" which breaks IPv6.
+            if let Some(ip_str) = rest.split_once(" : ").map(|(_, v)| v)
+                && let Ok(ip) = ip_str.trim().parse()
+            {
+                nameservers.push(ip);
             }
         }
     }
@@ -80,14 +79,13 @@ fn parse_scutil_dns_search_domain(contents: &str) -> Option<String> {
             break;
         }
 
-        if in_default_resolver {
-            if let Some(rest) = trimmed.strip_prefix("search domain[") {
-                // Format: "search domain[0] : home.arpa"
-                if let Some(domain) = rest.split_once(" : ").map(|(_, v)| v.trim()) {
-                    if !domain.is_empty() && domain.contains('.') {
-                        return Some(domain.to_owned());
-                    }
-                }
+        if in_default_resolver && let Some(rest) = trimmed.strip_prefix("search domain[") {
+            // Format: "search domain[0] : home.arpa"
+            if let Some(domain) = rest.split_once(" : ").map(|(_, v)| v.trim())
+                && !domain.is_empty()
+                && domain.contains('.')
+            {
+                return Some(domain.to_owned());
             }
         }
     }
@@ -102,17 +100,16 @@ fn parse_scutil_dns_search_domain(contents: &str) -> Option<String> {
 fn read_nameservers() -> Vec<IpAddr> {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = std::process::Command::new("scutil")
-            .arg("--dns")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("scutil").arg("--dns").output() {
             if output.status.success() {
                 let contents = String::from_utf8_lossy(&output.stdout);
                 let ns = parse_scutil_dns_nameservers(&contents);
                 if !ns.is_empty() {
                     return ns;
                 }
-                tracing::debug!("scutil --dns returned no nameservers, falling back to resolv.conf");
+                tracing::debug!(
+                    "scutil --dns returned no nameservers, falling back to resolv.conf"
+                );
             }
         }
     }
@@ -126,6 +123,32 @@ fn read_nameservers() -> Vec<IpAddr> {
     }
 }
 
+/// Build a Tokio DNS resolver targeting the given nameservers.
+///
+/// Uses a 5-second timeout, a single attempt, and leaves DNSSEC validation
+/// disabled locally so scanners can observe what the upstream resolver does.
+fn build_resolver(nameservers: &[IpAddr]) -> Option<TokioResolver> {
+    let servers = nameservers
+        .iter()
+        .copied()
+        .map(NameServerConfig::udp_and_tcp)
+        .collect();
+    let config = ResolverConfig::from_parts(None, Vec::new(), servers);
+    let mut opts = ResolverOpts::default();
+    opts.timeout = std::time::Duration::from_secs(5);
+    opts.attempts = 1;
+    match Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+    {
+        Ok(resolver) => Some(resolver),
+        Err(e) => {
+            tracing::warn!("failed to build DNS resolver: {e}");
+            None
+        }
+    }
+}
+
 /// Check DNSSEC validation by resolving `dnssec-failed.org`.
 ///
 /// This domain has an intentionally broken DNSSEC signature.
@@ -135,15 +158,9 @@ async fn check_dnssec_validation(nameservers: &[IpAddr]) -> Option<bool> {
         return None;
     }
 
-    // Build a resolver using the system's nameservers
-    let ns_group = NameServerConfigGroup::from_ips_clear(nameservers, 53, true);
-    let config = ResolverConfig::from_parts(None, Vec::new(), ns_group);
-    let mut opts = ResolverOpts::default();
-    opts.validate = false; // Don't validate locally — we want to see what the upstream does
-    opts.timeout = std::time::Duration::from_secs(5);
-    opts.attempts = 1;
-
-    let resolver = TokioAsyncResolver::tokio(config, opts);
+    // Build a resolver using the system's nameservers. DNSSEC validation stays
+    // disabled locally so we can observe what the upstream resolver does.
+    let resolver = build_resolver(nameservers)?;
     resolver.lookup_ip("dnssec-failed.org.").await.map_or(
         // Lookup failed (SERVFAIL) = DNSSEC validation IS enforced
         Some(true),
@@ -166,13 +183,9 @@ async fn check_dns_rebinding(nameservers: &[IpAddr], findings: &mut Vec<Finding>
         return;
     }
 
-    let ns_group = NameServerConfigGroup::from_ips_clear(nameservers, 53, true);
-    let config = ResolverConfig::from_parts(None, Vec::new(), ns_group);
-    let mut opts = ResolverOpts::default();
-    opts.timeout = std::time::Duration::from_secs(5);
-    opts.attempts = 1;
-
-    let resolver = TokioAsyncResolver::tokio(config, opts);
+    let Some(resolver) = build_resolver(nameservers) else {
+        return;
+    };
 
     // Resolve well-known public domains that should NEVER return private IPs
     let test_domains = ["www.google.com.", "www.cloudflare.com.", "www.example.com."];
@@ -245,23 +258,14 @@ async fn check_dns_cross_validation(nameservers: &[IpAddr], findings: &mut Vec<F
     }
 
     // Resolve using configured DNS
-    let ns_group = NameServerConfigGroup::from_ips_clear(nameservers, 53, true);
-    let local_config = ResolverConfig::from_parts(None, Vec::new(), ns_group);
-    let mut opts = ResolverOpts::default();
-    opts.timeout = std::time::Duration::from_secs(5);
-    opts.attempts = 1;
-    let local_resolver = TokioAsyncResolver::tokio(local_config, opts);
+    let Some(local_resolver) = build_resolver(nameservers) else {
+        return;
+    };
 
     // Resolve using Cloudflare 1.1.1.1
-    let cf_group = NameServerConfigGroup::from_ips_clear(&[cloudflare], 53, true);
-    let cf_config = ResolverConfig::from_parts(None, Vec::new(), cf_group);
-    let cf_opts = {
-        let mut o = ResolverOpts::default();
-        o.timeout = std::time::Duration::from_secs(5);
-        o.attempts = 1;
-        o
+    let Some(cf_resolver) = build_resolver(&[cloudflare]) else {
+        return;
     };
-    let cf_resolver = TokioAsyncResolver::tokio(cf_config, cf_opts);
 
     let test_domain = "www.example.com.";
 
@@ -377,18 +381,14 @@ pub fn classify_dmarc(record: &str) -> Option<Finding> {
 }
 
 /// Query TXT records for a domain using the given resolver.
-async fn query_txt_records(resolver: &TokioAsyncResolver, domain: &str) -> Vec<String> {
+async fn query_txt_records(resolver: &TokioResolver, domain: &str) -> Vec<String> {
     resolver.lookup(domain, RecordType::TXT).await.map_or_else(
         |_| Vec::new(),
         |response| {
             response
-                .record_iter()
-                .filter_map(|r| {
-                    r.data().map(|data| {
-                        let s = data.to_string();
-                        s.trim_matches('"').to_owned()
-                    })
-                })
+                .answers()
+                .iter()
+                .map(|r| r.data.to_string().trim_matches('"').to_owned())
                 .collect()
         },
     )
@@ -400,12 +400,9 @@ async fn check_email_security(nameservers: &[IpAddr], domain: &str, findings: &m
         return;
     }
 
-    let ns_group = NameServerConfigGroup::from_ips_clear(nameservers, 53, true);
-    let config = ResolverConfig::from_parts(None, Vec::new(), ns_group);
-    let mut opts = ResolverOpts::default();
-    opts.timeout = std::time::Duration::from_secs(5);
-    opts.attempts = 1;
-    let resolver = TokioAsyncResolver::tokio(config, opts);
+    let Some(resolver) = build_resolver(nameservers) else {
+        return;
+    };
 
     // SPF — TXT record on the domain itself
     let txt_records = query_txt_records(&resolver, &format!("{domain}.")).await;
@@ -504,10 +501,7 @@ fn parse_search_domain(contents: &str) -> Option<String> {
 fn read_search_domain() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = std::process::Command::new("scutil")
-            .arg("--dns")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("scutil").arg("--dns").output() {
             if output.status.success() {
                 let contents = String::from_utf8_lossy(&output.stdout);
                 let domain = parse_scutil_dns_search_domain(&contents);
@@ -580,23 +574,23 @@ impl Scanner for DnsScanner {
         ));
 
         // Check if DNS is the gateway (common router DNS)
-        if let Some(gateway) = ctx.gateway {
-            if nameservers.contains(&gateway) {
-                findings.push(
-                    Finding::new(
-                        "dns",
-                        "DNS resolves through the router",
-                        &format!(
-                            "DNS server {gateway} is the default gateway. This is common \
+        if let Some(gateway) = ctx.gateway
+            && nameservers.contains(&gateway)
+        {
+            findings.push(
+                Finding::new(
+                    "dns",
+                    "DNS resolves through the router",
+                    &format!(
+                        "DNS server {gateway} is the default gateway. This is common \
                              but means DNS security depends entirely on the router's \
                              configuration. Consider using a hardened DNS resolver like \
                              Quad9 (9.9.9.9) or Cloudflare (1.1.1.1)."
-                        ),
-                        Severity::Info,
-                    )
-                    .with_ip(gateway),
-                );
-            }
+                    ),
+                    Severity::Info,
+                )
+                .with_ip(gateway),
+            );
         }
 
         // Check for well-known privacy/security DNS
@@ -901,7 +895,8 @@ resolver #1
 
     #[test]
     fn test_parse_scutil_dns_nameservers_empty() {
-        let ns = parse_scutil_dns_nameservers("DNS configuration\n\nresolver #1\n  domain : local\n");
+        let ns =
+            parse_scutil_dns_nameservers("DNS configuration\n\nresolver #1\n  domain : local\n");
         assert!(ns.is_empty());
     }
 

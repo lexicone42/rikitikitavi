@@ -60,10 +60,10 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
         .collect();
 
     // Ensure the gateway is in the device list even if not in ARP cache
-    if let Some(gw) = ctx.gateway {
-        if !devices.iter().any(|d| d.ip == gw) {
-            devices.push(Device::new(gw).with_device_type(DeviceType::Router));
-        }
+    if let Some(gw) = ctx.gateway
+        && !devices.iter().any(|d| d.ip == gw)
+    {
+        devices.push(Device::new(gw).with_device_type(DeviceType::Router));
     }
 
     tracing::info!(
@@ -364,12 +364,12 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     }
 
     // Re-sort by severity (descending) for consistent output
-    result.sort_by(|a, b| b.severity.cmp(&a.severity));
+    result.sort_by_key(|f| std::cmp::Reverse(f.severity));
     result
 }
 
 /// Score a finding by how much useful detail it contains.
-fn detail_score(f: &Finding) -> u32 {
+const fn detail_score(f: &Finding) -> u32 {
     let mut score = 0;
     if f.evidence.is_some() {
         score += 3;
@@ -459,20 +459,20 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
         }
 
         // Apply device-scanner hints (OUI vendor + device_type)
-        if finding.scanner == "device" {
-            if let (Some(ip), Some(hint)) = (finding.affected_ip, &finding.device_hint) {
-                if let Some(device) = device_map.get_mut(&ip) {
-                    if let Some(vendor) = &hint.vendor {
-                        if device.vendor.is_none() {
-                            vendor.clone_into(device.vendor.get_or_insert_with(String::new));
-                        }
-                    }
-                    if let Some(dt) = hint.device_type {
-                        if device.device_type == DeviceType::Unknown && dt != DeviceType::Unknown {
-                            device.device_type = dt;
-                        }
-                    }
-                }
+        if finding.scanner == "device"
+            && let (Some(ip), Some(hint)) = (finding.affected_ip, &finding.device_hint)
+            && let Some(device) = device_map.get_mut(&ip)
+        {
+            if let Some(vendor) = &hint.vendor
+                && device.vendor.is_none()
+            {
+                vendor.clone_into(device.vendor.get_or_insert_with(String::new));
+            }
+            if let Some(dt) = hint.device_type
+                && device.device_type == DeviceType::Unknown
+                && dt != DeviceType::Unknown
+            {
+                device.device_type = dt;
             }
         }
     }
@@ -563,19 +563,18 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
                 vendor.clone_into(device.vendor.get_or_insert_with(String::new));
                 changed = true;
             }
-            if let Some(hostname) = &hint.hostname {
-                if let Some(clean) = clean_hostname(hostname) {
-                    if device.hostname.is_none() {
-                        device.hostname = Some(clean);
-                        changed = true;
-                    }
-                }
+            if let Some(hostname) = &hint.hostname
+                && let Some(clean) = clean_hostname(hostname)
+                && device.hostname.is_none()
+            {
+                device.hostname = Some(clean);
+                changed = true;
             }
-            if let Some(dt) = hint.device_type {
-                if dt != DeviceType::Unknown {
-                    device.device_type = dt;
-                    changed = true;
-                }
+            if let Some(dt) = hint.device_type
+                && dt != DeviceType::Unknown
+            {
+                device.device_type = dt;
+                changed = true;
             }
             if let Some(os) = &hint.os_guess {
                 os.clone_into(device.os_guess.get_or_insert_with(String::new));
@@ -640,19 +639,19 @@ fn propagate_mac_siblings(devices: &mut [Device]) {
     use std::collections::HashMap;
 
     // Collect best-known info per MAC (using owned strings to avoid borrow issues)
-    let mut mac_info: HashMap<String, (DeviceType, Option<String>, Option<String>, Option<String>)> =
-        HashMap::new();
+    let mut mac_info: HashMap<
+        String,
+        (DeviceType, Option<String>, Option<String>, Option<String>),
+    > = HashMap::new();
 
     for device in devices.iter() {
         let Some(mac) = device.mac.as_deref() else {
             continue;
         };
-        let entry = mac_info.entry(mac.to_owned()).or_insert((
-            DeviceType::Unknown,
-            None,
-            None,
-            None,
-        ));
+        let entry =
+            mac_info
+                .entry(mac.to_owned())
+                .or_insert((DeviceType::Unknown, None, None, None));
         if device.device_type != DeviceType::Unknown && entry.0 == DeviceType::Unknown {
             entry.0 = device.device_type;
         }
@@ -775,7 +774,10 @@ mod tests {
 
     #[test]
     fn test_classify_by_ports_printer() {
-        assert_eq!(classify_by_ports(&[80, 443, 9100, 631]), Some(DeviceType::Printer));
+        assert_eq!(
+            classify_by_ports(&[80, 443, 9100, 631]),
+            Some(DeviceType::Printer)
+        );
     }
 
     #[test]
@@ -810,10 +812,7 @@ mod tests {
 
     #[test]
     fn test_post_enrich_devices_upnp_overwrites_oui() {
-        let mut devices = vec![
-            Device::new(ip("192.168.1.220"))
-                .with_mac("00:11:32:aa:bb:cc"),
-        ];
+        let mut devices = vec![Device::new(ip("192.168.1.220")).with_mac("00:11:32:aa:bb:cc")];
         // Device scanner found vendor="Synology"
         devices[0].vendor = Some("Synology".to_owned());
         devices[0].device_type = DeviceType::Nas;
@@ -842,16 +841,12 @@ mod tests {
 
     #[test]
     fn test_post_enrich_ssh_os_guess() {
-        let mut devices = vec![
-            Device::new(ip("192.168.1.10")),
-        ];
+        let mut devices = vec![Device::new(ip("192.168.1.10"))];
 
         let findings = vec![
             Finding::new("services", "SSH on 10", "desc", Severity::Low)
                 .with_ip(ip("192.168.1.10"))
-                .with_device_hint(
-                    DeviceHint::new().with_os_guess("Linux (Debian)"),
-                ),
+                .with_device_hint(DeviceHint::new().with_os_guess("Linux (Debian)")),
         ];
 
         post_enrich_devices(&mut devices, &findings);
@@ -860,9 +855,7 @@ mod tests {
 
     #[test]
     fn test_post_enrich_priority_ordering() {
-        let mut devices = vec![
-            Device::new(ip("192.168.1.30")),
-        ];
+        let mut devices = vec![Device::new(ip("192.168.1.30"))];
 
         let findings = vec![
             // mDNS hostname-only hint (priority 3)
@@ -895,13 +888,10 @@ mod tests {
 
     #[test]
     fn test_post_enrich_empty_hints_ignored() {
-        let mut devices = vec![
-            Device::new(ip("192.168.1.1")),
-        ];
+        let mut devices = vec![Device::new(ip("192.168.1.1"))];
 
         let findings = vec![
-            Finding::new("ports", "Open port", "desc", Severity::Info)
-                .with_ip(ip("192.168.1.1")),
+            Finding::new("ports", "Open port", "desc", Severity::Info).with_ip(ip("192.168.1.1")),
         ];
 
         post_enrich_devices(&mut devices, &findings);

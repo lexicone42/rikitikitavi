@@ -80,7 +80,7 @@ pub fn generate_priority_actions(findings: &[Finding]) -> Vec<PriorityAction> {
         })
         .collect();
 
-    scored.sort_by(|a, b| b.2.cmp(&a.2));
+    scored.sort_by_key(|entry| std::cmp::Reverse(entry.2));
 
     scored
         .into_iter()

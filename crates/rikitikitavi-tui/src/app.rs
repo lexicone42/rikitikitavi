@@ -208,36 +208,36 @@ impl App {
                 }
 
                 // Check list area clicks (select row)
-                if let Some(list_area) = self.hit_regions.list_area {
-                    if list_area.contains((col, row).into()) {
-                        let clicked_row = row
-                            .saturating_sub(list_area.y)
-                            .saturating_sub(self.hit_regions.list_header_offset);
-                        let visual_row = clicked_row as usize;
+                if let Some(list_area) = self.hit_regions.list_area
+                    && list_area.contains((col, row).into())
+                {
+                    let clicked_row = row
+                        .saturating_sub(list_area.y)
+                        .saturating_sub(self.hit_regions.list_header_offset);
+                    let visual_row = clicked_row as usize;
 
-                        match self.screen {
-                            Screen::Findings => {
-                                // Account for scroll offset — visible row 0 = offset
-                                let offset = self.findings_table_state.offset();
-                                let idx = offset + visual_row;
-                                let max = self.filtered_findings().len().saturating_sub(1);
-                                self.selected_finding_index = idx.min(max);
-                                self.findings_table_state
-                                    .select(Some(self.selected_finding_index));
-                            }
-                            Screen::Dashboard | Screen::NetworkMap => {
-                                let offset = self.devices_table_state.offset();
-                                let idx = offset + visual_row;
-                                let max = self
-                                    .results
-                                    .as_ref()
-                                    .map_or(0, |r| r.devices.len().saturating_sub(1));
-                                self.selected_device_index = idx.min(max);
-                                self.devices_table_state
-                                    .select(Some(self.selected_device_index));
-                            }
-                            _ => {}
+                    match self.screen {
+                        Screen::Findings => {
+                            // Account for scroll offset — visible row 0 = offset
+                            let offset = self.findings_table_state.offset();
+                            let idx = offset + visual_row;
+                            let max = self.filtered_findings().len().saturating_sub(1);
+                            self.selected_finding_index = idx.min(max);
+                            self.findings_table_state
+                                .select(Some(self.selected_finding_index));
                         }
+                        Screen::Dashboard | Screen::NetworkMap => {
+                            let offset = self.devices_table_state.offset();
+                            let idx = offset + visual_row;
+                            let max = self
+                                .results
+                                .as_ref()
+                                .map_or(0, |r| r.devices.len().saturating_sub(1));
+                            self.selected_device_index = idx.min(max);
+                            self.devices_table_state
+                                .select(Some(self.selected_device_index));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -257,7 +257,7 @@ impl App {
     }
 
     /// Cycle to the next screen tab (Left arrow / Shift+Tab).
-    fn prev_screen(&mut self) {
+    const fn prev_screen(&mut self) {
         self.screen = match self.screen {
             Screen::Dashboard => Screen::TopActions,
             Screen::NetworkMap => Screen::Dashboard,
@@ -269,7 +269,7 @@ impl App {
     }
 
     /// Cycle to the next screen tab (Right arrow / Tab).
-    fn next_screen(&mut self) {
+    const fn next_screen(&mut self) {
         self.screen = match self.screen {
             Screen::Dashboard => Screen::NetworkMap,
             Screen::NetworkMap => Screen::Findings,
@@ -389,7 +389,7 @@ impl App {
             })
             .collect();
         // Sort by severity descending (Critical first since Ord is Info < ... < Critical)
-        filtered.sort_by(|a, b| b.severity.cmp(&a.severity));
+        filtered.sort_by_key(|f| std::cmp::Reverse(f.severity));
         filtered
     }
 

@@ -10,10 +10,10 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
 
     // Sort findings by severity descending
     let mut sorted_findings = results.findings.clone();
-    sorted_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+    sorted_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 
     let mut out = String::from(
-        "severity,scanner,title,description,affected_ip,affected_hostname,affected_port,affected_service,cwe_id,cve_ids,remediation,effort,evidence\n"
+        "severity,scanner,title,description,affected_ip,affected_hostname,affected_port,affected_service,cwe_id,cve_ids,remediation,effort,evidence\n",
     );
 
     for f in &sorted_findings {

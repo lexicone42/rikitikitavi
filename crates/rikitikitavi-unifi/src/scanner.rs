@@ -185,11 +185,11 @@ pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
         let src_any = rule
             .src
             .as_deref()
-            .map_or(true, |s| s == "any" || s.is_empty());
+            .is_none_or(|s| s == "any" || s.is_empty());
         let dst_any = rule
             .dst
             .as_deref()
-            .map_or(true, |d| d == "any" || d.is_empty());
+            .is_none_or(|d| d == "any" || d.is_empty());
 
         if rule.action.to_lowercase() == "accept" && src_any && dst_any {
             findings.push(

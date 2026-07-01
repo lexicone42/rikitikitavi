@@ -38,7 +38,7 @@ pub struct ScanDiff {
 
 impl ScanDiff {
     /// Whether anything changed between the two scans.
-    pub fn has_changes(&self) -> bool {
+    pub const fn has_changes(&self) -> bool {
         !self.new_findings.is_empty()
             || !self.resolved_findings.is_empty()
             || !self.severity_changes.is_empty()

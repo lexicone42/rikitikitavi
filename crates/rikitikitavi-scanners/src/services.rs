@@ -169,9 +169,7 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_port(port)
             .with_service("SSH")
             .with_cwe("CWE-327")
-            .with_references(refs![
-                "https://nvd.nist.gov/vuln/detail/CVE-2008-5161"
-            ]),
+            .with_references(refs!["https://nvd.nist.gov/vuln/detail/CVE-2008-5161"]),
         );
     }
 
@@ -680,7 +678,10 @@ fn parse_ubuntu_version(banner: &str) -> Option<String> {
 /// Ubuntu ships specific `OpenSSH` versions with each release. This mapping
 /// is not 100% precise (PPAs can override), but the combination of
 /// `OpenSSH` version + "Ubuntu" in the banner makes it reliable.
-const fn ubuntu_from_openssh(major: u32, minor: u32) -> Option<(&'static str, &'static str, &'static str)> {
+const fn ubuntu_from_openssh(
+    major: u32,
+    minor: u32,
+) -> Option<(&'static str, &'static str, &'static str)> {
     match (major, minor) {
         (7, 2) => Some(("18.04", "Bionic", "2028-04-30")),
         (7, 6) => Some(("18.10", "Cosmic", "2019-07-18")),
@@ -771,9 +772,8 @@ fn is_date_past(date_str: &str) -> bool {
     let m: u32 = parts[1].parse().unwrap_or(1);
     let d: u32 = parts[2].parse().unwrap_or(1);
 
-    chrono::NaiveDate::from_ymd_opt(y, m, d).is_some_and(|eol| {
-        eol < chrono::Utc::now().date_naive()
-    })
+    chrono::NaiveDate::from_ymd_opt(y, m, d)
+        .is_some_and(|eol| eol < chrono::Utc::now().date_naive())
 }
 
 /// Classify a banner finding based on the service and version info.
@@ -886,21 +886,14 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             let cves = check_openssh_cves(major, minor);
             if !cves.is_empty() {
                 // Use the highest severity CVE for the finding
-                let max_severity = cves
-                    .iter()
-                    .map(|c| c.2)
-                    .max()
-                    .unwrap_or(Severity::Low);
+                let max_severity = cves.iter().map(|c| c.2).max().unwrap_or(Severity::Low);
 
                 let cve_list: Vec<String> = cves
                     .iter()
                     .map(|(id, desc, sev)| format!("{id} ({sev:?}): {desc}"))
                     .collect();
 
-                let cve_ids: Vec<String> = cves
-                    .iter()
-                    .map(|(id, _, _)| (*id).to_owned())
-                    .collect();
+                let cve_ids: Vec<String> = cves.iter().map(|(id, _, _)| (*id).to_owned()).collect();
 
                 let cve_refs: Vec<String> = cves
                     .iter()
@@ -1389,7 +1382,8 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     if sv.major <= 9 {
         let mut refs = Vec::new();
         // Jetty < 9.4.51: CVE-2023-26048 (header overflow)
-        if sv.major < 9 || (sv.major == 9 && sv.minor < 4)
+        if sv.major < 9
+            || (sv.major == 9 && sv.minor < 4)
             || (sv.major == 9 && sv.minor == 4 && sv.patch < 51)
         {
             refs.push("https://nvd.nist.gov/vuln/detail/CVE-2023-26048".to_owned());
@@ -1414,31 +1408,28 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 /// known EOL and vulnerable version databases. Returns a higher-severity
 /// finding when the software version has known security issues.
 fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
-    if let Some(sv) = parse_server_header(server) {
-        if let Some(issue) = check_server_version(&sv) {
-            let mut finding = Finding::new(
-                "services",
-                &format!(
-                    "Outdated {} on {ip}:{port}",
-                    sv.product
-                ),
-                &issue.description,
-                issue.severity,
-            )
-            .with_ip(ip)
-            .with_port(port)
-            .with_service("HTTP")
-            .with_evidence(server);
+    if let Some(sv) = parse_server_header(server)
+        && let Some(issue) = check_server_version(&sv)
+    {
+        let mut finding = Finding::new(
+            "services",
+            &format!("Outdated {} on {ip}:{port}", sv.product),
+            &issue.description,
+            issue.severity,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("HTTP")
+        .with_evidence(server);
 
-            if let Some(cwe) = issue.cwe {
-                finding = finding.with_cwe(cwe);
-            }
-            if !issue.cve_refs.is_empty() {
-                finding = finding.with_references(issue.cve_refs);
-            }
-
-            return finding;
+        if let Some(cwe) = issue.cwe {
+            finding = finding.with_cwe(cwe);
         }
+        if !issue.cve_refs.is_empty() {
+            finding = finding.with_references(issue.cve_refs);
+        }
+
+        return finding;
     }
 
     // Fallback: plain version disclosure
@@ -1501,7 +1492,11 @@ impl Scanner for ServicesScanner {
     }
 
     fn supported_perspectives(&self) -> &[Perspective] {
-        &[Perspective::Unauthenticated, Perspective::Authenticated, Perspective::Privileged]
+        &[
+            Perspective::Unauthenticated,
+            Perspective::Authenticated,
+            Perspective::Privileged,
+        ]
     }
 
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
@@ -1646,10 +1641,18 @@ mod tests {
         );
         // Debian version extraction from deb11
         let debian_result = parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1");
-        assert!(debian_result.as_ref().is_some_and(|s| s.contains("Debian 11") && s.contains("Bullseye")));
+        assert!(
+            debian_result
+                .as_ref()
+                .is_some_and(|s| s.contains("Debian 11") && s.contains("Bullseye"))
+        );
         // Ubuntu version extraction from OpenSSH version mapping
         let ubuntu_result = parse_os_from_ssh_banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4");
-        assert!(ubuntu_result.as_ref().is_some_and(|s| s.contains("Ubuntu 22.04") && s.contains("Jammy")));
+        assert!(
+            ubuntu_result
+                .as_ref()
+                .is_some_and(|s| s.contains("Ubuntu 22.04") && s.contains("Jammy"))
+        );
         assert_eq!(
             parse_os_from_ssh_banner("SSH-2.0-OpenSSH_9.0 FreeBSD-20230316"),
             Some("FreeBSD".to_owned())
@@ -1821,10 +1824,11 @@ mod tests {
             "hmac-md5,hmac-sha2-256",
         );
         let info = parse_ssh_kex_init(&pkt).unwrap();
-        assert!(info
-            .kex_algorithms
-            .iter()
-            .any(|a| a.contains("group1-sha1")));
+        assert!(
+            info.kex_algorithms
+                .iter()
+                .any(|a| a.contains("group1-sha1"))
+        );
         assert!(info.ciphers_client.iter().any(|a| a.contains("aes128-cbc")));
         assert!(info.macs_client.iter().any(|a| a.contains("hmac-md5")));
     }
@@ -2289,7 +2293,12 @@ mod tests {
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.6").unwrap();
         // 9.6 is in the regreSSHion range (8.5..9.7) → Critical
         assert_eq!(finding.severity, Severity::Critical);
-        assert!(finding.references.iter().any(|r| r.contains("CVE-2024-6387")));
+        assert!(
+            finding
+                .references
+                .iter()
+                .any(|r| r.contains("CVE-2024-6387"))
+        );
     }
 
     #[test]
@@ -2343,10 +2352,11 @@ mod tests {
     }
 
     #[test]
-    fn test_check_os_eol_debian_bullseye_not_eol() {
+    fn test_check_os_eol_debian_bookworm_not_eol() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        // Debian 11 Bullseye EOL is June 2026 — still alive as of Feb 2026
-        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u5");
+        // Debian 12 Bookworm EOL is 2028-06-30 — use a release that is
+        // comfortably in-support so this test is not sensitive to the wall clock.
+        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u5");
         assert!(finding.is_none());
     }
 

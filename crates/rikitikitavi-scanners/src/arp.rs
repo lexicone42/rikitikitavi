@@ -117,9 +117,7 @@ fn is_multicast_mac(mac: &str) -> bool {
     let Some(first_octet) = normalized.split(':').next() else {
         return false;
     };
-    u8::from_str_radix(first_octet, 16)
-        .map(|b| b & 1 == 1)
-        .unwrap_or(false)
+    u8::from_str_radix(first_octet, 16).is_ok_and(|b| b & 1 == 1)
 }
 
 /// Check if a MAC address is all zeros.

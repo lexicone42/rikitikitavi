@@ -518,9 +518,7 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-328")
-            .with_references(refs![
-                "https://shattered.io/",
-            ]),
+            .with_references(refs!["https://shattered.io/",]),
         );
     }
 
@@ -883,10 +881,11 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
         .redirect(reqwest::redirect::Policy::none())
         .build();
 
-    if let Ok(client) = client {
-        if let Ok(resp) = client.head(&url).send().await {
-            if resp.headers().get("strict-transport-security").is_none() {
-                findings.push(
+    if let Ok(client) = client
+        && let Ok(resp) = client.head(&url).send().await
+        && resp.headers().get("strict-transport-security").is_none()
+    {
+        findings.push(
                     Finding::new(
                         "ssl",
                         &format!("HTTPS without HSTS on {ip}:{port}"),
@@ -902,8 +901,6 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                         "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
                     ]),
                 );
-            }
-        }
     }
 
     findings
@@ -1122,7 +1119,9 @@ mod tests {
         };
         let findings = analyze_certificate(ip, 443, &cert);
         assert!(
-            findings.iter().any(|f| f.title.contains("Expired") && f.severity == Severity::High),
+            findings
+                .iter()
+                .any(|f| f.title.contains("Expired") && f.severity == Severity::High),
             "expected expired cert finding"
         );
     }
@@ -1144,9 +1143,11 @@ mod tests {
             is_self_signed: true,
         };
         let findings = analyze_certificate(ip, 443, &cert);
-        assert!(findings
-            .iter()
-            .any(|f| f.title.contains("expiring soon") && f.severity == Severity::Medium));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("expiring soon") && f.severity == Severity::Medium)
+        );
     }
 
     #[test]
@@ -1166,9 +1167,11 @@ mod tests {
             is_self_signed: true,
         };
         let findings = analyze_certificate(ip, 443, &cert);
-        assert!(findings
-            .iter()
-            .any(|f| f.title.contains("1024-bit RSA") && f.severity == Severity::High));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("1024-bit RSA") && f.severity == Severity::High)
+        );
     }
 
     #[test]
@@ -1188,9 +1191,11 @@ mod tests {
             is_self_signed: true,
         };
         let findings = analyze_certificate(ip, 443, &cert);
-        assert!(findings
-            .iter()
-            .any(|f| f.title.contains("SHA-1") && f.severity == Severity::Medium));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("SHA-1") && f.severity == Severity::Medium)
+        );
     }
 
     #[test]
@@ -1233,7 +1238,11 @@ mod tests {
         };
         let findings = analyze_certificate(ip, 443, &cert);
         // Self-signed on private IP → Low + Info details
-        assert!(findings.iter().any(|f| f.title.contains("Self-signed") && f.severity == Severity::Low));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("Self-signed") && f.severity == Severity::Low)
+        );
         assert_eq!(findings.len(), 2);
     }
 
@@ -1299,7 +1308,10 @@ mod tests {
         let findings = analyze_certificate(ip, 443, &cert);
         // 50-year cert → Medium excessive validity + self-signed Low + Info details
         assert!(findings.iter().any(|f| f.title.contains("Excessive")));
-        let excessive = findings.iter().find(|f| f.title.contains("Excessive")).unwrap();
+        let excessive = findings
+            .iter()
+            .find(|f| f.title.contains("Excessive"))
+            .unwrap();
         assert_eq!(excessive.severity, Severity::Medium);
     }
 
@@ -1322,7 +1334,10 @@ mod tests {
         let findings = analyze_certificate(ip, 443, &cert);
         // 5-year cert → Low excessive validity
         assert!(findings.iter().any(|f| f.title.contains("Excessive")));
-        let excessive = findings.iter().find(|f| f.title.contains("Excessive")).unwrap();
+        let excessive = findings
+            .iter()
+            .find(|f| f.title.contains("Excessive"))
+            .unwrap();
         assert_eq!(excessive.severity, Severity::Low);
     }
 

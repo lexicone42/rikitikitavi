@@ -48,21 +48,22 @@ fn analyze_interface_config(
     }
 
     // Check if gateway is in a suspicious range (APIPA = DHCP failure)
-    if let Some(gw) = gateway {
-        if is_apipa_address(gw) {
-            anomalies.push(DhcpAnomaly::ApipaGateway { gateway: gw });
-        }
+    if let Some(gw) = gateway
+        && is_apipa_address(gw)
+    {
+        anomalies.push(DhcpAnomaly::ApipaGateway { gateway: gw });
     }
 
     // Check for APIPA addresses on interfaces (DHCP failure indicator)
     for iface in interfaces {
-        if let Some(ip) = iface.ip {
-            if is_apipa_address(ip) && !iface.is_loopback {
-                anomalies.push(DhcpAnomaly::ApipaAddress {
-                    interface: iface.name.clone(),
-                    ip,
-                });
-            }
+        if let Some(ip) = iface.ip
+            && is_apipa_address(ip)
+            && !iface.is_loopback
+        {
+            anomalies.push(DhcpAnomaly::ApipaAddress {
+                interface: iface.name.clone(),
+                ip,
+            });
         }
     }
 

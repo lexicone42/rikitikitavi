@@ -14,8 +14,8 @@ members = [
 
 [workspace.package]
 version = "0.2.0"
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/lexicone42/rikitikitavi"
 
@@ -34,7 +34,7 @@ serde_yaml_ng = "0.10"
 
 # Networking
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
-hickory-resolver = "0.24"
+hickory-resolver = "0.26"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
@@ -44,8 +44,8 @@ aws-config = "1"
 aws-sdk-s3 = "1"
 
 # TUI
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Error handling
 thiserror = "2"
@@ -62,12 +62,12 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
-ipnetwork = "0.20"
+ipnetwork = { version = "0.21", features = ["serde"] }
 base64 = "0.22"
 pcap = "2"
 
 # X.509 certificate parsing
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # Testing
 mockall = "0.13"

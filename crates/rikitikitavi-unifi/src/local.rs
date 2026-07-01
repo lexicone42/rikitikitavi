@@ -99,11 +99,11 @@ fn detect_device_type() -> UniFiDevice {
     tracing::debug!("detecting UniFi device type");
 
     // Try /etc/board.info first (most common location)
-    if let Ok(contents) = std::fs::read_to_string("/etc/board.info") {
-        if let Some(board_name) = parse_board_info(&contents) {
-            tracing::debug!(%board_name, "found board name");
-            return classify_board(&board_name);
-        }
+    if let Ok(contents) = std::fs::read_to_string("/etc/board.info")
+        && let Some(board_name) = parse_board_info(&contents)
+    {
+        tracing::debug!(%board_name, "found board name");
+        return classify_board(&board_name);
     }
 
     // Try /data/unifi-core/config/hardware

@@ -136,17 +136,17 @@ async fn cmd_scan(
     };
 
     // Auto-save unless --no-save
-    if !args.no_save {
-        if let Some(ref h) = history {
-            match h.save(&results) {
-                Ok(path) => {
-                    if !args.quiet {
-                        println!("Scan saved to {}", path.display());
-                    }
+    if !args.no_save
+        && let Some(ref h) = history
+    {
+        match h.save(&results) {
+            Ok(path) => {
+                if !args.quiet {
+                    println!("Scan saved to {}", path.display());
                 }
-                Err(e) => {
-                    tracing::warn!("failed to save scan history: {e}");
-                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to save scan history: {e}");
             }
         }
     }
@@ -250,15 +250,15 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
             if let Some(ref evidence) = f.evidence {
                 println!("              Evidence: {evidence}");
             }
-            if let Some(ref rem) = f.remediation {
-                if !rem.steps.is_empty() {
-                    let fix = rem.steps.join(" → ");
-                    let effort = rem
-                        .effort
-                        .as_ref()
-                        .map_or(String::new(), |e| format!(" ({e})"));
-                    println!("              Fix: {fix}{effort}");
-                }
+            if let Some(ref rem) = f.remediation
+                && !rem.steps.is_empty()
+            {
+                let fix = rem.steps.join(" → ");
+                let effort = rem
+                    .effort
+                    .as_ref()
+                    .map_or(String::new(), |e| format!(" ({e})"));
+                println!("              Fix: {fix}{effort}");
             }
             println!();
         }
@@ -365,8 +365,8 @@ async fn cmd_tui(
     app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
     use crossterm::{execute, terminal};
-    use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
 
     let theme = match args.theme {
         cli::ThemeArg::Dark => rikitikitavi_tui::app::Theme::Dark,
@@ -422,10 +422,10 @@ async fn cmd_tui(
                 app.set_scan_diff(diff);
             }
             // Save to history
-            if let Some(ref h) = history {
-                if let Err(e) = h.save(&results) {
-                    tracing::warn!("failed to save scan history: {e}");
-                }
+            if let Some(ref h) = history
+                && let Err(e) = h.save(&results)
+            {
+                tracing::warn!("failed to save scan history: {e}");
             }
             app.results = Some(results);
             app.status_message = Some("Initial scan complete".to_owned());
@@ -461,10 +461,10 @@ async fn cmd_tui(
                 app.set_scan_diff(diff);
             }
             // Save to history
-            if let Some(ref h) = history {
-                if let Err(e) = h.save(&results) {
-                    tracing::warn!("failed to save scan history: {e}");
-                }
+            if let Some(ref h) = history
+                && let Err(e) = h.save(&results)
+            {
+                tracing::warn!("failed to save scan history: {e}");
             }
             app.results = Some(results);
             app.scanning = false;
@@ -793,11 +793,40 @@ fn cmd_config(
             println!("Configuration is valid.");
         }
         cli::ConfigCommand::Show => {
-            let yaml = serde_yaml_ng::to_string(app_config)?;
+            // `config show` output is routinely pasted into tickets/chat, and the
+            // help text promises redaction — scrub secrets before display.
+            let yaml = serde_yaml_ng::to_string(&redacted_for_display(app_config))?;
             println!("{yaml}");
         }
     }
     Ok(())
+}
+
+/// Return a copy of the config with every secret replaced by a redaction marker,
+/// for safe display via `config show`. `None` fields are left untouched so the
+/// output still shows which credentials are unset.
+fn redacted_for_display(
+    cfg: &rikitikitavi_models::config::AppConfig,
+) -> rikitikitavi_models::config::AppConfig {
+    let mut shown = cfg.clone();
+    if let Some(controller) = shown.unifi.controller.as_mut() {
+        redact_secret(&mut controller.password);
+        redact_secret(&mut controller.api_token);
+    }
+    if let Some(cloud) = shown.unifi.cloud.as_mut() {
+        redact_secret(&mut cloud.api_key);
+    }
+    redact_secret(&mut shown.apis.shodan_api_key);
+    redact_secret(&mut shown.apis.censys_api_id);
+    redact_secret(&mut shown.apis.censys_api_secret);
+    shown
+}
+
+/// Replace a present secret with a redaction marker, preserving `None`.
+fn redact_secret(secret: &mut Option<String>) {
+    if secret.is_some() {
+        *secret = Some("***REDACTED***".to_owned());
+    }
 }
 
 #[allow(clippy::unused_async)]
@@ -1005,4 +1034,57 @@ fn cmd_version(verbose: bool) {
 fn rustc_version() -> &'static str {
     // This is set at compile time by the build script or default
     option_env!("RUSTC_VERSION").unwrap_or("unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{redact_secret, redacted_for_display};
+    use rikitikitavi_models::config::{AppConfig, UniFiCloudConfig, UniFiControllerConfig};
+
+    #[test]
+    fn config_show_redacts_all_secrets() {
+        let mut cfg = AppConfig::default();
+        cfg.unifi.controller = Some(UniFiControllerConfig {
+            username: Some("admin".to_owned()),
+            password: Some("hunter2".to_owned()),
+            api_token: Some("tok_live_abc".to_owned()),
+            ..Default::default()
+        });
+        cfg.unifi.cloud = Some(UniFiCloudConfig {
+            enabled: true,
+            api_key: Some("cloud_key_xyz".to_owned()),
+            ..Default::default()
+        });
+        cfg.apis.shodan_api_key = Some("shodan_zzz".to_owned());
+        cfg.apis.censys_api_secret = Some("censys_sss".to_owned());
+
+        let yaml = serde_yaml_ng::to_string(&redacted_for_display(&cfg)).unwrap();
+
+        // No secret value survives to the displayed output.
+        for leaked in [
+            "hunter2",
+            "tok_live_abc",
+            "cloud_key_xyz",
+            "shodan_zzz",
+            "censys_sss",
+        ] {
+            assert!(
+                !yaml.contains(leaked),
+                "secret leaked in config show: {leaked}"
+            );
+        }
+        assert!(yaml.contains("***REDACTED***"));
+        // Non-secret fields are preserved.
+        assert!(yaml.contains("admin"));
+    }
+
+    #[test]
+    fn redact_secret_preserves_none() {
+        let mut unset: Option<String> = None;
+        redact_secret(&mut unset);
+        assert_eq!(
+            unset, None,
+            "unset secrets must stay None, not become a marker"
+        );
+    }
 }

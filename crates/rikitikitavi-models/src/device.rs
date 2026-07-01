@@ -124,7 +124,6 @@ pub enum PortProtocol {
     Udp,
 }
 
-
 /// Hint about a device's identity, attached to findings by scanners that
 /// discover device metadata. The runner merges hints into `Device` objects
 /// using a priority-based strategy.
