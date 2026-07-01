@@ -52,12 +52,61 @@ async fn main() -> Result<()> {
     }
 }
 
+/// List the `scan` flags that are accepted by the CLI but not yet wired into
+/// the scan, so they can be reported instead of silently ignored.
+fn unimplemented_scan_flags(args: &cli::ScanArgs) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if !matches!(args.network, cli::NetworkArg::Auto) {
+        ignored.push("--network");
+    }
+    if args.ssid.is_some() {
+        ignored.push("--ssid");
+    }
+    if args.password.is_some() {
+        ignored.push("--password");
+    }
+    if args.interface.is_some() {
+        ignored.push("--interface");
+    }
+    if args.upload {
+        ignored.push("--upload");
+    }
+    if args.unifi_local {
+        ignored.push("--unifi-local");
+    }
+    ignored
+}
+
 #[allow(clippy::too_many_lines)]
 async fn cmd_scan(
     args: cli::ScanArgs,
     app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
     use rikitikitavi_models::config::{PortRange, ScanIntensity, TOP_20_PORTS};
+
+    // Honesty: several flags are accepted but not yet wired. Warn rather than
+    // silently ignoring them, so a teammate never believes they targeted an
+    // interface/SSID or uploaded results when nothing happened.
+    if !args.quiet {
+        let ignored = unimplemented_scan_flags(&args);
+        if !ignored.is_empty() {
+            eprintln!(
+                "Warning: these flags are not yet implemented and will be ignored: {}",
+                ignored.join(", ")
+            );
+        }
+    }
+
+    // Network discovery is implemented only for Linux and macOS; elsewhere the
+    // ARP/route layer returns empty, which would otherwise look like a clean
+    // network. Say so loudly rather than presenting an empty success.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    if !args.quiet {
+        eprintln!(
+            "Warning: unsupported platform — network discovery requires Linux or macOS. \
+             Results will be empty on this OS."
+        );
+    }
 
     let perspective: rikitikitavi_core::Perspective = args.perspective.into();
 
@@ -111,8 +160,13 @@ async fn cmd_scan(
 
     // The ARP cache alone is often nearly empty (cold cache / fresh boot). Active
     // mode does a bounded TCP-connect sweep so a scan doesn't silently report ~0
-    // devices. Passive mode stays read-only and skips this.
-    let swept = runner::active_host_discovery(&mut ctx).await;
+    // devices. Passive mode stays read-only and skips this. A dry run is a preview
+    // and must not touch the network, so it skips the sweep entirely.
+    let swept = if args.dry_run {
+        0
+    } else {
+        runner::active_host_discovery(&mut ctx).await
+    };
 
     if !args.quiet {
         if let Some(gw) = ctx.gateway {
@@ -194,7 +248,36 @@ async fn cmd_scan(
         print_comparison_report(&diff);
     }
 
+    // ── Severity-gated exit code for cron/CI self-audits ─────────────
+    if let Some(threshold) = fail_on_threshold(args.fail_on) {
+        let breach = results
+            .findings
+            .iter()
+            .filter(|f| f.severity >= threshold)
+            .count();
+        if breach > 0 {
+            if !args.quiet {
+                eprintln!("Failing: {breach} finding(s) at or above {threshold:?} (--fail-on).");
+            }
+            std::process::exit(2);
+        }
+    }
+
     Ok(())
+}
+
+/// Map the `--fail-on` argument to the minimum [`Severity`] that should trigger a
+/// non-zero exit, or `None` when failing is disabled.
+const fn fail_on_threshold(arg: cli::FailOnArg) -> Option<rikitikitavi_core::Severity> {
+    use rikitikitavi_core::Severity;
+    match arg {
+        cli::FailOnArg::Never => None,
+        cli::FailOnArg::Info => Some(Severity::Info),
+        cli::FailOnArg::Low => Some(Severity::Low),
+        cli::FailOnArg::Medium => Some(Severity::Medium),
+        cli::FailOnArg::High => Some(Severity::High),
+        cli::FailOnArg::Critical => Some(Severity::Critical),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1123,5 +1206,54 @@ mod tests {
             unset, None,
             "unset secrets must stay None, not become a marker"
         );
+    }
+
+    #[test]
+    fn unimplemented_scan_flags_reports_set_no_ops() {
+        use crate::{Cli, Command, unimplemented_scan_flags};
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["rikitikitavi", "scan", "--upload", "--ssid", "HomeNet"]);
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        let ignored = unimplemented_scan_flags(&args);
+        assert!(ignored.contains(&"--upload"));
+        assert!(ignored.contains(&"--ssid"));
+        // Flags that were not set must not be reported.
+        assert!(!ignored.contains(&"--interface"));
+        assert!(!ignored.contains(&"--network"));
+    }
+
+    #[test]
+    fn unimplemented_scan_flags_empty_for_plain_scan() {
+        use crate::{Cli, Command, unimplemented_scan_flags};
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["rikitikitavi", "scan"]);
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        assert!(unimplemented_scan_flags(&args).is_empty());
+    }
+
+    #[test]
+    fn fail_on_threshold_maps_severity() {
+        use crate::{Cli, Command, cli::FailOnArg, fail_on_threshold};
+        use clap::Parser;
+        use rikitikitavi_core::Severity;
+
+        assert_eq!(fail_on_threshold(FailOnArg::Never), None);
+        assert_eq!(fail_on_threshold(FailOnArg::High), Some(Severity::High));
+        assert_eq!(
+            fail_on_threshold(FailOnArg::Critical),
+            Some(Severity::Critical)
+        );
+        // Default parses to Never (no failure).
+        let cli = Cli::parse_from(["rikitikitavi", "scan"]);
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        assert_eq!(args.fail_on, FailOnArg::Never);
     }
 }

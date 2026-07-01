@@ -14,8 +14,9 @@ pub struct Cli {
     #[arg(short, long, global = true, env = "RIKITIKITAVI_CONFIG")]
     pub config: Option<PathBuf>,
 
-    /// Logging verbosity.
-    #[arg(short, long, global = true, default_value = "info")]
+    /// Logging verbosity. Defaults to `warn` so scan output stays readable;
+    /// use `--log-level info` (or `debug`/`trace`) for progress detail.
+    #[arg(short, long, global = true, default_value = "warn")]
     pub log_level: String,
 
     #[command(subcommand)]
@@ -99,6 +100,11 @@ pub struct ScanArgs {
     /// Output format (json or html).
     #[arg(long, default_value = "json")]
     pub format: ReportFormatArg,
+
+    /// Exit non-zero (code 2) if any finding is at or above this severity.
+    /// Useful for cron/CI self-audits, e.g. `--fail-on high`.
+    #[arg(long, default_value = "never")]
+    pub fail_on: FailOnArg,
 
     /// Generate attack path analysis.
     #[arg(long)]
@@ -378,6 +384,20 @@ pub enum ReportFormatArg {
     Html,
     Csv,
     Ocsf,
+}
+
+/// Minimum severity that should make `scan` exit non-zero.
+///
+/// Lets cron/CI self-audits fail meaningfully (e.g. `--fail-on high`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum FailOnArg {
+    /// Never fail on findings (default) — exit 0 regardless.
+    Never,
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
 #[derive(Clone, ValueEnum)]
