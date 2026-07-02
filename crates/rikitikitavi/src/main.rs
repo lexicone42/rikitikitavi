@@ -363,7 +363,11 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
                 rikitikitavi_core::Confidence::Inferred => "  ~ inferred",
                 rikitikitavi_core::Confidence::Probable => "",
             };
-            println!("    [{:8}] {}{exploited}{conf}", f.severity, f.title);
+            // EPSS: probability of exploitation in the next 30 days (when known).
+            let epss = f
+                .epss
+                .map_or_else(String::new, |e| format!("  EPSS {:.0}%", e * 100.0));
+            println!("    [{:8}] {}{exploited}{conf}{epss}", f.severity, f.title);
             println!("              {}", f.description);
             if let Some(ref evidence) = f.evidence {
                 println!("              Evidence: {evidence}");

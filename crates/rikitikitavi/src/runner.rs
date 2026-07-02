@@ -330,6 +330,28 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         );
     }
 
+    // Best-effort EPSS enrichment: exploitation-probability for the CVEs we found.
+    // Offline-tolerant — an empty result just leaves findings without a score.
+    let all_cves: Vec<String> = all_findings
+        .iter()
+        .flat_map(|f| f.cve_ids.iter().cloned())
+        .collect();
+    if !all_cves.is_empty() {
+        let scores = rikitikitavi_network::fetch_epss_scores(&all_cves).await;
+        for finding in &mut all_findings {
+            // A finding's EPSS is the highest score among its CVEs.
+            if let Some(best) = finding
+                .cve_ids
+                .iter()
+                .filter_map(|c| scores.get(c))
+                .copied()
+                .reduce(f64::max)
+            {
+                finding.epss = Some(best);
+            }
+        }
+    }
+
     // Generate attack paths if requested
     let attack_paths = if ctx.config.attack_paths {
         generate_attack_paths(&all_findings)

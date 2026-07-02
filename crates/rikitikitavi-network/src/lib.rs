@@ -1,4 +1,5 @@
 pub mod arp;
+pub mod epss;
 pub mod external;
 pub mod interfaces;
 pub mod mdns;
@@ -9,6 +10,7 @@ pub mod wifi_frames;
 pub mod wifi_monitor;
 
 pub use arp::{ArpEntry, read_arp_cache};
+pub use epss::fetch_epss_scores;
 pub use external::get_public_ip;
 pub use interfaces::{NetworkInterface, detect_gateway, detect_network, list_interfaces};
 pub use mdns::{
