@@ -34,6 +34,7 @@ const fn port_to_service(port: u16) -> &'static str {
         135 => "MSRPC",
         139 => "NetBIOS",
         143 => "IMAP",
+        161 => "SNMP",
         443 => "HTTPS",
         445 => "SMB",
         465 => "SMTPS",
@@ -65,6 +66,7 @@ const fn port_to_service(port: u16) -> &'static str {
         7547 => "CWMP/TR-069",
         8080 => "HTTP-Proxy",
         8443 => "HTTPS-Alt",
+        8554 => "RTSP-Alt",
         8883 => "MQTT-TLS",
         8888 => "HTTP-Alt",
         9100 => "RAW-Printing",
@@ -81,7 +83,7 @@ fn common_ports() -> Vec<u16> {
     vec![
         21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 465, 548, 554, 587, 631, 993,
         995, 1080, 1433, 1883, 1900, 2049, 3306, 3389, 5000, 5060, 5353, 5432, 5900, 6379, 6667,
-        8080, 8443, 8883, 8888, 9100, 9200, 27017, 49152,
+        8080, 8443, 8554, 8883, 8888, 9100, 9200, 27017, 49152,
     ]
 }
 
@@ -116,6 +118,48 @@ async fn tcp_connect_probe(addr: SocketAddr, timeout: Duration) -> bool {
     tokio::time::timeout(timeout, TcpStream::connect(addr))
         .await
         .is_ok_and(|r| r.is_ok())
+}
+
+/// Send a single UDP datagram to `addr` and wait for one reply.
+///
+/// Binds an ephemeral local `UdpSocket`, `connect`s it to `addr` (so the kernel
+/// filters replies to that peer), sends `payload`, and waits up to `timeout` for
+/// a single datagram. Returns the received bytes, or `None` on any
+/// bind/send/receive error or timeout.
+///
+/// UDP has no connection handshake, so a missing reply is **inconclusive**: the
+/// port may be open-but-silent, filtered, or the datagram may have been lost.
+/// Callers must treat `None` as "no evidence", never as "closed".
+pub(crate) async fn udp_probe(
+    addr: SocketAddr,
+    payload: &[u8],
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    // Bind an ephemeral local socket in the same address family as the target.
+    let bind_addr: SocketAddr = if addr.is_ipv4() {
+        SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+    };
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await.ok()?;
+    socket.connect(addr).await.ok()?;
+
+    tokio::time::timeout(timeout, socket.send(payload))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(timeout, socket.recv(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    if n == 0 {
+        return None;
+    }
+    buf.truncate(n);
+    Some(buf)
 }
 
 /// Non-destructive banner grab: connect, optionally send a minimal request,

@@ -74,6 +74,8 @@ impl ScannerRegistry {
                 Box::new(crate::mgmt_plane::MgmtPlaneScanner),
                 Box::new(crate::printers::PrinterScanner),
                 Box::new(crate::tr069::Tr069Scanner),
+                Box::new(crate::snmp::SnmpScanner),
+                Box::new(crate::rtsp::RtspScanner),
             ],
         }
     }
