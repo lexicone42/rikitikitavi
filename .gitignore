@@ -30,3 +30,6 @@ tarpaulin-report.html
 
 # Serena (Claude Code MCP plugin)
 /.serena/
+
+# Claude Code local settings + ephemeral workflow worktrees
+/.claude/
