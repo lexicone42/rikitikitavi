@@ -1,10 +1,15 @@
 use crate::DeviceHint;
 use chrono::{DateTime, Utc};
-use rikitikitavi_core::Severity;
+use rikitikitavi_core::{Confidence, Severity};
 use serde::{Deserialize, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
 use uuid::Uuid;
+
+/// Serde default for `Finding::confidence` (also used by `Finding::new`).
+const fn default_confidence() -> Confidence {
+    Confidence::Probable
+}
 
 /// Semantic identity of a finding — same problem on same target.
 ///
@@ -27,6 +32,11 @@ pub struct Finding {
     pub description: String,
     /// Severity level.
     pub severity: Severity,
+    /// How strongly the finding is evidenced (demonstrated vs inferred).
+    /// Defaults to `Probable`; scanners set `Confirmed` when they actually
+    /// demonstrate the issue and `Inferred` for pure heuristics.
+    #[serde(default = "default_confidence")]
+    pub confidence: Confidence,
     /// Affected device IP (if applicable).
     pub affected_ip: Option<IpAddr>,
     /// Affected device MAC (if applicable).
@@ -72,6 +82,7 @@ impl Finding {
             title: title.to_owned(),
             description: description.to_owned(),
             severity,
+            confidence: default_confidence(),
             affected_ip: None,
             affected_mac: None,
             affected_hostname: None,
@@ -121,6 +132,13 @@ impl Finding {
     #[must_use]
     pub fn with_service(mut self, service: impl Into<String>) -> Self {
         self.affected_service = Some(service.into());
+        self
+    }
+
+    /// Builder-style setter for evidence confidence.
+    #[must_use]
+    pub const fn with_confidence(mut self, confidence: Confidence) -> Self {
+        self.confidence = confidence;
         self
     }
 
@@ -233,6 +251,27 @@ pub struct Remediation {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn confidence_defaults_to_probable_and_builder_overrides() {
+        let f = Finding::new("s", "t", "d", Severity::Low);
+        assert_eq!(f.confidence, Confidence::Probable);
+        let c = f.with_confidence(Confidence::Confirmed);
+        assert_eq!(c.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn confidence_survives_json_roundtrip_and_defaults_when_absent() {
+        let f = Finding::new("s", "t", "d", Severity::High).with_confidence(Confidence::Confirmed);
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Finding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.confidence, Confidence::Confirmed);
+
+        // A finding serialized before this field existed must still deserialize.
+        let legacy = r#"{"id":"00000000-0000-0000-0000-000000000000","scanner":"s","title":"t","description":"d","severity":"low","affected_ip":null,"affected_mac":null,"affected_hostname":null,"affected_port":null,"affected_service":null,"remediation":null,"cwe_id":null,"cve_ids":[],"references":[],"discovered_at":"2026-07-02T00:00:00Z"}"#;
+        let parsed: Finding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.confidence, Confidence::Probable);
+    }
 
     fn arb_severity() -> impl Strategy<Value = Severity> {
         prop_oneof![

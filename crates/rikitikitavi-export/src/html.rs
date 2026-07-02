@@ -311,9 +311,18 @@ pub fn render_html_report(results: &ScanResults) -> String {
             } else {
                 ""
             };
+            let conf_badge = match f.confidence {
+                rikitikitavi_core::Confidence::Confirmed => {
+                    r#" <span class="badge low" title="Actively demonstrated during the scan">✓ CONFIRMED</span>"#
+                }
+                rikitikitavi_core::Confidence::Inferred => {
+                    r#" <span class="badge info" title="Heuristic — not directly demonstrated">~ INFERRED</span>"#
+                }
+                rikitikitavi_core::Confidence::Probable => "",
+            };
             let _ = write!(
                 html,
-                r#"<div class="title">{}{kev_badge}</div>"#,
+                r#"<div class="title">{}{kev_badge}{conf_badge}</div>"#,
                 html_escape(&f.title)
             );
             let _ = write!(

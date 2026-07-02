@@ -358,7 +358,12 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
             } else {
                 ""
             };
-            println!("    [{:8}] {}{exploited}", f.severity, f.title);
+            let conf = match f.confidence {
+                rikitikitavi_core::Confidence::Confirmed => "  ✓ confirmed",
+                rikitikitavi_core::Confidence::Inferred => "  ~ inferred",
+                rikitikitavi_core::Confidence::Probable => "",
+            };
+            println!("    [{:8}] {}{exploited}{conf}", f.severity, f.title);
             println!("              {}", f.description);
             if let Some(ref evidence) = f.evidence {
                 println!("              Evidence: {evidence}");

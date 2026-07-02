@@ -1016,6 +1016,8 @@ impl Scanner for CredentialScanner {
                                 ),
                                 Severity::Critical,
                             )
+                            // A login actually succeeded — this is demonstrated.
+                            .with_confidence(rikitikitavi_core::Confidence::Confirmed)
                             .with_ip(ip)
                             .with_port(23)
                             .with_service("Telnet")

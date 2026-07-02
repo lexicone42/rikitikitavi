@@ -82,3 +82,40 @@ impl fmt::Display for Severity {
         }
     }
 }
+
+/// How strongly a finding is evidenced — the difference between "we saw the
+/// door standing open" and "the banner suggests the door might be unlocked."
+///
+/// A home user who gets one wrong scary alert stops trusting the tool, so every
+/// finding declares how it was established. Version-banner CVE matches are only
+/// `Probable` (backported patches keep old banners); a successful default-cred
+/// login or an observed directory listing is `Confirmed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    /// Heuristic or indirect: OUI-only device type, port-open-only, a guess.
+    Inferred,
+    /// Strong but not demonstrated: banner/version match, header signature.
+    Probable,
+    /// Actively demonstrated: a login succeeded, a listing/stream was observed,
+    /// an unauthenticated service answered.
+    Confirmed,
+}
+
+impl Confidence {
+    /// Short uppercase label for reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Inferred => "INFERRED",
+            Self::Probable => "PROBABLE",
+            Self::Confirmed => "CONFIRMED",
+        }
+    }
+}
+
+impl fmt::Display for Confidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
