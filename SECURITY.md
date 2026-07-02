@@ -63,14 +63,24 @@ check:
 
 ### Network Scanning Safety
 
-- **Read-only by default**: Most scanners only observe (ARP cache, DNS config,
-  WiFi networks, service banners). They don't modify network state.
+- **Authorization notice**: Every scan prints a one-line reminder that you must
+  only scan networks you own or are explicitly authorized to test.
+- **Reads, never writes**: Scanners observe and send crafted-but-non-destructive
+  probes; they never modify device or network state. In Active mode this
+  includes a bounded TCP-connect host sweep and application-layer probes (an SNMP
+  `GET` of `sysDescr`, an MQTT `CONNECT`, an RTSP `DESCRIBE`, a UPnP-IGD
+  `GetGenericPortMappingEntry`, an HTTP `GET`, etc.) — all read-only.
 - **TCP connect scan**: The port scanner uses standard TCP connections (not
   SYN/half-open scans), which don't require raw sockets or root privileges.
 - **No exploitation**: Rikitikitavi detects vulnerabilities but never exploits
   them. It reports "Redis has no auth" but doesn't read or write Redis data.
-- **Credential testing**: The credential scanner checks for anonymous/default
-  access (anonymous FTP, no-auth Redis). It does not brute-force passwords.
+- **Credential testing**: By default the credential scanner only *detects*
+  anonymous/default access (anonymous FTP, no-auth Redis) and flags cleartext
+  Telnet. **Only with `--aggressive`** does it attempt default-credential Telnet
+  logins against a small dictionary of canonical pairs (`admin/admin`, etc.) to
+  *confirm* the exposure. That is bounded default-credential testing — it does
+  send passwords and log in on success — not full brute force, and it is never
+  on by default.
 - **Rate limiting**: Scanners use connection timeouts and semaphore-based
   concurrency to avoid flooding the network.
 
@@ -90,20 +100,33 @@ only:
   (`~/.local/share/rikitikitavi/scans/`) as JSON files.
 - **No telemetry**: Rikitikitavi does not phone home or transmit scan results
   anywhere.
-- **Public IP detection**: The exposure scanner queries `https://api.ipify.org`
-  to detect your public IP. This is the only external network call (besides
-  scanning your local network). It can be disabled by excluding the `exposure`
-  module.
+- **Outbound calls**: rikitikitavi makes a small number of external calls beyond
+  scanning your local network:
+  - *Public IP detection* (exposure module): tries `api.ipify.org`,
+    `ifconfig.me`, then `icanhazip.com` in order. Disable by excluding the
+    `exposure` module.
+  - *EPSS enrichment*: when a scan turns up CVEs, their exploitation-probability
+    scores are fetched best-effort from `api.first.org` (FIRST.org). Skipped
+    automatically when offline.
+  - *`update-db`*: fetches vulnerability databases when you run it.
+  The CISA KEV catalog is **embedded** (a versioned static snapshot in
+  `kev_db.rs`, regenerated with `scripts/gen_kev_db.py`) — no runtime fetch.
+- **No telemetry**: none of these transmit your scan results anywhere.
 - **OCSF export**: Findings are written to local files. S3 upload is manual
   (you run `aws s3 cp` yourself).
 
 ### UniFi Integration
 
-- Credentials are passed via CLI arguments or environment variables, never
-  stored on disk by rikitikitavi.
+- Credentials can be passed via CLI arguments/environment variables, or stored
+  in the config file (`unifi.controller.password`/`api_token`, and the
+  `apis.shodan_api_key`/`censys_*` keys). If you put secrets in the config,
+  protect the file (`chmod 600`); `config show` redacts them, but they are stored
+  in plaintext YAML.
 - The UniFi client supports both cookie-based session auth and API token auth.
-- HTTPS certificate validation is enabled by default. The `--insecure` flag
-  (for self-signed certs) must be explicitly passed.
+- **TLS certificate validation is on by default** — the client validates the
+  controller cert before sending credentials. The `--insecure` flag (for
+  self-signed certs) must be explicitly passed to opt out, and it prints a loud
+  warning when it does.
 
 ### TLS Configuration
 

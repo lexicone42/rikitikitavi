@@ -25,7 +25,7 @@ learning to kill your own snakes. This one hunts security vulnerabilities.
 ## Quick Start
 
 ```bash
-# Install from GitHub (Rust 1.75+ required)
+# Install from GitHub (Rust 1.88+ required)
 cargo install --git https://github.com/lexicone42/rikitikitavi
 
 # Run a scan
@@ -58,7 +58,7 @@ sudo rikitikitavi monitor --interface wlan0
 
 ## Features
 
-### 18 Security Scanners
+### 25 Security Scanners
 
 Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
@@ -74,7 +74,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
                              │ ARP/DHCP     │
     Discovers IPs,           │ Credentials  │
     open ports,              │ HTTP Audit   │
-    device types             │ ... (11 more)│
+    device types             │ ... (14 more)│
                              └──────────────┘
                              Runs concurrently,
                              skips irrelevant checks
@@ -99,17 +99,27 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **SMB Security** | SMBv1 (EternalBlue-vulnerable) detection, NetBIOS exposure |
 | **ARP Security** | ARP spoofing detection (duplicate MACs/IPs, broadcast MACs) |
 | **DHCP Security** | Rogue DHCP server detection, APIPA address detection |
+| **SNMP** | Default community strings (`public`/`private`) over UDP; sysDescr leak |
+| **MQTT** | Broker anonymous-access probe (CONNECT/CONNACK, non-destructive) |
+| **Management Plane** | Unauthenticated Docker API, kubelet, and Kubernetes API exposure |
+| **Printers** | CUPS/IPP (CVE-2024-4717x) + raw JetDirect (9100) exposure |
+| **TR-069 / CWMP** | ISP remote-management (7547) reachable on the LAN |
+| **RTSP / ONVIF** | IP-camera streams reachable without authentication |
+| **UPnP-IGD** | Router WAN→LAN port forwards ("what's exposed to the internet?") |
 | **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(feature: `monitor`)* |
 
 ### Exploit Intelligence & Confidence
 
-Not every finding deserves equal panic. rikitikitavi layers two signals on top
+Not every finding deserves equal panic. rikitikitavi layers three signals on top
 of raw CVE/CVSS so a non-expert knows what to fix first:
 
 - **Actively exploited (CISA KEV):** findings whose CVE is in the CISA Known
   Exploited Vulnerabilities catalog (an embedded snapshot, refreshed via
   `scripts/gen_kev_db.py`) are badged **⚠ ACTIVELY EXPLOITED**, escalated to at
   least High, and weighted more heavily in the risk score.
+- **EPSS scores:** findings are enriched with the EPSS probability that each CVE
+  will be exploited in the next 30 days (rendered as `EPSS 94%`). Fetched
+  best-effort from FIRST.org at scan time — offline scans simply skip it.
 - **Confidence tiers:** every finding declares how it was established —
   **✓ confirmed** (demonstrated, e.g. a login actually succeeded), *probable*
   (banner/version match), or **~ inferred** (heuristic). A version banner is
@@ -143,11 +153,15 @@ Deep security auditing for Ubiquiti UniFi networks:
 ```bash
 # Scan a remote UniFi controller
 rikitikitavi unifi scan --controller https://192.168.1.1 \
-    --username admin --password secret
+    --user admin --password secret
 
 # API token auth (UniFi OS 2.x+)
 rikitikitavi unifi scan --controller https://192.168.1.1 \
     --token YOUR_API_TOKEN
+
+# Self-signed controller cert? Opt out of TLS validation explicitly.
+# By default the client validates the certificate before sending credentials.
+rikitikitavi unifi scan --controller https://192.168.1.1 --user admin --password secret --insecure
 ```
 
 - WLAN encryption and PMF (802.11w) configuration audit
@@ -179,7 +193,7 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 │  RIKITIKITAVI ─ Home Network Security Auditor                │
 ├──────────────────────────────────────────────────────────────┤
 │  Risk Score: 72/100 (C)      Scan: 2m 14s                   │
-│  ████████████████░░░░░░░░    18 scanners, 47 findings        │
+│  ████████████████░░░░░░░░    25 scanners, 47 findings        │
 │                                                              │
 │  CRIT ██  3    NEW   5       ┌─────────────────┐            │
 │  HIGH ████  7  CHG   2       │   ,:::::::,     │            │
@@ -216,8 +230,9 @@ Commands:
   aws         AWS Security Lake commands
   modules     List available scanner modules
   monitor     Passive WiFi monitoring (requires --features monitor)
-  config      Show/validate configuration
+  config      Show/validate configuration (secrets redacted)
   init        Interactive setup wizard
+  update-db   Update vulnerability databases
   version     Show version info
 ```
 
@@ -239,8 +254,27 @@ Options:
   --fail-on <SEVERITY>   Exit code 2 if any finding is at/above this severity
                          (never, info, low, medium, high, critical) — for
                          cron/CI self-audits, e.g. --fail-on high
+  --suppress <FILE>      Mute findings whose fingerprint is in this baseline
+  --write-baseline <F>   Write current findings' fingerprints to a baseline file
+  --known-devices <F>    Flag any device not in this file as a "new device"
+  --write-known-devices <F>  Write current devices to a known-devices file
+  --quiet                Suppress progress output and the consent notice
   --no-save              Don't save to scan history
   --dry-run              Show what would be scanned (no active probing)
+```
+
+> **Log level:** defaults to `warn` so the report stays readable; use
+> `--log-level info` for scan progress detail.
+
+**Baselines & recurring audits.** Establish a baseline once, then surface only
+what's new on later scans — ideal for cron/CI (`--fail-on` sets the exit code):
+
+```bash
+rikitikitavi scan --write-baseline .rikitikitavi-baseline \
+                  --write-known-devices .rikitikitavi-devices
+# ...later runs only report new findings / new devices:
+rikitikitavi scan --suppress .rikitikitavi-baseline \
+                  --known-devices .rikitikitavi-devices --fail-on high
 ```
 
 > **Consent:** rikitikitavi prints a one-line reminder that you should only scan
@@ -293,7 +327,7 @@ host/port/service, CWE reference, and remediation steps with estimated effort:
           │                    │                     │
    ┌──────┴──────┐   ┌────────┴────────┐   ┌───────┴───────┐
    │   scanners  │   │    analysis     │   │    export     │
-   │ 18 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
+   │ 25 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
    │ + registry  │   │ attack paths    │   │ HTML, OCSF    │
    └──────┬──────┘   └────────┬────────┘   └───────────────┘
           │                    │
@@ -444,7 +478,7 @@ The runner (`runner.rs`) coordinates scanning:
    the previous results)
 2. **Enrichment** — discovered ports are grouped by IP to build device
    profiles, then injected into `ScanContext`
-3. **Phase 2** — remaining 15 scanners run concurrently via
+3. **Phase 2** — remaining 22 scanners run concurrently via
    `futures::future::join_all`, filtered by `relevant_ports()`
 4. **Deduplication** — when Phase 1 and Phase 2 produce findings for the same
    `(ip, port)`, the one with more detail wins (scored by evidence, CWE,
@@ -550,7 +584,7 @@ performance.
 ## Development
 
 ```bash
-# Run all tests (570 tests including property-based)
+# Run all tests (~1050 tests including property-based)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)
