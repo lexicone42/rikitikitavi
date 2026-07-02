@@ -53,6 +53,9 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
             };
 
             let ip_str = device.ip.to_string();
+            let mac_str = device
+                .mac
+                .map_or_else(|| "Unknown".to_owned(), |m| m.to_string());
             let display_name = device.hostname.as_deref().unwrap_or(&ip_str).to_owned();
             let type_str = format!("{:?}", device.device_type);
 
@@ -69,11 +72,7 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                 ]),
                 Line::from(""),
                 detail_line("  IP Address", &ip_str, &palette),
-                detail_line(
-                    "  MAC Address",
-                    device.mac.as_deref().unwrap_or("Unknown"),
-                    &palette,
-                ),
+                detail_line("  MAC Address", &mac_str, &palette),
                 detail_line(
                     "  Hostname",
                     device.hostname.as_deref().unwrap_or("Unknown"),

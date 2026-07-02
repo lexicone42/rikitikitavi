@@ -397,14 +397,14 @@ pub fn render_html_report(results: &ScanResults) -> String {
         });
 
         for device in &devices {
-            let mac = device.mac.as_deref().unwrap_or("-");
+            let mac = device.mac.map_or_else(|| "-".to_owned(), |m| m.to_string());
             let vendor = device.vendor.as_deref().unwrap_or("Unknown");
             let device_type = format!("{:?}", device.device_type);
             let _ = writeln!(
                 html,
                 "<tr><td>{ip}</td><td>{mac}</td><td>{vendor}</td><td>{dtype}</td><td>{ports}</td></tr>",
                 ip = html_escape(&device.ip.to_string()),
-                mac = html_escape(mac),
+                mac = html_escape(&mac),
                 vendor = html_escape(vendor),
                 dtype = html_escape(&device_type),
                 ports = device.open_ports.len(),

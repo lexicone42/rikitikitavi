@@ -707,20 +707,21 @@ fn dedup_devices(devices: &mut Vec<Device>) {
 fn propagate_mac_siblings(devices: &mut [Device]) {
     use std::collections::HashMap;
 
-    // Collect best-known info per MAC (using owned strings to avoid borrow issues)
+    // Collect best-known info per MAC. Keying by the canonical MacAddr (Copy)
+    // means the same physical address always merges, regardless of the textual
+    // form each scanner reported it in.
     let mut mac_info: HashMap<
-        String,
+        rikitikitavi_models::MacAddr,
         (DeviceType, Option<String>, Option<String>, Option<String>),
     > = HashMap::new();
 
     for device in devices.iter() {
-        let Some(mac) = device.mac.as_deref() else {
+        let Some(mac) = device.mac else {
             continue;
         };
-        let entry =
-            mac_info
-                .entry(mac.to_owned())
-                .or_insert((DeviceType::Unknown, None, None, None));
+        let entry = mac_info
+            .entry(mac)
+            .or_insert((DeviceType::Unknown, None, None, None));
         if device.device_type != DeviceType::Unknown && entry.0 == DeviceType::Unknown {
             entry.0 = device.device_type;
         }
@@ -737,10 +738,10 @@ fn propagate_mac_siblings(devices: &mut [Device]) {
 
     // Apply best-known info back to all devices with matching MAC
     for device in devices.iter_mut() {
-        let Some(mac) = device.mac.as_deref() else {
+        let Some(mac) = device.mac else {
             continue;
         };
-        if let Some((dt, vendor, hostname, os)) = mac_info.get(mac) {
+        if let Some((dt, vendor, hostname, os)) = mac_info.get(&mac) {
             if device.device_type == DeviceType::Unknown && *dt != DeviceType::Unknown {
                 device.device_type = *dt;
             }

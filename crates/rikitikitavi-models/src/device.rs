@@ -2,12 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
+use crate::mac::MacAddr;
+
 /// Stable identity of a device across scan runs.
 ///
 /// Uses MAC address when available (stable across DHCP), falls back to IP.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The MAC variant holds a canonical [`MacAddr`], so the same physical address
+/// fingerprints identically no matter how a scanner formatted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceFingerprint {
-    Mac(String),
+    Mac(MacAddr),
     Ip(IpAddr),
 }
 
@@ -16,8 +20,8 @@ pub enum DeviceFingerprint {
 pub struct Device {
     /// IP address.
     pub ip: IpAddr,
-    /// MAC address (colon-separated hex).
-    pub mac: Option<String>,
+    /// MAC address, stored canonically (see [`MacAddr`]).
+    pub mac: Option<MacAddr>,
     /// Hostname.
     pub hostname: Option<String>,
     /// OUI vendor name (from MAC lookup).
@@ -76,9 +80,14 @@ impl Device {
     }
 
     /// Builder-style setter for MAC address.
+    ///
+    /// Accepts any common textual form (colon/hyphen/dotted/bare hex, any case)
+    /// and stores it canonically. An unparseable value is dropped (leaving the
+    /// device to fingerprint by IP) rather than stored in a form that would not
+    /// match the same address seen elsewhere.
     #[must_use]
-    pub fn with_mac(mut self, mac: impl Into<String>) -> Self {
-        self.mac = Some(mac.into());
+    pub fn with_mac(mut self, mac: impl AsRef<str>) -> Self {
+        self.mac = mac.as_ref().parse().ok();
         self
     }
 
@@ -99,10 +108,8 @@ impl Device {
     /// Compute a fingerprint that identifies this device across scan runs.
     /// Prefers MAC (stable across DHCP) over IP.
     pub fn fingerprint(&self) -> DeviceFingerprint {
-        self.mac.as_ref().map_or_else(
-            || DeviceFingerprint::Ip(self.ip),
-            |mac| DeviceFingerprint::Mac(mac.clone()),
-        )
+        self.mac
+            .map_or(DeviceFingerprint::Ip(self.ip), DeviceFingerprint::Mac)
     }
 }
 
@@ -227,7 +234,10 @@ mod tests {
             .with_device_type(DeviceType::Router);
 
         assert_eq!(device.ip, ip);
-        assert_eq!(device.mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(
+            device.mac.map(|m| m.to_string()).as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
         assert_eq!(device.hostname.as_deref(), Some("myhost"));
         assert_eq!(device.device_type, DeviceType::Router);
     }
@@ -302,8 +312,20 @@ mod tests {
         let device = Device::new(ip).with_mac("aa:bb:cc:dd:ee:ff");
         assert_eq!(
             device.fingerprint(),
-            DeviceFingerprint::Mac("aa:bb:cc:dd:ee:ff".to_owned())
+            DeviceFingerprint::Mac("aa:bb:cc:dd:ee:ff".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn fingerprint_is_format_independent() {
+        // The core bug this newtype fixes: the SAME physical MAC reported in
+        // different formats/casing by different scanners must fingerprint equally.
+        let ip = "10.0.0.1".parse().unwrap();
+        let a = Device::new(ip).with_mac("AA:BB:CC:DD:EE:FF");
+        let b = Device::new(ip).with_mac("aa-bb-cc-dd-ee-ff");
+        let c = Device::new(ip).with_mac("aabb.ccdd.eeff");
+        assert_eq!(a.fingerprint(), b.fingerprint());
+        assert_eq!(b.fingerprint(), c.fingerprint());
     }
 
     #[test]
@@ -401,7 +423,7 @@ mod tests {
                 .with_hostname(&hostname);
 
             assert_eq!(device.ip, ip);
-            assert_eq!(device.mac.as_deref(), Some(mac.as_str()));
+            assert_eq!(device.mac.map(|m| m.to_string()).as_deref(), Some(mac.as_str()));
             assert_eq!(device.hostname.as_deref(), Some(hostname.as_str()));
         }
 

@@ -2,6 +2,7 @@ pub mod attack_path;
 pub mod config;
 pub mod device;
 pub mod finding;
+pub mod mac;
 pub mod ocsf;
 pub mod priority_action;
 
@@ -9,6 +10,7 @@ pub use attack_path::{AttackPath, AttackStep};
 pub use config::ScanConfig;
 pub use device::{Device, DeviceFingerprint, DeviceHint, DeviceType};
 pub use finding::{Finding, FindingFingerprint, Remediation};
+pub use mac::MacAddr;
 pub use ocsf::OcsfFinding;
 pub use priority_action::PriorityAction;
 

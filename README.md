@@ -19,7 +19,7 @@ remediation guidance.
 
 Named after [Rikki-Tikki-Tavi](https://en.wikipedia.org/wiki/Rikki-Tikki-Tavi),
 the vigilant mongoose from Kipling's *Jungle Book* — and the
-[Donovan song](https://en.wikipedia.org/wiki/Riki_Tiki_Tavi_(song)) about
+[Donovan song](https://www.youtube.com/watch?v=HsjYQ4sbR1c) about
 learning to kill your own snakes. This one hunts security vulnerabilities.
 
 ## Quick Start
