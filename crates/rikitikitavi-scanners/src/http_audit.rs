@@ -165,6 +165,66 @@ pub fn is_directory_listing(body: &str) -> bool {
         && lower.contains("<a href=")
 }
 
+/// Fingerprint high-value NAS and smart-home hub web UIs (Synology DSM, QNAP
+/// QTS, Home Assistant) from the `Server` header and page body.
+///
+/// These are the prized hosts on a prosumer LAN — NAS devices are the top
+/// ransomware target (eCh0raix, Deadbolt, Qlocker) and a smart-home hub controls
+/// locks/cameras/alarms — so simply surfacing them, and advising to keep firmware
+/// current and never expose them to the internet, is high value. Whether the UI
+/// is reachable *without authentication* is flagged separately by the admin-panel
+/// classifier, so this stays a Probable identification rather than fabricating a
+/// version-specific CVE.
+pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) -> Option<Finding> {
+    let hay = format!("{} {}", server.unwrap_or(""), body).to_lowercase();
+
+    let is_ha = hay.contains("home assistant")
+        || hay.contains("home-assistant")
+        || (port == 8123 && hay.contains("assistant"));
+
+    let (product, why, advisory) =
+        if hay.contains("synology") || hay.contains("diskstation") || hay.contains("synohdpack") {
+            (
+                "Synology DSM (NAS)",
+                "Network-attached storage is a top ransomware target (eCh0raix and similar).",
+                "https://www.synology.com/en-global/security/advisory",
+            )
+        } else if hay.contains("qnap") || hay.contains("quts") {
+            (
+                "QNAP QTS (NAS)",
+                "QNAP NAS devices are heavily targeted by ransomware (Deadbolt, Qlocker).",
+                "https://www.qnap.com/en/security-advisories",
+            )
+        } else if is_ha {
+            (
+                "Home Assistant",
+                "A smart-home hub controls locks, cameras, and alarms; keep it patched and \
+             never expose it directly to the internet.",
+                "https://www.home-assistant.io/latest-security-alerts/",
+            )
+        } else {
+            return None;
+        };
+
+    Some(
+        Finding::new(
+            "http_audit",
+            &format!("{product} detected on {ip}:{port}"),
+            &format!(
+                "The web interface at {ip}:{port} appears to be {product}. {why} Keep its \
+                 firmware/software current, require strong authentication, and ensure it is \
+                 not reachable from the internet."
+            ),
+            Severity::Low,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("HTTP")
+        .with_confidence(rikitikitavi_core::Confidence::Probable)
+        .with_references(refs![advisory]),
+    )
+}
+
 /// Extract the Server header value and classify known vulnerable versions.
 pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Finding> {
     let lower = server.to_lowercase();
@@ -1342,6 +1402,11 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         // Check body for default pages and framework fingerprinting. Cap the read:
         // the response is from an untrusted device and could be arbitrarily large.
         let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
+
+        // High-value NAS / smart-home-hub identification from header + body.
+        if let Some(f) = classify_nas_ha(ip, port, headers.server.as_deref(), &body) {
+            findings.push(f);
+        }
         {
             if is_default_page(&body) {
                 findings.push(
@@ -1660,6 +1725,26 @@ mod tests {
         let finding = classify_server_header(ip, 80, "nginx/1.18.0");
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_classify_nas_ha_identifies_products() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        // Synology (body marker)
+        let f = classify_nas_ha(ip, 5000, None, "<title>DiskStation</title>").unwrap();
+        assert!(f.description.contains("Synology"));
+        // QNAP (server header marker)
+        let f = classify_nas_ha(ip, 8080, Some("QTS"), "<html>QNAP Systems</html>").unwrap();
+        assert!(f.description.contains("QNAP"));
+        // Home Assistant (port + marker)
+        let f = classify_nas_ha(ip, 8123, None, "<title>Home Assistant</title>").unwrap();
+        assert!(f.description.contains("Home Assistant"));
+    }
+
+    #[test]
+    fn test_classify_nas_ha_ignores_ordinary_pages() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        assert!(classify_nas_ha(ip, 80, Some("nginx/1.18.0"), "<h1>hello</h1>").is_none());
     }
 
     #[test]
