@@ -202,7 +202,7 @@ async fn cmd_scan(
         return Ok(());
     }
 
-    let results = runner::run_scan(&mut ctx).await?;
+    let mut results = runner::run_scan(&mut ctx).await?;
 
     // ── History: load previous before saving current ────────────────
     let history = rikitikitavi_analysis::ScanHistory::new();
@@ -227,6 +227,38 @@ async fn cmd_scan(
             Err(e) => {
                 tracing::warn!("failed to save scan history: {e}");
             }
+        }
+    }
+
+    // ── Baseline / suppression ──────────────────────────────────────
+    // History (saved above) always keeps the FULL scan; suppression only
+    // affects what is displayed, exported, and gated on by --fail-on.
+    if let Some(path) = args.write_baseline.as_ref() {
+        match write_baseline_file(path, &results.findings) {
+            Ok(n) if !args.quiet => {
+                println!("Wrote {n} fingerprint(s) to baseline {}", path.display());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Warning: could not write baseline {}: {e}", path.display()),
+        }
+    }
+    if let Some(path) = args.suppress.as_ref() {
+        match load_suppressions(path) {
+            Ok(set) => {
+                let before = results.findings.len();
+                results.findings.retain(|f| !set.contains(&f.fingerprint()));
+                let suppressed = before - results.findings.len();
+                if suppressed > 0 && !args.quiet {
+                    println!(
+                        "Suppressed {suppressed} finding(s) listed in {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "Warning: could not read suppression file {}: {e}",
+                path.display()
+            ),
         }
     }
 
@@ -264,6 +296,51 @@ async fn cmd_scan(
     }
 
     Ok(())
+}
+
+/// Write each finding's fingerprint to a baseline file (one per line, with the
+/// title as a trailing comment). Deduplicated. Returns the count written.
+fn write_baseline_file(
+    path: &std::path::Path,
+    findings: &[rikitikitavi_models::Finding],
+) -> std::io::Result<usize> {
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for f in findings {
+        seen.entry(f.fingerprint().to_string())
+            .or_insert_with(|| f.title.clone());
+    }
+    let mut file = std::fs::File::create(path)?;
+    writeln!(
+        file,
+        "# rikitikitavi suppression baseline — listed findings are muted with --suppress"
+    )?;
+    for (fp, title) in &seen {
+        writeln!(file, "{fp}  # {title}")?;
+    }
+    Ok(seen.len())
+}
+
+/// Load a suppression/baseline file into a set of fingerprints. Each line is a
+/// hex fingerprint optionally followed by a `#` comment; blank lines and
+/// comment-only lines are ignored, and unparseable tokens are skipped.
+fn load_suppressions(
+    path: &std::path::Path,
+) -> std::io::Result<std::collections::HashSet<rikitikitavi_models::FindingFingerprint>> {
+    use std::str::FromStr as _;
+    let contents = std::fs::read_to_string(path)?;
+    let mut set = std::collections::HashSet::new();
+    for line in contents.lines() {
+        let token = line.split('#').next().unwrap_or("").trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Ok(fp) = rikitikitavi_models::FindingFingerprint::from_str(token) {
+            set.insert(fp);
+        }
+    }
+    Ok(set)
 }
 
 /// Map the `--fail-on` argument to the minimum [`Severity`] that should trigger a

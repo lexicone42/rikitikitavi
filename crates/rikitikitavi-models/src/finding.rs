@@ -19,6 +19,34 @@ const fn default_confidence() -> Confidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FindingFingerprint(u64);
 
+impl FindingFingerprint {
+    /// The raw 64-bit fingerprint value.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for FindingFingerprint {
+    /// Renders as fixed-width lowercase hex, e.g. `01a2b3c4d5e6f708`, so it can
+    /// be copied into a suppression/baseline file.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+impl std::str::FromStr for FindingFingerprint {
+    type Err = std::num::ParseIntError;
+
+    /// Parses the hex form produced by [`Display`](std::fmt::Display), with an
+    /// optional `0x` prefix.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        let hex = s.strip_prefix("0x").unwrap_or(s);
+        u64::from_str_radix(hex, 16).map(Self)
+    }
+}
+
 /// A security finding produced by a scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
@@ -251,6 +279,25 @@ pub struct Remediation {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn fingerprint_display_hex_roundtrips_through_parse() {
+        use std::str::FromStr;
+        let f = Finding::new("ports", "Telnet open", "d", Severity::High)
+            .with_ip("192.168.1.1".parse().unwrap())
+            .with_port(23);
+        let fp = f.fingerprint();
+        let hex = fp.to_string();
+        assert_eq!(hex.len(), 16, "fingerprint renders as 16 hex chars");
+        assert_eq!(FindingFingerprint::from_str(&hex).unwrap(), fp);
+        // 0x prefix is accepted too.
+        assert_eq!(
+            FindingFingerprint::from_str(&format!("0x{hex}")).unwrap(),
+            fp
+        );
+        // Same identity fields => same fingerprint => baseline stays stable.
+        assert_eq!(f.fingerprint(), f.fingerprint());
+    }
 
     #[test]
     fn confidence_defaults_to_probable_and_builder_overrides() {

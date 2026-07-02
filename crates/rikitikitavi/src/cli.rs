@@ -106,6 +106,16 @@ pub struct ScanArgs {
     #[arg(long, default_value = "never")]
     pub fail_on: FailOnArg,
 
+    /// Suppress findings whose fingerprint is listed in this baseline file
+    /// (accepted findings), so recurring scans surface only what's new.
+    #[arg(long)]
+    pub suppress: Option<PathBuf>,
+
+    /// Write all current findings' fingerprints to this file as a baseline
+    /// (then pass it to `--suppress` on later scans).
+    #[arg(long)]
+    pub write_baseline: Option<PathBuf>,
+
     /// Generate attack path analysis.
     #[arg(long)]
     pub attack_paths: bool,
