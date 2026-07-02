@@ -42,6 +42,7 @@ pub mod smb;
 pub mod snmp;
 pub mod ssl;
 pub mod tr069;
+pub mod upnp_igd;
 pub mod wifi;
 
 pub use traits::{Scanner, ScannerRegistry};
