@@ -43,6 +43,14 @@ pub struct Finding {
     pub cwe_id: Option<String>,
     /// CVE IDs if applicable.
     pub cve_ids: Vec<String>,
+    /// Whether any associated CVE is in the CISA Known Exploited Vulnerabilities
+    /// catalog — i.e. actively exploited in the wild. Set during enrichment.
+    #[serde(default)]
+    pub is_kev: bool,
+    /// EPSS probability (0.0–1.0) that any associated CVE will be exploited in
+    /// the next 30 days, if known. Set during enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epss: Option<f64>,
     /// External references.
     pub references: Vec<String>,
     /// Proof-of-concept evidence (banner, login prompt, directory listing, etc.).
@@ -72,6 +80,8 @@ impl Finding {
             remediation: None,
             cwe_id: None,
             cve_ids: Vec::new(),
+            is_kev: false,
+            epss: None,
             references: Vec::new(),
             evidence: None,
             device_hint: None,

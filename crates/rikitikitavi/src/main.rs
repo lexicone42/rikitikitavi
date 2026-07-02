@@ -353,7 +353,12 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         println!("  Actionable findings:");
         println!();
         for f in &actionable {
-            println!("    [{:8}] {}", f.severity, f.title);
+            let exploited = if f.is_kev {
+                "  ⚠ ACTIVELY EXPLOITED"
+            } else {
+                ""
+            };
+            println!("    [{:8}] {}{exploited}", f.severity, f.title);
             println!("              {}", f.description);
             if let Some(ref evidence) = f.evidence {
                 println!("              Evidence: {evidence}");

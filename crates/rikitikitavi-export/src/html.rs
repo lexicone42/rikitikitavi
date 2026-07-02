@@ -306,9 +306,14 @@ pub fn render_html_report(results: &ScanResults) -> String {
                 r#"<div class="finding-card {cls}">"#,
                 cls = severity_class(f.severity)
             );
+            let kev_badge = if f.is_kev {
+                r#" <span class="badge critical" title="Listed in the CISA Known Exploited Vulnerabilities catalog">⚠ ACTIVELY EXPLOITED</span>"#
+            } else {
+                ""
+            };
             let _ = write!(
                 html,
-                r#"<div class="title">{}</div>"#,
+                r#"<div class="title">{}{kev_badge}</div>"#,
                 html_escape(&f.title)
             );
             let _ = write!(

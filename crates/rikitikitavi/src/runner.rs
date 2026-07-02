@@ -310,13 +310,23 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     // Deduplicate findings from Phase 1 + Phase 2 overlap
     let pre_dedup = all_findings.len();
-    let all_findings = deduplicate_findings(all_findings);
+    let mut all_findings = deduplicate_findings(all_findings);
     if all_findings.len() < pre_dedup {
         tracing::info!(
             before = pre_dedup,
             after = all_findings.len(),
             removed = pre_dedup - all_findings.len(),
             "deduplicated findings"
+        );
+    }
+
+    // Flag actively-exploited (CISA KEV) findings and escalate them before
+    // scoring, so "known exploited in the wild" drives the risk score and grade.
+    let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
+    if kev_count > 0 {
+        tracing::info!(
+            kev_count,
+            "findings flagged as actively exploited (CISA KEV)"
         );
     }
 

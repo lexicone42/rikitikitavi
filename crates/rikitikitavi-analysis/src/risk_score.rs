@@ -13,13 +13,16 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
     let mut score: f64 = 0.0;
 
     for finding in findings {
-        score += match finding.severity {
+        let base = match finding.severity {
             Severity::Critical => 25.0,
             Severity::High => 15.0,
             Severity::Medium => 8.0,
             Severity::Low => 3.0,
             Severity::Info => 1.0,
         };
+        // A finding whose CVE is actively exploited in the wild (CISA KEV) weighs
+        // more than an equally-severe theoretical issue.
+        score += if finding.is_kev { base * 1.5 } else { base };
     }
 
     // Cap at 100
