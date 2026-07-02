@@ -26,16 +26,20 @@ pub mod http_audit;
 pub mod http_util;
 pub mod isolation;
 pub mod mdns;
+pub mod mgmt_plane;
+pub mod mqtt;
 pub mod neighbor;
 pub mod network;
 pub mod oui_db;
 #[cfg(feature = "monitor")]
 pub mod passive_wifi;
 pub mod ports;
+pub mod printers;
 pub mod router;
 pub mod services;
 pub mod smb;
 pub mod ssl;
+pub mod tr069;
 pub mod wifi;
 
 pub use traits::{Scanner, ScannerRegistry};

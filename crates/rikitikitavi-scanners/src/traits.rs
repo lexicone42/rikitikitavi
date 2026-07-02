@@ -70,6 +70,10 @@ impl ScannerRegistry {
                 Box::new(crate::smb::SmbScanner),
                 Box::new(crate::arp::ArpScanner),
                 Box::new(crate::dhcp::DhcpScanner),
+                Box::new(crate::mqtt::MqttScanner),
+                Box::new(crate::mgmt_plane::MgmtPlaneScanner),
+                Box::new(crate::printers::PrinterScanner),
+                Box::new(crate::tr069::Tr069Scanner),
             ],
         }
     }

@@ -48,6 +48,8 @@ const fn port_to_service(port: u16) -> &'static str {
         1883 => "MQTT",
         1900 => "SSDP/UPnP",
         2049 => "NFS",
+        2375 => "Docker-API",
+        2376 => "Docker-API-TLS",
         3306 => "MySQL",
         3389 => "RDP",
         5000 => "UPnP/DLNA",
@@ -58,13 +60,16 @@ const fn port_to_service(port: u16) -> &'static str {
         5985 => "WinRM-HTTP",
         5986 => "WinRM-HTTPS",
         6379 => "Redis",
+        6443 => "Kubernetes-API",
         6667 => "IRC",
+        7547 => "CWMP/TR-069",
         8080 => "HTTP-Proxy",
         8443 => "HTTPS-Alt",
         8883 => "MQTT-TLS",
         8888 => "HTTP-Alt",
         9100 => "RAW-Printing",
         9200 => "Elasticsearch",
+        10250 => "Kubelet",
         27017 => "MongoDB",
         49152 => "UPnP",
         _ => "Unknown",
@@ -89,6 +94,7 @@ fn extended_ports() -> Vec<u16> {
         2222, 3000, 3128, 3268, 3269, 3690, 4443, 4444, 4567, 5001, 5004, 5005, 5050, 5051, 5222,
         5269, 5357, 5800, 5901, 5938, 6000, 6001, 6443, 6881, 7070, 7443, 7547, 8000, 8008, 8081,
         8090, 8291, 8444, 8880, 8889, 9000, 9001, 9090, 9091, 9443, 10000, 11211, 27018, 50000,
+        2375, 2376, 10250,
     ]);
     ports.sort_unstable();
     ports.dedup();
