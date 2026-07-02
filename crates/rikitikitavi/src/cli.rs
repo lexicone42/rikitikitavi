@@ -116,6 +116,16 @@ pub struct ScanArgs {
     #[arg(long)]
     pub write_baseline: Option<PathBuf>,
 
+    /// Flag any discovered device NOT listed in this known-devices file as a
+    /// "new device on your network" finding.
+    #[arg(long)]
+    pub known_devices: Option<PathBuf>,
+
+    /// Write all currently-discovered devices to this file as the known set
+    /// (then pass it to `--known-devices` on later scans).
+    #[arg(long)]
+    pub write_known_devices: Option<PathBuf>,
+
     /// Generate attack path analysis.
     #[arg(long)]
     pub attack_paths: bool,

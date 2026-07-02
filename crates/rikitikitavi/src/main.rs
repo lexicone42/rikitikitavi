@@ -204,6 +204,48 @@ async fn cmd_scan(
 
     let mut results = runner::run_scan(&mut ctx).await?;
 
+    // ── New-device detection ────────────────────────────────────────
+    // "A device I don't recognize joined my network" is the #1 question a
+    // non-expert has. Flag any discovered device absent from the known set.
+    if let Some(path) = args.write_known_devices.as_ref() {
+        match write_known_devices_file(path, &results.devices) {
+            Ok(n) if !args.quiet => println!("Wrote {n} known device(s) to {}", path.display()),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not write known-devices {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+    if let Some(path) = args.known_devices.as_ref() {
+        match load_known_devices(path) {
+            Ok(known) => {
+                let new_devices: Vec<_> = results
+                    .devices
+                    .iter()
+                    .filter(|d| !known.contains(&device_identifier(d)))
+                    .map(new_device_finding)
+                    .collect();
+                if !new_devices.is_empty() && !args.quiet {
+                    println!(
+                        "Detected {} new device(s) not in {}",
+                        new_devices.len(),
+                        path.display()
+                    );
+                }
+                results.findings.extend(new_devices);
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not read known-devices {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+
     // ── History: load previous before saving current ────────────────
     let history = rikitikitavi_analysis::ScanHistory::new();
     let previous = if args.compare_previous {
@@ -338,6 +380,71 @@ fn load_suppressions(
         }
         if let Ok(fp) = rikitikitavi_models::FindingFingerprint::from_str(token) {
             set.insert(fp);
+        }
+    }
+    Ok(set)
+}
+
+/// A device's stable identifier for the known-devices set: its MAC when known
+/// (survives DHCP address changes), otherwise its IP.
+fn device_identifier(d: &rikitikitavi_models::Device) -> String {
+    d.mac.map_or_else(|| d.ip.to_string(), |m| m.to_string())
+}
+
+/// Build a "new device on network" finding for an unrecognized device.
+fn new_device_finding(d: &rikitikitavi_models::Device) -> rikitikitavi_models::Finding {
+    use rikitikitavi_core::{Confidence, Severity};
+    let label = device_identity_label(d);
+    let title = if label.is_empty() {
+        format!("New device on network: {}", d.ip)
+    } else {
+        format!("New device on network: {} {label}", d.ip)
+    };
+    let mac_note = d.mac.map_or_else(String::new, |m| format!(" (MAC {m})"));
+    let desc = format!(
+        "A device not in your known-devices list appeared at {}{mac_note}. If you do \
+         not recognize it, investigate — it may be an unauthorized device on your network.",
+        d.ip
+    );
+    rikitikitavi_models::Finding::new("device", &title, &desc, Severity::Medium)
+        .with_ip(d.ip)
+        .with_confidence(Confidence::Confirmed)
+        .with_cwe("CWE-284")
+}
+
+/// Write the known-devices set: one identifier per line with a label comment.
+fn write_known_devices_file(
+    path: &std::path::Path,
+    devices: &[rikitikitavi_models::Device],
+) -> std::io::Result<usize> {
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for d in devices {
+        seen.entry(device_identifier(d))
+            .or_insert_with(|| device_identity_label(d));
+    }
+    let mut file = std::fs::File::create(path)?;
+    writeln!(
+        file,
+        "# rikitikitavi known devices — absent devices are flagged as new"
+    )?;
+    for (id, label) in &seen {
+        writeln!(file, "{id}  # {label}")?;
+    }
+    Ok(seen.len())
+}
+
+/// Load the known-devices set (identifiers; `#` comments and blanks ignored).
+fn load_known_devices(
+    path: &std::path::Path,
+) -> std::io::Result<std::collections::HashSet<String>> {
+    let contents = std::fs::read_to_string(path)?;
+    let mut set = std::collections::HashSet::new();
+    for line in contents.lines() {
+        let token = line.split('#').next().unwrap_or("").trim();
+        if !token.is_empty() {
+            set.insert(token.to_owned());
         }
     }
     Ok(set)
