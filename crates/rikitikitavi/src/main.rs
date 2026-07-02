@@ -281,6 +281,20 @@ const fn fail_on_threshold(arg: cli::FailOnArg) -> Option<rikitikitavi_core::Sev
 }
 
 #[allow(clippy::too_many_lines)]
+/// Compact identity label for a device in the grouped report, e.g. "HP (Printer)",
+/// "myhost (Router)", "(Camera)", or "" when nothing is known.
+fn device_identity_label(d: &rikitikitavi_models::Device) -> String {
+    use rikitikitavi_models::DeviceType;
+    let name = d.vendor.as_deref().or(d.hostname.as_deref());
+    match (name, d.device_type) {
+        (Some(n), DeviceType::Unknown) => format!("({n})"),
+        (Some(n), k) => format!("{n} ({k:?})"),
+        (None, DeviceType::Unknown) => String::new(),
+        (None, k) => format!("({k:?})"),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
     use rikitikitavi_core::Severity;
 
@@ -348,6 +362,56 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
             )
         })
         .collect();
+
+    // ── Devices needing attention (grouped by device) ───────────
+    // A flat list of 200 findings is hard for a non-expert to act on; this
+    // groups the actionable ones by device so the worst offenders stand out.
+    // Network-wide findings without an IP (DNS, exposure) appear only in the
+    // detailed list below.
+    {
+        use std::collections::BTreeMap;
+        use std::fmt::Write as _;
+        let mut by_device: BTreeMap<std::net::IpAddr, Vec<&rikitikitavi_models::Finding>> =
+            BTreeMap::new();
+        for f in &actionable {
+            if let Some(ip) = f.affected_ip {
+                by_device.entry(ip).or_default().push(f);
+            }
+        }
+        if !by_device.is_empty() {
+            let mut rows: Vec<_> = by_device.into_iter().collect();
+            rows.sort_by_key(|(_, fs)| {
+                let worst = fs
+                    .iter()
+                    .map(|f| f.severity)
+                    .max()
+                    .unwrap_or(Severity::Info);
+                std::cmp::Reverse((worst, fs.len()))
+            });
+            println!("  Devices needing attention:");
+            for (ip, fs) in &rows {
+                let ident = results
+                    .devices
+                    .iter()
+                    .find(|d| d.ip == *ip)
+                    .map_or_else(String::new, device_identity_label);
+                let mut badge = String::new();
+                for (sev, name) in [
+                    (Severity::Critical, "CRIT"),
+                    (Severity::High, "HIGH"),
+                    (Severity::Medium, "MED"),
+                ] {
+                    let n = fs.iter().filter(|f| f.severity == sev).count();
+                    if n > 0 {
+                        let _ = write!(badge, "{n} {name}  ");
+                    }
+                }
+                let ip_str = ip.to_string();
+                println!("    {ip_str:<15}  {ident:<26}  {}", badge.trim_end());
+            }
+            println!();
+        }
+    }
 
     if !actionable.is_empty() {
         println!("  Actionable findings:");
