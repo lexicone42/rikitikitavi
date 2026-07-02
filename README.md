@@ -101,6 +101,21 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **DHCP Security** | Rogue DHCP server detection, APIPA address detection |
 | **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(feature: `monitor`)* |
 
+### Exploit Intelligence & Confidence
+
+Not every finding deserves equal panic. rikitikitavi layers two signals on top
+of raw CVE/CVSS so a non-expert knows what to fix first:
+
+- **Actively exploited (CISA KEV):** findings whose CVE is in the CISA Known
+  Exploited Vulnerabilities catalog (an embedded snapshot, refreshed via
+  `scripts/gen_kev_db.py`) are badged **⚠ ACTIVELY EXPLOITED**, escalated to at
+  least High, and weighted more heavily in the risk score.
+- **Confidence tiers:** every finding declares how it was established —
+  **✓ confirmed** (demonstrated, e.g. a login actually succeeded), *probable*
+  (banner/version match), or **~ inferred** (heuristic). A version banner is
+  only *probable* because a backported patch can leave an old version string,
+  so confirmed findings stand out from ones worth double-checking.
+
 ### Scan Comparison
 
 Track how your network security changes over time:
@@ -221,19 +236,28 @@ Options:
   --format <F>           Output format: json, csv, html, ocsf
   --attack-paths         Generate attack path analysis
   --compare-previous     Diff against last saved scan
+  --fail-on <SEVERITY>   Exit code 2 if any finding is at/above this severity
+                         (never, info, low, medium, high, critical) — for
+                         cron/CI self-audits, e.g. --fail-on high
   --no-save              Don't save to scan history
-  --dry-run              Show what would be scanned
+  --dry-run              Show what would be scanned (no active probing)
 ```
 
-### Populating the ARP Cache
+> **Consent:** rikitikitavi prints a one-line reminder that you should only scan
+> networks you own or are authorized to test. Active default-credential *login
+> attempts* are gated behind `--aggressive`; the default scan detects and flags
+> exposures without attempting logins.
 
-The scanner reads the OS ARP cache, which only contains recently-contacted
-hosts. For a more complete scan on Linux, pre-populate it:
+### Host Discovery
+
+In the default (Active) mode, rikitikitavi runs a bounded, unprivileged
+TCP-connect sweep across the detected subnet, so a cold ARP cache on a freshly
+booted machine no longer yields an empty "looks clean" report. `--quick`
+(Passive) mode stays read-only and only reads the ARP cache; to enrich it first:
 
 ```bash
-# Ping sweep first
-nmap -sn 192.168.1.0/24  # or: fping -a -g 192.168.1.0/24
-rikitikitavi scan
+nmap -sn 192.168.1.0/24   # or: fping -a -g 192.168.1.0/24
+rikitikitavi scan --quick
 ```
 
 ## Findings Format
