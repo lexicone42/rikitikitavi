@@ -201,6 +201,37 @@ mod tests {
     }
 
     #[test]
+    fn detects_locally_administered_randomized_macs() {
+        // Real vendor OUIs have the locally-administered bit (0x02 of octet 0)
+        // clear — they must still resolve to a vendor.
+        assert!(
+            !"a4:83:e7:1a:2b:3c"
+                .parse::<MacAddr>()
+                .unwrap()
+                .is_locally_administered()
+        ); // Apple
+        assert!(
+            !"68:d7:9a:00:00:01"
+                .parse::<MacAddr>()
+                .unwrap()
+                .is_locally_administered()
+        ); // Ubiquiti
+        // Randomized MACs (bit set) have no meaningful vendor.
+        assert!(
+            "aa:bb:cc:dd:ee:ff"
+                .parse::<MacAddr>()
+                .unwrap()
+                .is_locally_administered()
+        );
+        assert!(
+            "06:00:00:00:00:01"
+                .parse::<MacAddr>()
+                .unwrap()
+                .is_locally_administered()
+        );
+    }
+
+    #[test]
     fn oui_is_first_three_octets() {
         let m: MacAddr = "3c:22:fb:11:22:33".parse().unwrap();
         assert_eq!(m.oui(), [0x3c, 0x22, 0xfb]);

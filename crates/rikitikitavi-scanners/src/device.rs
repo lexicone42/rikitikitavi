@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
+use rikitikitavi_models::{DeviceHint, DeviceType, Finding, MacAddr, ScanContext};
 
 use crate::Scanner;
 use crate::oui_db::ieee_oui_lookup;
@@ -100,6 +100,34 @@ impl Scanner for DeviceScanner {
         let mut unidentified = 0u32;
 
         for entry in &entries {
+            // A locally-administered (randomized) MAC has no meaningful vendor OUI.
+            // iOS 14+/Android 10+ randomize by default, so an OUI lookup here would
+            // return a bogus vendor. Skip the lookup and note it instead.
+            if entry
+                .mac
+                .parse::<MacAddr>()
+                .is_ok_and(|m| m.is_locally_administered())
+            {
+                unidentified += 1;
+                findings.push(
+                    Finding::new(
+                        "device",
+                        &format!("Randomized (private) MAC at {}", entry.ip),
+                        &format!(
+                            "MAC {} is locally-administered (randomized) — a privacy \
+                             feature of modern phones and laptops. The hardware vendor \
+                             cannot be identified from it, and it is not a stable device \
+                             identifier across scans.",
+                            entry.mac
+                        ),
+                        Severity::Info,
+                    )
+                    .with_ip(entry.ip)
+                    .with_mac(&entry.mac),
+                );
+                continue;
+            }
+
             let vendor = ieee_oui_lookup(&entry.mac);
 
             if let Some(vendor_name) = vendor {
