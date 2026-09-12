@@ -1,10 +1,14 @@
 use async_trait::async_trait;
+use futures::stream::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
 use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::Scanner;
+
+/// Upper bound on concurrently audited HTTP endpoints.
+const MAX_AUDIT_CONCURRENCY: usize = 8;
 
 /// HTTP audit scanner: security headers, CSP/CORS/cookie attributes, default
 /// pages, directory listing, admin paths on Phase 1 HTTP ports.
@@ -213,28 +217,54 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
     )
 }
 
+/// Parse the version triple following `apache/` in a lowercased `Server` header.
+fn parse_apache_version(lower: &str) -> Option<(u32, u32, u32)> {
+    let idx = lower.find("apache/")?;
+    let rest = &lower[idx + "apache/".len()..];
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    let patch = parts.next()?.parse::<u32>().ok()?;
+    Some((major, minor, patch))
+}
+
 /// Extract the Server header value and classify known vulnerable versions.
 pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Finding> {
     let lower = server.to_lowercase();
 
-    // Apache 2.4.4x (CVE-2021-41773 affects 2.4.49)
-    if lower.contains("apache/2.4.4") && !lower.contains("apache/2.4.5") {
-        return Some(
-            Finding::new(
-                "http_audit",
-                &format!("Potentially vulnerable Apache on {ip}:{port}"),
-                &format!(
-                    "Server header indicates Apache 2.4.4x ({server}), which may \
-                     be affected by path traversal vulnerabilities. Verify the \
-                     exact version and patch status."
-                ),
-                Severity::Medium,
-            )
-            .with_ip(ip)
-            .with_port(port)
-            .with_service("HTTP")
-            .with_references(refs!["https://nvd.nist.gov/vuln/detail/CVE-2021-41773",]),
-        );
+    // Apache path traversal: CVE-2021-41773 (2.4.49) and CVE-2021-42013 (2.4.50).
+    // 2.4.48 and earlier are unaffected; 2.4.51 fixed both.
+    if let Some((2, 4, patch)) = parse_apache_version(&lower) {
+        let cve = match patch {
+            49 => Some("CVE-2021-41773"),
+            50 => Some("CVE-2021-42013"),
+            _ => None,
+        };
+        if let Some(cve_id) = cve {
+            let cve_url = format!("https://nvd.nist.gov/vuln/detail/{cve_id}");
+            return Some(
+                Finding::new(
+                    "http_audit",
+                    &format!("Vulnerable Apache ({cve_id}) on {ip}:{port}"),
+                    &format!(
+                        "Server header indicates Apache 2.4.{patch} ({server}), affected by \
+                         {cve_id} (path traversal / remote code execution). Patch to 2.4.51 \
+                         or later immediately."
+                    ),
+                    Severity::High,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_confidence(rikitikitavi_core::Confidence::Probable)
+                .with_cwe("CWE-22")
+                .with_references(refs![cve_url]),
+            );
+        }
     }
 
     if lower.contains('/') {
@@ -1213,8 +1243,7 @@ fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSi
 
     let has_session_cookie = resp.headers().get_all("set-cookie").iter().any(|v| {
         v.to_str()
-            .ok()
-            .is_some_and(|s| is_session_cookie_value(&s.to_lowercase()))
+            .is_ok_and(|s| is_session_cookie_value(&s.to_lowercase()))
     });
 
     ResponseHeaderSignals {
@@ -1463,6 +1492,12 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
     findings
 }
 
+/// Flatten indexed per-endpoint findings back into input order.
+fn flatten_by_index(mut indexed: Vec<(usize, Vec<Finding>)>) -> Vec<Finding> {
+    indexed.sort_by_key(|(idx, _)| *idx);
+    indexed.into_iter().flat_map(|(_, f)| f).collect()
+}
+
 #[async_trait]
 impl Scanner for HttpAuditScanner {
     fn id(&self) -> &'static str {
@@ -1499,19 +1534,28 @@ impl Scanner for HttpAuditScanner {
             return Ok(findings);
         }
 
+        // Flatten to (ip, port) endpoints, then audit with bounded concurrency.
+        let mut endpoints: Vec<(IpAddr, u16)> = Vec::new();
         for device in &ctx.discovered_devices {
-            let http_ports: Vec<u16> = device
-                .open_ports
-                .iter()
-                .filter(|p| AUDIT_PORTS.contains(&p.port))
-                .map(|p| p.port)
-                .collect();
-
-            for port in http_ports {
-                let port_findings = audit_http_endpoint(device.ip, port).await;
-                findings.extend(port_findings);
+            for p in &device.open_ports {
+                if AUDIT_PORTS.contains(&p.port) {
+                    endpoints.push((device.ip, p.port));
+                }
             }
         }
+
+        let concurrency = ctx.config.parallelism.clamp(1, MAX_AUDIT_CONCURRENCY);
+
+        // `buffer_unordered` completes out of order; keep the input index to
+        // restore deterministic ordering before flattening.
+        let indexed: Vec<(usize, Vec<Finding>)> =
+            futures::stream::iter(endpoints.into_iter().enumerate())
+                .map(|(idx, (ip, port))| async move { (idx, audit_http_endpoint(ip, port).await) })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+        findings.extend(flatten_by_index(indexed));
 
         tracing::info!(
             findings_count = findings.len(),
@@ -1533,6 +1577,23 @@ impl Scanner for HttpAuditScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn test_flatten_by_index_restores_input_order() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let mk =
+            |title: &str| vec![Finding::new("http_audit", title, "d", Severity::Info).with_ip(ip)];
+        // Completion order is scrambled (2, 0, 1) as buffer_unordered would yield.
+        let scrambled = vec![(2usize, mk("c")), (0usize, mk("a")), (1usize, mk("b"))];
+        let flat = flatten_by_index(scrambled);
+        let titles: Vec<&str> = flat.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_flatten_by_index_empty() {
+        assert!(flatten_by_index(Vec::new()).is_empty());
+    }
 
     #[test]
     fn test_classify_missing_all_headers() {
@@ -1656,6 +1717,63 @@ mod tests {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         let finding = classify_server_header(ip, 80, "nginx");
         assert!(finding.is_none());
+    }
+
+    #[test]
+    fn test_parse_apache_version() {
+        assert_eq!(
+            parse_apache_version("apache/2.4.49 (unix)"),
+            Some((2, 4, 49))
+        );
+        assert_eq!(parse_apache_version("apache/2.4.4"), Some((2, 4, 4)));
+        assert_eq!(parse_apache_version("nginx/1.18.0"), None);
+    }
+
+    #[test]
+    fn test_apache_2448_not_flagged_for_traversal() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_server_header(ip, 80, "Apache/2.4.48 (Unix)").unwrap();
+        // Version disclosure only — not a path-traversal CVE.
+        assert_eq!(finding.severity, Severity::Info);
+        assert!(!finding.title.contains("CVE-2021-41773"));
+        assert!(!finding.title.contains("CVE-2021-42013"));
+    }
+
+    #[test]
+    fn test_apache_2449_flags_cve_2021_41773() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_server_header(ip, 80, "Apache/2.4.49 (Unix)").unwrap();
+        assert_eq!(finding.severity, Severity::High);
+        assert!(finding.title.contains("CVE-2021-41773"));
+        assert!(
+            finding
+                .references
+                .iter()
+                .any(|r| r.contains("CVE-2021-41773"))
+        );
+    }
+
+    #[test]
+    fn test_apache_2450_flags_cve_2021_42013() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_server_header(ip, 80, "Apache/2.4.50 (Unix)").unwrap();
+        assert_eq!(finding.severity, Severity::High);
+        assert!(finding.title.contains("CVE-2021-42013"));
+        assert!(
+            finding
+                .references
+                .iter()
+                .any(|r| r.contains("CVE-2021-42013"))
+        );
+    }
+
+    #[test]
+    fn test_apache_2451_not_flagged_for_traversal() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding = classify_server_header(ip, 80, "Apache/2.4.51 (Unix)").unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+        assert!(!finding.title.contains("CVE-2021-41773"));
+        assert!(!finding.title.contains("CVE-2021-42013"));
     }
 
     #[test]

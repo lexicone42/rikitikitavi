@@ -4,8 +4,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use rikitikitavi_models::Finding;
-
 use crate::app::App;
 use crate::theme::Palette;
 
@@ -334,9 +332,7 @@ fn map_risk_grade(
 
 fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let findings = app.findings();
-
-    let mut sorted_findings: Vec<&Finding> = findings.iter().collect();
-    sorted_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    let sorted_findings = app.recent_findings();
 
     #[allow(clippy::cast_possible_truncation)]
     let snake_frame = (app.tick / 4 % 4) as usize;
@@ -368,7 +364,6 @@ fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Pa
     } else {
         sorted_findings
             .iter()
-            .take(12)
             .map(|f| {
                 let sev_color = palette.severity_color(f.severity);
                 let badge = match f.severity {
@@ -483,10 +478,42 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
     }
 }
 
+/// Truncate to `max_len` chars, ending in `...` when cut.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_owned()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let mut out: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        out.push_str("...");
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_str;
+
+    #[test]
+    fn truncate_str_short_ascii_unchanged() {
+        assert_eq!(truncate_str("short title", 60), "short title");
+    }
+
+    #[test]
+    fn truncate_str_long_ascii_cuts_with_ellipsis() {
+        let long = "x".repeat(70);
+        let out = truncate_str(&long, 60);
+        assert_eq!(out.chars().count(), 60);
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_str_multibyte_does_not_panic() {
+        // 'é' is 2 bytes: byte 57 falls inside a char.
+        let long = "é".repeat(70);
+        let out = truncate_str(&long, 60);
+        assert_eq!(out, format!("{}...", "é".repeat(57)));
+
+        let cjk = "網".repeat(70);
+        assert_eq!(truncate_str(&cjk, 60), format!("{}...", "網".repeat(57)));
     }
 }

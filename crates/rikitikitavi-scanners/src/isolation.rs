@@ -1,15 +1,16 @@
 use async_trait::async_trait;
+use ipnetwork::IpNetwork;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// Network isolation scanner: /24 subnet count in the ARP cache and reachability
-/// of common alternate gateway IPs.
+/// Network isolation scanner: ARP-cache devices outside the target network and
+/// reachability of common alternate gateway IPs.
 pub struct IsolationScanner;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -35,6 +36,26 @@ const fn subnet_24(ip: &IpAddr) -> Option<[u8; 3]> {
         }
         IpAddr::V6(_) => None,
     }
+}
+
+/// Network devices are judged against: `target`, else the /24 of an IPv4 `gateway`.
+fn home_network(target: Option<IpNetwork>, gateway: Option<IpAddr>) -> Option<IpNetwork> {
+    let raw = target.or_else(|| match gateway {
+        Some(gw @ IpAddr::V4(_)) => IpNetwork::new(gw, 24).ok(),
+        _ => None,
+    })?;
+    IpNetwork::new(raw.network(), raw.prefix()).ok()
+}
+
+/// /24 groups of IPv4 entries outside `home`.
+fn foreign_subnets<'a>(
+    ips: impl IntoIterator<Item = &'a IpAddr>,
+    home: &IpNetwork,
+) -> BTreeSet<[u8; 3]> {
+    ips.into_iter()
+        .filter(|ip| !home.contains(**ip))
+        .filter_map(subnet_24)
+        .collect()
 }
 
 /// Check if an IP is reachable on a common gateway port (80 or 443).
@@ -76,43 +97,51 @@ impl Scanner for IsolationScanner {
                 message: format!("failed to read ARP cache: {e}"),
             })?;
 
-        let subnets: HashSet<[u8; 3]> = arp_entries
-            .iter()
-            .filter_map(|e| subnet_24(&e.ip))
-            .collect();
+        let mut single_segment = false;
+        if let Some(home) = home_network(ctx.target_network, ctx.gateway) {
+            let foreign = foreign_subnets(arp_entries.iter().map(|e| &e.ip), &home);
+            tracing::info!(%home, foreign_count = foreign.len(), "subnet analysis");
+            single_segment = foreign.is_empty();
 
-        tracing::info!(subnet_count = subnets.len(), "unique /24 subnets detected");
+            if !foreign.is_empty() {
+                let subnet_list: Vec<String> = foreign
+                    .iter()
+                    .map(|s| format!("{}.{}.{}.0/24", s[0], s[1], s[2]))
+                    .collect();
 
-        if subnets.len() > 1 {
-            let subnet_list: Vec<String> = subnets
-                .iter()
-                .map(|s| format!("{}.{}.{}.0/24", s[0], s[1], s[2]))
-                .collect();
-
-            findings.push(
-                Finding::new(
+                findings.push(
+                    Finding::new(
+                        "isolation",
+                        &format!(
+                            "Devices outside {home} detected ({} other subnet(s))",
+                            foreign.len()
+                        ),
+                        &format!(
+                            "ARP cache contains devices outside the target network {home}, \
+                             from {} other /24 subnet(s): {}. Multiple subnets visible from \
+                             a single host may indicate a flat network without proper VLAN \
+                             segmentation, or that inter-VLAN routing is enabled without \
+                             restrictions.",
+                            foreign.len(),
+                            subnet_list.join(", ")
+                        ),
+                        Severity::Low,
+                    )
+                    .with_cwe("CWE-653"),
+                );
+            } else if !arp_entries.is_empty() {
+                findings.push(Finding::new(
                     "isolation",
-                    &format!("Multiple subnets detected ({})", subnets.len()),
+                    &format!("All devices within {home}"),
                     &format!(
-                        "ARP cache contains devices from {} different /24 subnets: {}. \
-                     Multiple subnets visible from a single host may indicate a flat \
-                     network without proper VLAN segmentation, or that inter-VLAN \
-                     routing is enabled without restrictions.",
-                        subnets.len(),
-                        subnet_list.join(", ")
+                        "All ARP cache entries are within {home}. This is typical for \
+                         simple home networks but means there is no VLAN segmentation."
                     ),
-                    Severity::Low,
-                )
-                .with_cwe("CWE-653"),
-            );
-        } else if subnets.len() == 1 {
-            findings.push(Finding::new(
-                "isolation",
-                "All devices on a single /24 subnet",
-                "All ARP cache entries are on the same /24 subnet. This is typical \
-                 for simple home networks but means there is no VLAN segmentation.",
-                Severity::Info,
-            ));
+                    Severity::Info,
+                ));
+            }
+        } else {
+            tracing::warn!("no target network or IPv4 gateway; skipping subnet analysis");
         }
 
         let current_gateway = ctx.gateway.and_then(|ip| match ip {
@@ -157,7 +186,7 @@ impl Scanner for IsolationScanner {
             );
         }
 
-        if arp_entries.len() > 50 && subnets.len() <= 1 {
+        if arp_entries.len() > 50 && single_segment {
             findings.push(
                 Finding::new(
                     "isolation",
@@ -191,6 +220,14 @@ impl Scanner for IsolationScanner {
 mod tests {
     use super::*;
 
+    fn ips(list: &[&str]) -> Vec<IpAddr> {
+        list.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    fn net(cidr: &str) -> IpNetwork {
+        cidr.parse().unwrap()
+    }
+
     #[test]
     fn test_subnet_24_v4() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
@@ -212,14 +249,75 @@ mod tests {
     }
 
     #[test]
-    fn test_subnet_detection_from_entries() {
-        let ips: Vec<IpAddr> = vec![
-            "192.168.1.1".parse().unwrap(),
-            "192.168.1.100".parse().unwrap(),
-            "10.0.0.1".parse().unwrap(),
-            "10.0.0.50".parse().unwrap(),
-        ];
-        let subnets: HashSet<[u8; 3]> = ips.iter().filter_map(subnet_24).collect();
-        assert_eq!(subnets.len(), 2); // Two distinct /24s
+    fn test_slash22_hosts_are_all_local() {
+        let home = net("192.168.0.0/22");
+        let entries = ips(&[
+            "192.168.0.1",
+            "192.168.1.50",
+            "192.168.2.200",
+            "192.168.3.254",
+        ]);
+        assert!(foreign_subnets(&entries, &home).is_empty());
+    }
+
+    #[test]
+    fn test_slash22_outside_hosts_grouped_by_24() {
+        let home = net("192.168.0.0/22");
+        let entries = ips(&[
+            "192.168.1.50",
+            "192.168.3.254",
+            "192.168.4.1",
+            "10.0.0.5",
+            "10.0.0.9",
+        ]);
+        let foreign = foreign_subnets(&entries, &home);
+        assert_eq!(foreign.len(), 2);
+        assert!(foreign.contains(&[192, 168, 4]));
+        assert!(foreign.contains(&[10, 0, 0]));
+    }
+
+    #[test]
+    fn test_slash24_neighbor_is_foreign() {
+        let home = net("192.168.1.0/24");
+        let entries = ips(&["192.168.1.10", "192.168.2.1"]);
+        let foreign = foreign_subnets(&entries, &home);
+        assert_eq!(foreign.len(), 1);
+        assert!(foreign.contains(&[192, 168, 2]));
+    }
+
+    #[test]
+    fn test_ipv6_entries_ignored() {
+        let home = net("192.168.1.0/24");
+        let entries = ips(&["192.168.1.10", "fe80::1"]);
+        assert!(foreign_subnets(&entries, &home).is_empty());
+    }
+
+    #[test]
+    fn test_home_network_prefers_target() {
+        let home = home_network(
+            Some(net("10.0.0.0/16")),
+            Some("192.168.1.1".parse().unwrap()),
+        );
+        assert_eq!(home, Some(net("10.0.0.0/16")));
+    }
+
+    #[test]
+    fn test_home_network_falls_back_to_gateway_slash24() {
+        let home = home_network(None, Some("192.168.1.1".parse().unwrap())).unwrap();
+        assert_eq!(home, net("192.168.1.0/24"));
+        assert!(home.contains("192.168.1.77".parse().unwrap()));
+        assert!(!home.contains("192.168.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_home_network_normalizes_host_bits() {
+        let home = home_network(Some(net("192.168.1.37/22")), None).unwrap();
+        assert_eq!(home.to_string(), "192.168.0.0/22");
+    }
+
+    #[test]
+    fn test_home_network_none_without_target_or_v4_gateway() {
+        assert!(home_network(None, None).is_none());
+        assert!(home_network(None, Some("fe80::1".parse().unwrap())).is_none());
     }
 }

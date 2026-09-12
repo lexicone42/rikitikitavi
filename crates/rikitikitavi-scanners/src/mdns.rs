@@ -3,8 +3,10 @@ use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use rikitikitavi_network::MdnsService;
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::time::Instant;
 
 use crate::Scanner;
 
@@ -278,20 +280,21 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     finding
 }
 
-/// Send SSDP M-SEARCH and collect responses.
-#[allow(clippy::unused_async)]
-async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
-    let mut results = Vec::new();
+/// SSDP receive window after the M-SEARCH is sent.
+const SSDP_DEADLINE: Duration = Duration::from_secs(3);
 
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
+/// Maximum SSDP responses collected per scan.
+const SSDP_MAX_RESPONSES: usize = 256;
+
+/// Send SSDP M-SEARCH and collect responses.
+async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("could not bind SSDP socket: {e}");
-            return results;
+            return Vec::new();
         }
     };
-
-    let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
 
     let search = "M-SEARCH * HTTP/1.1\r\n\
                    HOST: 239.255.255.250:1900\r\n\
@@ -301,15 +304,29 @@ async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
                    \r\n";
 
     let dest = SocketAddr::new(IpAddr::V4(SSDP_ADDR.0), SSDP_ADDR.1);
-    if socket.send_to(search.as_bytes(), dest).is_err() {
+    if socket.send_to(search.as_bytes(), dest).await.is_err() {
         tracing::warn!("could not send SSDP M-SEARCH");
-        return results;
+        return Vec::new();
     }
 
+    collect_ssdp_responses(&socket, Instant::now() + SSDP_DEADLINE, SSDP_MAX_RESPONSES).await
+}
+
+/// Parsed responses received on `socket` until `deadline`, at most `max`.
+async fn collect_ssdp_responses(
+    socket: &UdpSocket,
+    deadline: Instant,
+    max: usize,
+) -> Vec<(IpAddr, SsdpService)> {
+    let mut results = Vec::new();
     let mut buf = [0u8; 2048];
-    while let Ok((n, addr)) = socket.recv_from(&mut buf) {
-        let response = String::from_utf8_lossy(&buf[..n]);
-        if let Some(service) = parse_ssdp_response(&response) {
+
+    while results.len() < max {
+        let Ok(Ok((n, addr))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
+        else {
+            break;
+        };
+        if let Some(service) = parse_ssdp_response(&String::from_utf8_lossy(&buf[..n])) {
             results.push((addr.ip(), service));
         }
     }
@@ -673,6 +690,52 @@ mod tests {
     fn test_parse_ssdp_response_empty() {
         let response = "HTTP/1.1 200 OK\r\n\r\n";
         assert!(parse_ssdp_response(response).is_none());
+    }
+
+    // ── SSDP response collection tests ───────────────────────────
+
+    async fn loopback_pair() -> (UdpSocket, UdpSocket, SocketAddr) {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dest = receiver.local_addr().unwrap();
+        (receiver, sender, dest)
+    }
+
+    #[tokio::test]
+    async fn test_collect_ssdp_responses_capped() {
+        let (receiver, sender, dest) = loopback_pair().await;
+        for i in 0..12 {
+            let msg = format!("HTTP/1.1 200 OK\r\nSERVER: dev/{i}\r\nST: upnp:rootdevice\r\n\r\n");
+            sender.send_to(msg.as_bytes(), dest).await.unwrap();
+        }
+        let results =
+            collect_ssdp_responses(&receiver, Instant::now() + Duration::from_secs(2), 8).await;
+        assert_eq!(results.len(), 8);
+        assert!(results.iter().all(|(ip, _)| ip.is_loopback()));
+    }
+
+    #[tokio::test]
+    async fn test_collect_ssdp_responses_stops_at_deadline() {
+        let (receiver, _sender, _dest) = loopback_pair().await;
+        let start = Instant::now();
+        let results =
+            collect_ssdp_responses(&receiver, start + Duration::from_millis(200), 8).await;
+        assert!(results.is_empty());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn test_collect_ssdp_responses_skips_unparseable() {
+        let (receiver, sender, dest) = loopback_pair().await;
+        sender.send_to(b"not an ssdp response", dest).await.unwrap();
+        sender
+            .send_to(b"HTTP/1.1 200 OK\r\nSERVER: dev/1\r\n\r\n", dest)
+            .await
+            .unwrap();
+        let results =
+            collect_ssdp_responses(&receiver, Instant::now() + Duration::from_millis(300), 8).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.server.as_deref(), Some("dev/1"));
     }
 
     // ── mDNS service classification tests ────────────────────────

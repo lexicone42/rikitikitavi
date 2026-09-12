@@ -78,6 +78,9 @@ pub enum SeverityFilter {
     All,
 }
 
+/// Rows shown in the dashboard's Recent Findings pane.
+pub const RECENT_FINDINGS_MAX: usize = 12;
+
 /// Central application state for the TUI.
 pub struct App {
     pub screen: Screen,
@@ -218,7 +221,19 @@ impl App {
                             self.findings_table_state
                                 .select(Some(self.selected_finding_index));
                         }
-                        Screen::Dashboard | Screen::NetworkMap => {
+                        Screen::Dashboard => {
+                            // Rows are `recent_findings()`; select it if the filter shows it.
+                            let idx = self.recent_findings().get(visual_row).and_then(|clicked| {
+                                self.filtered_findings()
+                                    .iter()
+                                    .position(|f| std::ptr::eq(*f, *clicked))
+                            });
+                            if let Some(idx) = idx {
+                                self.selected_finding_index = idx;
+                                self.findings_table_state.select(Some(idx));
+                            }
+                        }
+                        Screen::NetworkMap => {
                             let offset = self.devices_table_state.offset();
                             let idx = offset + visual_row;
                             let max = self
@@ -382,6 +397,14 @@ impl App {
         filtered
     }
 
+    /// Findings shown on the dashboard: Critical first, at most `RECENT_FINDINGS_MAX`.
+    pub fn recent_findings(&self) -> Vec<&Finding> {
+        let mut sorted: Vec<&Finding> = self.findings().iter().collect();
+        sorted.sort_by_key(|f| std::cmp::Reverse(f.severity));
+        sorted.truncate(RECENT_FINDINGS_MAX);
+        sorted
+    }
+
     /// All devices, or empty when no results.
     pub fn devices(&self) -> &[Device] {
         self.results.as_ref().map_or(&[], |r| r.devices.as_slice())
@@ -416,6 +439,20 @@ mod tests {
 
     fn test_app() -> App {
         App::new(TuiConfig::default())
+    }
+
+    fn left_click(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn device(ip: &str) -> Device {
+        Device::new(ip.parse().unwrap())
     }
 
     #[test]
@@ -546,6 +583,73 @@ mod tests {
         assert_eq!(app.severity_filter, SeverityFilter::All);
         app.handle_key(KeyCode::Char('l'));
         assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
+    }
+
+    #[test]
+    fn test_recent_findings_sorted_and_capped() {
+        let mut app = test_app();
+        let mut findings = vec![Finding::new("test", "Low", "desc", Severity::Low)];
+        findings.extend(
+            (0..RECENT_FINDINGS_MAX)
+                .map(|i| Finding::new("test", &format!("Crit {i}"), "desc", Severity::Critical)),
+        );
+        app.results = Some(ScanResults {
+            findings,
+            ..Default::default()
+        });
+        let recent = app.recent_findings();
+        assert_eq!(recent.len(), RECENT_FINDINGS_MAX);
+        assert!(recent.iter().all(|f| f.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn test_dashboard_click_selects_finding_not_device() {
+        let mut app = test_app();
+        app.results = Some(ScanResults {
+            findings: vec![
+                Finding::new("test", "Low", "desc", Severity::Low),
+                Finding::new("test", "Critical", "desc", Severity::Critical),
+                Finding::new("test", "High", "desc", Severity::High),
+            ],
+            devices: vec![device("10.0.0.1"), device("10.0.0.2"), device("10.0.0.3")],
+            ..Default::default()
+        });
+        app.selected_device_index = 2;
+        app.hit_regions.list_area = Some(Rect::new(0, 10, 80, 8));
+        app.hit_regions.list_header_offset = 1;
+
+        // Dashboard rows: Critical, High, Low. Row 1 = High = filtered index 1.
+        app.handle_mouse(left_click(5, 12));
+        assert_eq!(app.selected_finding_index, 1);
+        assert_eq!(app.findings_table_state.selected(), Some(1));
+        assert_eq!(app.selected_device_index, 2);
+
+        // Row 2 = Low, hidden by the default filter: nothing changes.
+        app.handle_mouse(left_click(5, 13));
+        assert_eq!(app.selected_finding_index, 1);
+        assert_eq!(app.selected_device_index, 2);
+
+        // Past the last row: nothing changes.
+        app.handle_mouse(left_click(5, 17));
+        assert_eq!(app.selected_finding_index, 1);
+        assert_eq!(app.selected_device_index, 2);
+    }
+
+    #[test]
+    fn test_network_map_click_selects_device() {
+        let mut app = test_app();
+        app.screen = Screen::NetworkMap;
+        app.results = Some(ScanResults {
+            devices: vec![device("10.0.0.1"), device("10.0.0.2"), device("10.0.0.3")],
+            ..Default::default()
+        });
+        app.hit_regions.list_area = Some(Rect::new(0, 0, 80, 20));
+        app.hit_regions.list_header_offset = 11;
+
+        app.handle_mouse(left_click(5, 13));
+        assert_eq!(app.selected_device_index, 2);
+        app.handle_mouse(left_click(5, 11));
+        assert_eq!(app.selected_device_index, 0);
     }
 
     #[test]

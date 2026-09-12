@@ -390,57 +390,44 @@ fn classify_profiler_security(security: &str) -> WifiEncryption {
     }
 }
 
-/// Parse macOS `airport -s` output. Header: `SSID  BSSID  RSSI  CHANNEL  HT  CC  SECURITY`;
-/// columns are located by header offsets since SSID width varies.
+/// Parse macOS `airport -s` output. Header: `SSID  BSSID  RSSI  CHANNEL  HT  CC  SECURITY`.
+/// Rows are split at the BSSID token (see [`split_airport_row`]); the SSID may contain
+/// spaces and non-ASCII characters.
 #[cfg(any(target_os = "macos", test))]
 fn parse_airport_output(contents: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
     let mut lines = contents.lines();
 
-    let header = match lines.next() {
-        Some(h) if h.contains("SSID") && h.contains("BSSID") => h,
+    match lines.next() {
+        Some(h) if h.contains("SSID") && h.contains("BSSID") => {}
         _ => return networks,
-    };
-
-    let Some(bssid_col) = header.find("BSSID") else {
-        return networks;
-    };
-    let rssi_col = header.find("RSSI").unwrap_or(bssid_col + 18);
-    let channel_col = header.find("CHANNEL").unwrap_or(rssi_col + 5);
-    let security_col = header.find("SECURITY").unwrap_or(channel_col + 10);
+    }
 
     for line in lines {
-        if line.len() < security_col {
+        let Some((ssid, columns)) = split_airport_row(line) else {
             continue;
-        }
-
-        let ssid = line[..bssid_col].trim().to_owned();
-        let bssid = line
-            .get(bssid_col..rssi_col)
-            .unwrap_or("")
-            .trim()
-            .to_owned();
-        let rssi: i32 = line
-            .get(rssi_col..channel_col)
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        let channel_str = line.get(channel_col..channel_col + 8).unwrap_or("").trim();
-        let channel: u32 = channel_str
-            .split(|c: char| !c.is_ascii_digit())
+        };
+        let mut fields = columns.split_whitespace();
+        let bssid = fields.next().unwrap_or("").to_owned();
+        let rssi: i32 = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let channel: u32 = fields
             .next()
-            .unwrap_or("0")
-            .parse()
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let security_text = line.get(security_col..).unwrap_or("").trim();
+        // Remaining: HT, CC, SECURITY...
+        let security_text = fields.skip(2).collect::<Vec<_>>().join(" ");
 
-        let encryption = classify_airport_security(security_text);
+        let encryption = classify_airport_security(&security_text);
         let wps_enabled = security_text.contains("WPS");
         let hidden = ssid.is_empty();
 
         networks.push(WifiNetwork {
-            ssid: if hidden { "<hidden>".to_owned() } else { ssid },
+            ssid: if hidden {
+                "<hidden>".to_owned()
+            } else {
+                ssid.to_owned()
+            },
             bssid,
             channel,
             frequency_mhz: channel_to_frequency(channel),
@@ -452,6 +439,26 @@ fn parse_airport_output(contents: &str) -> Vec<WifiNetwork> {
     }
 
     networks
+}
+
+/// Split an `airport -s` row into `(ssid, columns)` at the BSSID: the first
+/// MAC-formatted token followed by an integer RSSI. `None` if no such token.
+#[cfg(any(target_os = "macos", test))]
+fn split_airport_row(line: &str) -> Option<(&str, &str)> {
+    let mut pos = 0;
+    let mut tokens = line.split_whitespace().peekable();
+    while let Some(tok) = tokens.next() {
+        let start = pos + line[pos..].find(tok)?;
+        pos = start + tok.len();
+        let is_bssid = crate::wifi_frames::parse_mac(tok).is_some()
+            && tokens
+                .peek()
+                .is_some_and(|next| next.parse::<i32>().is_ok());
+        if is_bssid {
+            return Some((line[..start].trim(), &line[start..]));
+        }
+    }
+    None
 }
 
 /// Parse macOS `airport -I` info output for current connection.
@@ -607,64 +614,91 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
     networks
 }
 
+/// One `iwlist scan` cell under construction.
+struct IwlistCell {
+    ssid: String,
+    bssid: String,
+    channel: u32,
+    signal: i32,
+    encryption: WifiEncryption,
+}
+
+impl IwlistCell {
+    const fn new(bssid: String) -> Self {
+        Self {
+            ssid: String::new(),
+            bssid,
+            channel: 0,
+            signal: 0,
+            encryption: WifiEncryption::Open,
+        }
+    }
+
+    /// `None` when no BSSID was parsed.
+    fn into_network(self) -> Option<WifiNetwork> {
+        if self.bssid.is_empty() {
+            return None;
+        }
+        let hidden = self.ssid.is_empty();
+        Some(WifiNetwork {
+            ssid: if hidden {
+                "<hidden>".to_owned()
+            } else {
+                self.ssid
+            },
+            bssid: self.bssid,
+            channel: self.channel,
+            frequency_mhz: 0,
+            signal_strength_dbm: self.signal,
+            encryption: self.encryption,
+            wps_enabled: false,
+            hidden,
+        })
+    }
+}
+
 /// Parse `iwlist scan` output for nearby `WiFi` networks.
 fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
-    let mut ssid = String::new();
-    let mut bssid = String::new();
-    let mut channel = 0u32;
-    let mut freq = 0u32;
-    let mut signal = 0i32;
-    let mut encryption = WifiEncryption::Open;
-    let mut in_cell = false;
+    let mut cell: Option<IwlistCell> = None;
 
     for line in contents.lines() {
         let trimmed = line.trim();
 
         // "Cell 01 - Address: AA:BB:CC:DD:EE:FF"
         if trimmed.contains("Cell ") && trimmed.contains("Address:") {
-            if in_cell && !bssid.is_empty() {
-                networks.push(WifiNetwork {
-                    ssid: std::mem::take(&mut ssid),
-                    bssid: std::mem::take(&mut bssid),
-                    channel,
-                    frequency_mhz: freq,
-                    signal_strength_dbm: signal,
-                    encryption,
-                    wps_enabled: false,
-                    hidden: ssid.is_empty(),
-                });
-            }
-            in_cell = true;
-            encryption = WifiEncryption::Open;
-            channel = 0;
-            freq = 0;
-            signal = 0;
-
-            if let Some(addr_idx) = trimmed.find("Address:") {
-                trimmed[addr_idx + 8..].trim().clone_into(&mut bssid);
-            }
+            networks.extend(cell.take().and_then(IwlistCell::into_network));
+            let bssid = trimmed
+                .find("Address:")
+                .map(|idx| trimmed[idx + 8..].trim().to_owned())
+                .unwrap_or_default();
+            cell = Some(IwlistCell::new(bssid));
+            continue;
         }
 
+        let Some(cur) = cell.as_mut() else {
+            continue;
+        };
+
         if let Some(rest) = trimmed.strip_prefix("ESSID:\"") {
-            rest.strip_suffix('"').unwrap_or(rest).clone_into(&mut ssid);
+            rest.strip_suffix('"')
+                .unwrap_or(rest)
+                .clone_into(&mut cur.ssid);
         }
 
         if let Some(rest) = trimmed.strip_prefix("Channel:") {
-            channel = rest.parse().unwrap_or(0);
+            cur.channel = rest.parse().unwrap_or(0);
         }
 
-        if trimmed.contains("Encryption key:on") {
-            // WEP unless a WPA line follows.
-            if encryption == WifiEncryption::Open {
-                encryption = WifiEncryption::Wep;
-            }
+        // WEP unless a WPA line follows.
+        if trimmed.contains("Encryption key:on") && cur.encryption == WifiEncryption::Open {
+            cur.encryption = WifiEncryption::Wep;
         }
 
         if trimmed.contains("WPA2") {
-            encryption = WifiEncryption::Wpa2Psk;
-        } else if trimmed.contains("WPA") && encryption != WifiEncryption::Wpa2Psk {
-            encryption = WifiEncryption::WpaPsk;
+            cur.encryption = WifiEncryption::Wpa2Psk;
+        } else if trimmed.contains("WPA") && cur.encryption != WifiEncryption::Wpa2Psk {
+            cur.encryption = WifiEncryption::WpaPsk;
         }
 
         if let Some(idx) = trimmed.find("Signal level=") {
@@ -673,23 +707,11 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
                 .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '-')
                 .collect();
-            signal = num_str.parse().unwrap_or(0);
+            cur.signal = num_str.parse().unwrap_or(0);
         }
     }
 
-    if in_cell && !bssid.is_empty() {
-        networks.push(WifiNetwork {
-            ssid,
-            bssid,
-            channel,
-            frequency_mhz: freq,
-            signal_strength_dbm: signal,
-            encryption,
-            wps_enabled: false,
-            hidden: false,
-        });
-    }
-
+    networks.extend(cell.and_then(IwlistCell::into_network));
     networks
 }
 
@@ -907,6 +929,48 @@ Wi-Fi:
         assert_eq!(networks[2].encryption, WifiEncryption::Open);
     }
 
+    #[test]
+    fn test_parse_airport_output_multibyte_ssid() {
+        // Rows aligned by character count, so byte columns differ from the header.
+        let output = concat!(
+            "                            SSID BSSID             RSSI CHANNEL HT CC SECURITY (auth/unicast/group, 802.1X/EAP)\n",
+            "                          日本語ネット aa:bb:cc:dd:ee:01  -55 36,+1   Y  JP WPA2(PSK/AES/AES)\n",
+            "                            Café 0:1e:52:aa:bb:cc  -61 11      N  -- WPA(PSK/TKIP/TKIP) WPS\n",
+            "                                 de:ad:be:ef:00:02  -70 1       Y  -- NONE\n",
+            "  not a network row\n",
+        );
+        let networks = parse_airport_output(output);
+        assert_eq!(networks.len(), 3);
+
+        assert_eq!(networks[0].ssid, "日本語ネット");
+        assert_eq!(networks[0].bssid, "aa:bb:cc:dd:ee:01");
+        assert_eq!(networks[0].signal_strength_dbm, -55);
+        assert_eq!(networks[0].channel, 36);
+        assert_eq!(networks[0].encryption, WifiEncryption::Wpa2Psk);
+        assert!(!networks[0].hidden);
+
+        assert_eq!(networks[1].ssid, "Café");
+        assert_eq!(networks[1].bssid, "0:1e:52:aa:bb:cc");
+        assert_eq!(networks[1].channel, 11);
+        assert_eq!(networks[1].encryption, WifiEncryption::WpaPsk);
+        assert!(networks[1].wps_enabled);
+
+        assert!(networks[2].hidden);
+        assert_eq!(networks[2].ssid, "<hidden>");
+        assert_eq!(networks[2].bssid, "de:ad:be:ef:00:02");
+        assert_eq!(networks[2].encryption, WifiEncryption::Open);
+    }
+
+    #[test]
+    fn test_split_airport_row() {
+        assert_eq!(
+            split_airport_row("  My Net  aa:bb:cc:dd:ee:ff  -45 6 Y -- NONE"),
+            Some(("My Net", "aa:bb:cc:dd:ee:ff  -45 6 Y -- NONE"))
+        );
+        assert_eq!(split_airport_row("no bssid here"), None);
+        assert_eq!(split_airport_row(""), None);
+    }
+
     // ─── channel/frequency conversion tests ─────────────────────────────
 
     #[test]
@@ -948,5 +1012,64 @@ lo        no wireless extensions.
         assert_eq!(networks[0].signal_strength_dbm, -42);
         assert_eq!(networks[0].frequency_mhz, 2437);
         assert_eq!(networks[0].channel, 6);
+    }
+
+    const SAMPLE_IWLIST: &str = "\
+wlan0     Scan completed :
+          Cell 01 - Address: AA:BB:CC:DD:EE:01
+                    Channel:6
+                    Frequency:2.437 GHz (Channel 6)
+                    Quality=70/70  Signal level=-40 dBm
+                    Encryption key:on
+                    ESSID:\"FirstNet\"
+                    IE: IEEE 802.11i/WPA2 Version 1
+          Cell 02 - Address: AA:BB:CC:DD:EE:02
+                    Channel:11
+                    Quality=40/70  Signal level=-70 dBm
+                    Encryption key:on
+                    ESSID:\"\"
+                    IE: WPA Version 1
+          Cell 03 - Address: AA:BB:CC:DD:EE:03
+                    Channel:1
+                    Quality=30/70  Signal level=-80 dBm
+                    Encryption key:off
+                    ESSID:\"LastNet\"
+";
+
+    #[test]
+    fn test_parse_iwlist_hidden_computed_per_cell() {
+        let networks = parse_iwlist_output(SAMPLE_IWLIST);
+        assert_eq!(networks.len(), 3);
+
+        assert_eq!(networks[0].ssid, "FirstNet");
+        assert!(!networks[0].hidden);
+        assert_eq!(networks[0].bssid, "AA:BB:CC:DD:EE:01");
+        assert_eq!(networks[0].channel, 6);
+        assert_eq!(networks[0].signal_strength_dbm, -40);
+        assert_eq!(networks[0].encryption, WifiEncryption::Wpa2Psk);
+
+        assert_eq!(networks[1].ssid, "<hidden>");
+        assert!(networks[1].hidden);
+        assert_eq!(networks[1].encryption, WifiEncryption::WpaPsk);
+
+        assert_eq!(networks[2].ssid, "LastNet");
+        assert!(!networks[2].hidden);
+        assert_eq!(networks[2].signal_strength_dbm, -80);
+        assert_eq!(networks[2].encryption, WifiEncryption::Open);
+    }
+
+    #[test]
+    fn test_parse_iwlist_last_cell_hidden() {
+        let output =
+            "          Cell 01 - Address: AA:BB:CC:DD:EE:09\n                    ESSID:\"\"\n";
+        let networks = parse_iwlist_output(output);
+        assert_eq!(networks.len(), 1);
+        assert!(networks[0].hidden);
+        assert_eq!(networks[0].ssid, "<hidden>");
+    }
+
+    #[test]
+    fn test_parse_iwlist_no_cells() {
+        assert!(parse_iwlist_output("wlan0     No scan results\n").is_empty());
     }
 }

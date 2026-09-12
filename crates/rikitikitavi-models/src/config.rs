@@ -148,15 +148,29 @@ pub enum UniFiMode {
     Disabled,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UniFiControllerConfig {
     pub url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub api_token: Option<String>,
+    /// Controller site name; defaults to `default`.
     pub site: String,
     pub insecure: bool,
+}
+
+impl Default for UniFiControllerConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            username: None,
+            password: None,
+            api_token: None,
+            site: "default".to_owned(),
+            insecure: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -343,6 +357,30 @@ mod tests {
             // Just check roundtrip doesn't panic
             let _ = recovered;
         }
+    }
+
+    #[test]
+    fn test_unifi_controller_default_site() {
+        assert_eq!(UniFiControllerConfig::default().site, "default");
+    }
+
+    #[test]
+    fn test_unifi_controller_yaml_omitting_site_uses_default() {
+        let yaml = "url: https://192.168.1.1\n";
+        let config: UniFiControllerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.url.as_deref(), Some("https://192.168.1.1"));
+        assert_eq!(config.site, "default");
+
+        let yaml = "unifi:\n  controller:\n    url: https://192.168.1.1\n";
+        let app: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(app.unifi.controller.unwrap().site, "default");
+    }
+
+    #[test]
+    fn test_unifi_controller_yaml_explicit_site_kept() {
+        let yaml = "site: office\n";
+        let config: UniFiControllerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.site, "office");
     }
 
     proptest! {

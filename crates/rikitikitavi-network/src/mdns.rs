@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// DNS record type: A (IPv4 address).
 const TYPE_A: u16 = 1;
@@ -32,6 +32,9 @@ const MAX_NAME_HOPS: usize = 32;
 
 /// DNS header length in bytes.
 const DNS_HEADER_LEN: usize = 12;
+
+/// Upper bound on records collected per discovery run.
+const MAX_MDNS_RECORDS: usize = 4096;
 
 /// An mDNS/Bonjour service discovered on the network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +169,7 @@ pub fn parse_dns_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
 }
 
 /// Parse a 12-byte DNS header from the start of `data`.
-pub fn parse_dns_header(data: &[u8]) -> Option<DnsHeader> {
+pub const fn parse_dns_header(data: &[u8]) -> Option<DnsHeader> {
     if data.len() < DNS_HEADER_LEN {
         return None;
     }
@@ -379,8 +382,8 @@ const SERVICE_QUERIES: &[&str] = &[
     "_hap._tcp.local",
 ];
 
-/// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until the
-/// socket read timeout (`timeout_secs`) elapses.
+/// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until
+/// `timeout_secs` (minimum 1) elapses or [`MAX_MDNS_RECORDS`] are collected.
 pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
     // Blocking UDP I/O runs off the async runtime.
     let services = tokio::task::spawn_blocking(move || discover_services_blocking(timeout_secs))
@@ -399,9 +402,7 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
         }
     };
 
-    let timeout = Duration::from_secs(timeout_secs);
-    let _ = socket.set_read_timeout(Some(timeout));
-
+    let deadline = Instant::now() + discovery_timeout(timeout_secs);
     let dest = SocketAddr::new(IpAddr::V4(MDNS_MULTICAST), MDNS_PORT);
 
     for &svc_name in SERVICE_QUERIES {
@@ -411,32 +412,62 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
         }
     }
 
+    let all_records = collect_mdns_records(&socket, deadline, MAX_MDNS_RECORDS);
+    correlate_mdns_records(&all_records)
+}
+
+/// `timeout_secs` as a `Duration`, clamped to at least 1s.
+const fn discovery_timeout(timeout_secs: u64) -> Duration {
+    Duration::from_secs(if timeout_secs == 0 { 1 } else { timeout_secs })
+}
+
+/// Read packets from `socket` until `deadline` passes, `max_records` are
+/// collected, or a read fails. The read timeout is re-armed to the time remaining.
+fn collect_mdns_records(
+    socket: &UdpSocket,
+    deadline: Instant,
+    max_records: usize,
+) -> Vec<(IpAddr, DnsRecord)> {
     let mut all_records: Vec<(IpAddr, DnsRecord)> = Vec::new();
     let mut buf = [0u8; 4096];
 
-    while let Ok((n, addr)) = socket.recv_from(&mut buf) {
+    while all_records.len() < max_records {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Err(e) = socket.set_read_timeout(Some(remaining)) {
+            tracing::warn!("could not set mDNS read timeout: {e}");
+            break;
+        }
+        let Ok((n, addr)) = socket.recv_from(&mut buf) else {
+            break;
+        };
         if let Some(packet) = parse_dns_packet(&buf[..n]) {
             for record in packet.records {
+                if all_records.len() >= max_records {
+                    break;
+                }
                 all_records.push((addr.ip(), record));
             }
         }
     }
 
-    correlate_mdns_records(&all_records)
+    all_records
 }
 
 /// Build services by following PTR → SRV → A/AAAA/TXT. Unresolved targets fall
-/// back to a responder IP (see [`resolve_ip`]).
+/// back to the IP of the responder that sent the SRV record (see [`resolve_ip`]).
 fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     use std::collections::HashMap;
 
     let mut a_records: HashMap<&str, Ipv4Addr> = HashMap::new();
     let mut aaaa_records: HashMap<&str, Ipv6Addr> = HashMap::new();
-    let mut srv_records: HashMap<&str, (&str, u16)> = HashMap::new();
+    let mut srv_records: HashMap<&str, (&str, u16, IpAddr)> = HashMap::new();
     let mut txt_records: HashMap<&str, &[String]> = HashMap::new();
     let mut ptr_records: Vec<(&str, &str)> = Vec::new();
 
-    for (_, record) in records {
+    for (responder, record) in records {
         match record {
             DnsRecord::A { name, ip } => {
                 a_records.insert(name.as_str(), *ip);
@@ -447,7 +478,7 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
             DnsRecord::Srv {
                 name, target, port, ..
             } => {
-                srv_records.insert(name.as_str(), (target.as_str(), *port));
+                srv_records.insert(name.as_str(), (target.as_str(), *port, *responder));
             }
             DnsRecord::Txt { name, entries } if !entries.is_empty() => {
                 txt_records.insert(name.as_str(), entries.as_slice());
@@ -471,8 +502,8 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
         std::collections::HashSet::new();
 
     for (service_type, instance_name) in &ptr_records {
-        if let Some(&(target, port)) = srv_records.get(instance_name) {
-            let ip = resolve_ip(&a_records, &aaaa_records, target, records);
+        if let Some(&(target, port, responder)) = srv_records.get(instance_name) {
+            let ip = resolve_ip(&a_records, &aaaa_records, target, responder);
             let txt = txt_records
                 .get(instance_name)
                 .map_or_else(Vec::new, |e| e.to_vec());
@@ -497,13 +528,13 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     }
 
     // SRV records not referenced by any PTR are direct announcements.
-    for (_, record) in records {
+    for (responder, record) in records {
         if let DnsRecord::Srv {
             name, target, port, ..
         } = record
             && !ptr_targets.contains(name.as_str())
         {
-            let ip = resolve_ip(&a_records, &aaaa_records, target.as_str(), records);
+            let ip = resolve_ip(&a_records, &aaaa_records, target.as_str(), *responder);
             let txt = txt_records
                 .get(name.as_str())
                 .map_or_else(Vec::new, |e| e.to_vec());
@@ -531,12 +562,12 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     services
 }
 
-/// IP for `target` from A/AAAA records, else the IP of the first responder in `records`.
+/// IP for `target` from A/AAAA records, else `responder` (source of the SRV record).
 fn resolve_ip(
     a_records: &std::collections::HashMap<&str, Ipv4Addr>,
     aaaa_records: &std::collections::HashMap<&str, Ipv6Addr>,
     target: &str,
-    records: &[(IpAddr, DnsRecord)],
+    responder: IpAddr,
 ) -> IpAddr {
     if let Some(&ipv4) = a_records.get(target) {
         return IpAddr::V4(ipv4);
@@ -544,9 +575,7 @@ fn resolve_ip(
     if let Some(&ipv6) = aaaa_records.get(target) {
         return IpAddr::V6(ipv6);
     }
-    records
-        .first()
-        .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |(ip, _)| *ip)
+    responder
 }
 
 /// Extract the service type from an instance name.
@@ -1141,6 +1170,128 @@ mod tests {
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].port, 631);
         assert_eq!(services[0].service_type, "_ipp._tcp.local");
+    }
+
+    #[test]
+    fn test_correlate_unresolved_target_uses_srv_responder() {
+        let other = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let cam = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        let records = vec![
+            (
+                other,
+                DnsRecord::A {
+                    name: "other.local".to_owned(),
+                    ip: Ipv4Addr::new(192, 168, 1, 10),
+                },
+            ),
+            (
+                cam,
+                DnsRecord::Ptr {
+                    name: "_rtsp._tcp.local".to_owned(),
+                    target: "Cam._rtsp._tcp.local".to_owned(),
+                },
+            ),
+            (
+                cam,
+                DnsRecord::Srv {
+                    name: "Cam._rtsp._tcp.local".to_owned(),
+                    priority: 0,
+                    weight: 0,
+                    port: 554,
+                    target: "cam.local".to_owned(),
+                },
+            ),
+        ];
+
+        let services = correlate_mdns_records(&records);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].ip, cam);
+    }
+
+    #[test]
+    fn test_correlate_direct_srv_unresolved_target_uses_responder() {
+        let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let printer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        let records = vec![
+            (
+                other,
+                DnsRecord::Aaaa {
+                    name: "other.local".to_owned(),
+                    ip: Ipv6Addr::LOCALHOST,
+                },
+            ),
+            (
+                printer,
+                DnsRecord::Srv {
+                    name: "printer._ipp._tcp.local".to_owned(),
+                    priority: 0,
+                    weight: 0,
+                    port: 631,
+                    target: "printer.local".to_owned(),
+                },
+            ),
+        ];
+
+        let services = correlate_mdns_records(&records);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].ip, printer);
+    }
+
+    // ── Receive loop tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_discovery_timeout_clamps_zero() {
+        assert_eq!(discovery_timeout(0), Duration::from_secs(1));
+        assert_eq!(discovery_timeout(3), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_collect_records_past_deadline_does_not_block() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let start = Instant::now();
+        let records = collect_mdns_records(&socket, start, 10);
+        assert!(records.is_empty());
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_collect_records_returns_at_deadline() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let start = Instant::now();
+        let records = collect_mdns_records(&socket, start + Duration::from_millis(200), 10);
+        assert!(records.is_empty());
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[test]
+    fn test_collect_records_caps_record_count() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dest = receiver.local_addr().unwrap();
+
+        // 4 packets x 3 A records = 12 records offered.
+        let mut packet = build_test_header(0, 0x8400, 0, 3, 0, 0);
+        for i in 1..=3u8 {
+            packet.extend_from_slice(&build_a_record(
+                &format!("host{i}.local"),
+                Ipv4Addr::new(10, 0, 0, i),
+                120,
+            ));
+        }
+        for _ in 0..4 {
+            sender.send_to(&packet, dest).unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let records = collect_mdns_records(&receiver, deadline, 5);
+        assert_eq!(records.len(), 5);
+        assert!(
+            records
+                .iter()
+                .all(|(ip, _)| *ip == IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
     }
 
     // ── extract_service_type tests ─────────────────────────────────

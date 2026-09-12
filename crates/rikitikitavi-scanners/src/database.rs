@@ -210,26 +210,102 @@ fn classify_redis_version_eol(version: &str) -> bool {
     false
 }
 
-/// Connect to the `MongoDB` port and wait for unsolicited data; `Some(true)` if any arrives.
-async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
+/// Authentication state inferred from a `MongoDB` `listDatabases` reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MongoAuthState {
+    /// Reply carried the `databases` key — command ran unauthenticated.
+    NoAuth,
+    /// Reply indicated authentication is required.
+    AuthEnforced,
+    /// No usable reply, or an unrecognised one.
+    Inconclusive,
+}
+
+/// Encode the BSON document `{"listDatabases": 1, "$db": "admin"}`.
+fn encode_list_databases_bson() -> Vec<u8> {
+    let mut body = Vec::new();
+    // int32 element: listDatabases = 1
+    body.push(0x10);
+    body.extend_from_slice(b"listDatabases\0");
+    body.extend_from_slice(&1i32.to_le_bytes());
+    // string element: $db = "admin"
+    body.push(0x02);
+    body.extend_from_slice(b"$db\0");
+    let value = b"admin\0";
+    body.extend_from_slice(&i32::try_from(value.len()).unwrap_or(0).to_le_bytes());
+    body.extend_from_slice(value);
+    // document terminator
+    body.push(0x00);
+
+    let total_len = i32::try_from(body.len() + 4).unwrap_or(0);
+    let mut doc = Vec::with_capacity(body.len() + 4);
+    doc.extend_from_slice(&total_len.to_le_bytes());
+    doc.extend_from_slice(&body);
+    doc
+}
+
+/// Encode an `OP_MSG` request (opcode 2013) carrying `doc` as a single kind-0 section.
+fn encode_op_msg(request_id: i32, doc: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u32.to_le_bytes()); // flagBits
+    body.push(0x00); // section kind 0
+    body.extend_from_slice(doc);
+
+    let total_len = i32::try_from(body.len() + 16).unwrap_or(0);
+    let mut msg = Vec::with_capacity(body.len() + 16);
+    msg.extend_from_slice(&total_len.to_le_bytes()); // messageLength
+    msg.extend_from_slice(&request_id.to_le_bytes()); // requestID
+    msg.extend_from_slice(&0i32.to_le_bytes()); // responseTo
+    msg.extend_from_slice(&2013i32.to_le_bytes()); // opCode OP_MSG
+    msg.extend_from_slice(&body);
+    msg
+}
+
+/// True if `needle` occurs anywhere in `haystack`.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Classify a `MongoDB` `listDatabases` reply.
+fn classify_mongodb_reply(reply: &[u8]) -> MongoAuthState {
+    // Auth-required markers: errmsg text, codeName, or BSON `code` int32 == 13.
+    if contains_subslice(reply, b"Unauthorized")
+        || contains_subslice(reply, b"requires authentication")
+        || contains_subslice(reply, b"\x10code\x00\x0d\x00\x00\x00")
+    {
+        return MongoAuthState::AuthEnforced;
+    }
+    if contains_subslice(reply, b"databases") {
+        return MongoAuthState::NoAuth;
+    }
+    MongoAuthState::Inconclusive
+}
+
+/// Probe the `MongoDB` port with a `listDatabases` `OP_MSG` and classify the reply.
+async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> MongoAuthState {
     let addr = SocketAddr::new(ip, port);
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-        .await
-        .ok()?
-        .ok()?;
+    let Ok(Ok(mut stream)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
+    else {
+        return MongoAuthState::Inconclusive;
+    };
 
-    // Nothing is sent; MongoDB does not emit a greeting, so this normally times out.
-    let mut buf = vec![0u8; 512];
-    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
-        .await
-        .ok()?
-        .ok()?;
+    let request = encode_op_msg(1, &encode_list_databases_bson());
+    let Ok(Ok(())) = tokio::time::timeout(READ_TIMEOUT, stream.write_all(&request)).await else {
+        return MongoAuthState::Inconclusive;
+    };
 
+    let mut buf = vec![0u8; 8192];
+    let Ok(Ok(n)) = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await else {
+        return MongoAuthState::Inconclusive;
+    };
     if n == 0 {
-        return None;
+        return MongoAuthState::Inconclusive;
     }
 
-    Some(true)
+    classify_mongodb_reply(&buf[..n])
 }
 
 /// Connect and parse the `MySQL` Handshake v10 greeting.
@@ -638,7 +714,7 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
 }
 
 async fn check_mongodb(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
-    if check_mongodb_no_auth(*ip, port).await == Some(true) {
+    if check_mongodb_no_auth(*ip, port).await == MongoAuthState::NoAuth {
         findings.push(
             Finding::new(
                 "database",
@@ -860,6 +936,81 @@ fn classify_mysql_version(version: &str) -> Severity {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // ── MongoDB OP_MSG encoder / reply classifier ───────────────────
+
+    #[test]
+    fn test_encode_list_databases_bson_exact() {
+        #[rustfmt::skip]
+        let expected: [u8; 39] = [
+            0x27, 0x00, 0x00, 0x00, // document length = 39
+            0x10, // int32 element
+            b'l', b'i', b's', b't', b'D', b'a', b't', b'a', b'b', b'a', b's', b'e', b's', 0x00,
+            0x01, 0x00, 0x00, 0x00, // value = 1
+            0x02, // string element
+            b'$', b'd', b'b', 0x00,
+            0x06, 0x00, 0x00, 0x00, // string length = 6 (incl. NUL)
+            b'a', b'd', b'm', b'i', b'n', 0x00,
+            0x00, // document terminator
+        ];
+        assert_eq!(encode_list_databases_bson(), expected.to_vec());
+    }
+
+    #[test]
+    fn test_encode_op_msg_exact() {
+        let doc = encode_list_databases_bson();
+        let msg = encode_op_msg(7, &doc);
+        assert_eq!(msg.len(), 60);
+        assert_eq!(&msg[0..4], &60i32.to_le_bytes()); // messageLength
+        assert_eq!(&msg[4..8], &7i32.to_le_bytes()); // requestID
+        assert_eq!(&msg[8..12], &0i32.to_le_bytes()); // responseTo
+        assert_eq!(&msg[12..16], &2013i32.to_le_bytes()); // opCode OP_MSG
+        assert_eq!(&msg[16..20], &0u32.to_le_bytes()); // flagBits
+        assert_eq!(msg[20], 0x00); // section kind 0
+        assert_eq!(&msg[21..], &doc[..]);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_no_auth() {
+        let reply = b"\x00\x00\x00\x00\x04databases\x00\x10\x00\x00\x00";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::NoAuth);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_unauthorized() {
+        let reply = b"\x02codeName\x00\x0d\x00\x00\x00Unauthorized\x00";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::AuthEnforced);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_requires_authentication() {
+        let reply = b"command listDatabases requires authentication";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::AuthEnforced);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_code_13() {
+        let reply = b"\x10code\x00\x0d\x00\x00\x00";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::AuthEnforced);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_inconclusive() {
+        let reply = b"\xff\xff\x00\x01random garbage";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::Inconclusive);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_empty_inconclusive() {
+        assert_eq!(classify_mongodb_reply(&[]), MongoAuthState::Inconclusive);
+    }
+
+    #[test]
+    fn test_classify_mongodb_reply_auth_wins_over_databases() {
+        // An auth-error reply must not be misread as no-auth even if it mentions the word.
+        let reply = b"listDatabases requires authentication; no databases returned";
+        assert_eq!(classify_mongodb_reply(reply), MongoAuthState::AuthEnforced);
+    }
 
     // ── Helper: build a complete MySQL Handshake v10 packet ─────────
 
@@ -1105,7 +1256,7 @@ used_memory_human:1.23M\r\n";
             Some("mysql_native_password"),
         );
         let greeting = parse_mysql_greeting(&packet).unwrap();
-        assert!(greeting.capability_flags & CLIENT_SSL == 0);
+        assert_eq!(greeting.capability_flags & CLIENT_SSL, 0);
         assert_eq!(
             greeting.auth_plugin.as_deref(),
             Some("mysql_native_password")

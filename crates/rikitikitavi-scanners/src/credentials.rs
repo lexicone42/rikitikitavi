@@ -544,21 +544,33 @@ const DEFAULT_TELNET_CREDS: &[(&str, &str)] = &[
 const CISCO_CREDS: &[(&str, &str)] = &[("cisco", "cisco")];
 const MIKROTIK_CREDS: &[(&str, &str)] = &[("admin", "")];
 
-/// Result of a successful telnet default credential login.
+/// Classification of a telnet response after sending credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelnetOutcome {
+    /// Positive shell/login indicator observed.
+    Success,
+    /// Explicit failure keyword or re-displayed prompt.
+    Failure,
+    /// No positive or negative indicator (echo, MOTD, silence).
+    Inconclusive,
+}
+
+/// Result of a telnet default credential attempt that produced output.
 struct TelnetLoginResult {
     username: String,
     /// Human-readable hint — never the actual password.
     password_hint: String,
     banner: String,
     post_login: String,
+    outcome: TelnetOutcome,
 }
 
 /// Classify a telnet response after sending credentials.
 ///
-/// Returns `true` if the response indicates a successful login (shell prompt,
-/// welcome message, `BusyBox` shell) and `false` if it contains failure
-/// keywords.
-fn classify_telnet_response(response: &str) -> bool {
+/// `Success` requires a positive shell/login indicator; failure keywords or a
+/// re-displayed login/password prompt yield `Failure`; everything else (echoed
+/// input, a MOTD, silence) is `Inconclusive`.
+fn classify_telnet_response(response: &str) -> TelnetOutcome {
     let lower = response.to_lowercase();
 
     // Explicit failure indicators
@@ -573,24 +585,34 @@ fn classify_telnet_response(response: &str) -> bool {
         "access denied",
     ];
     if failure_keywords.iter().any(|kw| lower.contains(kw)) {
-        return false;
+        return TelnetOutcome::Failure;
     }
 
-    // Success indicators: shell prompts, welcome messages, BusyBox
+    // Positive success indicators: welcome banner, last-login line, BusyBox shell.
+    // Checked before the login/password re-prompt test because "last login:"
+    // legitimately contains "login:".
     let success_indicators = ["welcome", "last login", "busybox"];
     if success_indicators.iter().any(|kw| lower.contains(kw)) {
-        return true;
+        return TelnetOutcome::Success;
     }
 
-    // Shell prompts at end of output
-    let trimmed = response.trim();
-    if trimmed.ends_with('$') || trimmed.ends_with('#') || trimmed.ends_with('>') {
-        return true;
+    // A re-displayed login/password prompt means authentication did not complete.
+    if lower.contains("login:") || lower.contains("password:") {
+        return TelnetOutcome::Failure;
     }
 
-    // If we got a non-empty response with no failure keywords and no
-    // further login/password prompt, treat as likely success
-    !lower.contains("login:") && !lower.contains("password:")
+    // Shell prompt at end of output
+    let trimmed = response.trim_end();
+    if trimmed.ends_with('$')
+        || trimmed.ends_with('#')
+        || trimmed.ends_with('>')
+        || trimmed.ends_with('~')
+    {
+        return TelnetOutcome::Success;
+    }
+
+    // No positive indicator: input echo, MOTD, or empty response.
+    TelnetOutcome::Inconclusive
 }
 
 /// Build a human-readable password hint (never the actual password).
@@ -719,15 +741,15 @@ async fn try_telnet_login(ip: IpAddr, username: &str, password: &str) -> Option<
         .trim()
         .to_owned();
 
-    if classify_telnet_response(&response) {
-        Some(TelnetLoginResult {
+    match classify_telnet_response(&response) {
+        TelnetOutcome::Failure => None,
+        outcome => Some(TelnetLoginResult {
             username: username.to_owned(),
             password_hint: password_hint(password),
             banner,
             post_login: truncate_evidence(&response, 200),
-        })
-    } else {
-        None
+            outcome,
+        }),
     }
 }
 
@@ -751,15 +773,18 @@ async fn check_telnet_default_creds(ip: IpAddr) -> Option<TelnetLoginResult> {
     let banner = capture_telnet_prompt(ip).await.unwrap_or_default();
     let creds = build_credential_list(&banner);
 
+    let mut inconclusive: Option<TelnetLoginResult> = None;
     for (i, &(user, pass)) in creds.iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        if let Some(result) = try_telnet_login(ip, user, pass).await {
-            return Some(result);
+        match try_telnet_login(ip, user, pass).await {
+            Some(result) if result.outcome == TelnetOutcome::Success => return Some(result),
+            Some(result) if inconclusive.is_none() => inconclusive = Some(result),
+            _ => {}
         }
     }
-    None
+    inconclusive
 }
 
 /// Check if any `set-cookie:` header line contains a session-like cookie name.
@@ -1005,32 +1030,72 @@ impl Scanner for CredentialScanner {
                     };
 
                     if let Some(ref result) = login_result {
-                        // Confirmed default credentials — Critical
                         let banner_snip = truncate_evidence(&result.banner, 80);
-                        findings.push(
-                            Finding::new(
-                                "credentials",
-                                &format!("Default telnet credentials confirmed on {ip}"),
-                                &format!(
-                                    "Default credentials confirmed: login as '{}' \
-                                     with {} on {ip}:23. Banner: {banner_snip}",
-                                    result.username, result.password_hint,
-                                ),
-                                Severity::Critical,
-                            )
-                            .with_confidence(rikitikitavi_core::Confidence::Confirmed)
-                            .with_ip(ip)
-                            .with_port(23)
-                            .with_service("Telnet")
-                            .with_cwe("CWE-1393")
-                            .with_evidence(format!("Post-login output: {}", result.post_login))
-                            .with_opt_remediation(
-                                crate::remediation::get(
-                                    "rikitikitavi.credentials.telnet-default-confirmed",
-                                    &[],
-                                ),
-                            ),
-                        );
+                        match result.outcome {
+                            TelnetOutcome::Success => {
+                                // Demonstrated login — Critical, Confirmed
+                                findings.push(
+                                    Finding::new(
+                                        "credentials",
+                                        &format!("Default telnet credentials confirmed on {ip}"),
+                                        &format!(
+                                            "Default credentials confirmed: login as '{}' \
+                                             with {} on {ip}:23. Banner: {banner_snip}",
+                                            result.username, result.password_hint,
+                                        ),
+                                        Severity::Critical,
+                                    )
+                                    .with_confidence(rikitikitavi_core::Confidence::Confirmed)
+                                    .with_ip(ip)
+                                    .with_port(23)
+                                    .with_service("Telnet")
+                                    .with_cwe("CWE-1393")
+                                    .with_evidence(format!(
+                                        "Post-login output: {}",
+                                        result.post_login
+                                    ))
+                                    .with_opt_remediation(
+                                        crate::remediation::get(
+                                            "rikitikitavi.credentials.telnet-default-confirmed",
+                                            &[],
+                                        ),
+                                    ),
+                                );
+                            }
+                            TelnetOutcome::Inconclusive => {
+                                // Input accepted but login neither confirmed nor denied.
+                                findings.push(
+                                    Finding::new(
+                                        "credentials",
+                                        &format!(
+                                            "Telnet accepted login input (inconclusive) on {ip}"
+                                        ),
+                                        &format!(
+                                            "Telnet on {ip}:23 accepted credential input but the \
+                                             response did not confirm or deny a successful login. \
+                                             Manual verification is required. Banner: {banner_snip}"
+                                        ),
+                                        Severity::Low,
+                                    )
+                                    .with_confidence(rikitikitavi_core::Confidence::Inferred)
+                                    .with_ip(ip)
+                                    .with_port(23)
+                                    .with_service("Telnet")
+                                    .with_cwe("CWE-319")
+                                    .with_evidence(format!(
+                                        "Post-login output: {}",
+                                        result.post_login
+                                    ))
+                                    .with_opt_remediation(
+                                        crate::remediation::get(
+                                            "rikitikitavi.credentials.telnet-default",
+                                            &[],
+                                        ),
+                                    ),
+                                );
+                            }
+                            TelnetOutcome::Failure => {}
+                        }
                     }
 
                     // Always flag cleartext protocol (separate finding)
@@ -1404,82 +1469,125 @@ mod tests {
 
     #[test]
     fn test_classify_success_shell_prompt_hash() {
-        assert!(classify_telnet_response("root@device:~# "));
+        assert_eq!(
+            classify_telnet_response("root@device:~# "),
+            TelnetOutcome::Success
+        );
     }
 
     #[test]
     fn test_classify_success_shell_prompt_dollar() {
-        assert!(classify_telnet_response("user@host:~$ "));
+        assert_eq!(
+            classify_telnet_response("user@host:~$ "),
+            TelnetOutcome::Success
+        );
     }
 
     #[test]
     fn test_classify_success_shell_prompt_angle() {
-        assert!(classify_telnet_response("Router> "));
+        assert_eq!(classify_telnet_response("Router> "), TelnetOutcome::Success);
     }
 
     #[test]
     fn test_classify_success_welcome() {
-        assert!(classify_telnet_response("Welcome to OpenWrt!"));
+        assert_eq!(
+            classify_telnet_response("Welcome to OpenWrt!"),
+            TelnetOutcome::Success
+        );
     }
 
     #[test]
     fn test_classify_success_last_login() {
-        assert!(classify_telnet_response(
-            "Last login: Mon Feb 10 12:34:56 from 192.168.1.5"
-        ));
+        assert_eq!(
+            classify_telnet_response("Last login: Mon Feb 10 12:34:56 from 192.168.1.5"),
+            TelnetOutcome::Success
+        );
     }
 
     #[test]
     fn test_classify_success_busybox() {
-        assert!(classify_telnet_response(
-            "BusyBox v1.36.1 built-in shell (ash)\n#"
-        ));
+        assert_eq!(
+            classify_telnet_response("BusyBox v1.36.1 built-in shell (ash)\n#"),
+            TelnetOutcome::Success
+        );
     }
 
     #[test]
     fn test_classify_failure_incorrect() {
-        assert!(!classify_telnet_response("Login incorrect"));
+        assert_eq!(
+            classify_telnet_response("Login incorrect"),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
     fn test_classify_failure_denied() {
-        assert!(!classify_telnet_response("Access denied"));
+        assert_eq!(
+            classify_telnet_response("Access denied"),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
     fn test_classify_failure_bad_password() {
-        assert!(!classify_telnet_response("bad password"));
+        assert_eq!(
+            classify_telnet_response("bad password"),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
     fn test_classify_failure_invalid() {
-        assert!(!classify_telnet_response("Invalid credentials"));
+        assert_eq!(
+            classify_telnet_response("Invalid credentials"),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
     fn test_classify_failure_login_prompt_again() {
         // Getting another login prompt means failure
-        assert!(!classify_telnet_response("login: "));
+        assert_eq!(classify_telnet_response("login: "), TelnetOutcome::Failure);
     }
 
     #[test]
     fn test_classify_failure_password_prompt_again() {
-        assert!(!classify_telnet_response("Password: "));
+        assert_eq!(
+            classify_telnet_response("Password: "),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
     fn test_classify_failure_authentication_failure() {
-        assert!(!classify_telnet_response("authentication failure"));
+        assert_eq!(
+            classify_telnet_response("authentication failure"),
+            TelnetOutcome::Failure
+        );
     }
 
     #[test]
-    fn test_classify_empty_response_is_failure() {
-        // Empty string — no success indicators, but also no content
-        // The function won't be called with truly empty responses in practice
-        // (try_telnet_login checks n4 == 0 first), but classify treats it as
-        // success since there are no failure/prompt keywords. That's fine
-        // because the caller guards against empty.
-        assert!(classify_telnet_response(""));
+    fn test_classify_empty_response_is_inconclusive() {
+        // No success indicator and no failure keyword: inconclusive, never success.
+        assert_eq!(classify_telnet_response(""), TelnetOutcome::Inconclusive);
+    }
+
+    #[test]
+    fn test_classify_echoed_input_is_inconclusive() {
+        // A device echoing the sent credentials must not be reported as success.
+        assert_eq!(
+            classify_telnet_response("admin\r\nadmin"),
+            TelnetOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn test_classify_motd_is_inconclusive() {
+        // A MOTD banner with no shell prompt is inconclusive, not a login success.
+        assert_eq!(
+            classify_telnet_response("Authorized access only. All activity is monitored."),
+            TelnetOutcome::Inconclusive
+        );
     }
 
     // ── password_hint tests ──────────────────────────────────────────

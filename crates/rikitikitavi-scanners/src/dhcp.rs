@@ -1,26 +1,14 @@
 use async_trait::async_trait;
+use ipnetwork::IpNetwork;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
-use tokio::net::TcpStream;
+use rikitikitavi_network::NetworkInterface;
+use std::net::IpAddr;
 
 use crate::Scanner;
 
-/// DHCP scanner: non-gateway hosts with DHCP-related TCP ports open, APIPA
-/// addresses, interfaces without a gateway. No raw sockets; UDP is not probed.
+/// DHCP scanner: APIPA addresses and interfaces without a gateway. Sends no DHCP traffic.
 pub struct DhcpScanner;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Well-known ports associated with DHCP infrastructure.
-const DHCP_RELATED_PORTS: &[u16] = &[
-    67,   // DHCP server (bootps)
-    68,   // DHCP client (bootpc)
-    547,  // DHCPv6 server
-    546,  // DHCPv6 client
-    4011, // PXE/DHCP proxy
-];
 
 /// Flag interfaces without a gateway and APIPA addresses.
 fn analyze_interface_config(
@@ -82,8 +70,6 @@ struct InterfaceInfo {
 /// Types of DHCP anomalies.
 #[derive(Debug, Clone)]
 enum DhcpAnomaly {
-    /// Potential rogue DHCP server detected (non-gateway with DHCP port open).
-    RogueDhcpServer { ip: IpAddr, port: u16 },
     /// Interface has IP but no gateway (DHCP may have failed partially).
     NoGateway { interface: String },
     /// APIPA address detected (DHCP server unreachable).
@@ -95,26 +81,6 @@ enum DhcpAnomaly {
 /// Convert anomaly to finding.
 fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
     match anomaly {
-        DhcpAnomaly::RogueDhcpServer { ip, port } => Finding::new(
-            "dhcp",
-            &format!("Potential rogue DHCP server on {ip}:{port}"),
-            &format!(
-                "Host {ip} has DHCP-related port {port} open but is not the \
-                 configured gateway/router. This could indicate a rogue DHCP \
-                 server that may redirect network traffic through an attacker-controlled \
-                 device, enabling man-in-the-middle attacks."
-            ),
-            Severity::High,
-        )
-        .with_ip(*ip)
-        .with_port(*port)
-        .with_service("DHCP")
-        .with_cwe("CWE-923")
-        .with_opt_remediation(crate::remediation::get(
-            "rikitikitavi.dhcp.rogue-server",
-            &[],
-        )),
-
         DhcpAnomaly::NoGateway { interface } => Finding::new(
             "dhcp",
             &format!("Interface {interface} has no gateway assigned"),
@@ -159,7 +125,6 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
 }
 
 #[async_trait]
-#[allow(clippy::too_many_lines)]
 impl Scanner for DhcpScanner {
     fn id(&self) -> &'static str {
         "dhcp"
@@ -177,58 +142,15 @@ impl Scanner for DhcpScanner {
         ]
     }
 
+    #[allow(clippy::unused_async)]
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running DHCP security scan");
-        let mut findings = Vec::new();
 
-        if ctx.discovered_devices.is_empty() {
-            let arp_entries =
-                rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
-                    scanner: "dhcp".to_owned(),
-                    message: format!("failed to read ARP cache: {e}"),
-                })?;
-
-            for entry in &arp_entries {
-                if ctx.gateway == Some(entry.ip) {
-                    continue;
-                }
-
-                // TCP connect only; UDP is not probed.
-                for &port in DHCP_RELATED_PORTS {
-                    let addr = SocketAddr::new(entry.ip, port);
-                    if tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-                        .await
-                        .is_ok_and(|r| r.is_ok())
-                    {
-                        findings.push(anomaly_to_finding(&DhcpAnomaly::RogueDhcpServer {
-                            ip: entry.ip,
-                            port,
-                        }));
-                    }
-                }
-            }
-        } else {
-            for device in &ctx.discovered_devices {
-                if ctx.gateway == Some(device.ip) {
-                    continue;
-                }
-
-                for port_entry in &device.open_ports {
-                    if DHCP_RELATED_PORTS.contains(&port_entry.port) {
-                        findings.push(anomaly_to_finding(&DhcpAnomaly::RogueDhcpServer {
-                            ip: device.ip,
-                            port: port_entry.port,
-                        }));
-                    }
-                }
-            }
-        }
-
-        let interfaces = gather_interface_info();
-        let config_anomalies = analyze_interface_config(&interfaces, ctx.gateway);
-        for anomaly in &config_anomalies {
-            findings.push(anomaly_to_finding(anomaly));
-        }
+        let interfaces = gather_interface_info(ctx.gateway);
+        let findings: Vec<Finding> = analyze_interface_config(&interfaces, ctx.gateway)
+            .iter()
+            .map(anomaly_to_finding)
+            .collect();
 
         tracing::info!(
             findings_count = findings.len(),
@@ -238,26 +160,52 @@ impl Scanner for DhcpScanner {
     }
 
     fn estimated_duration_secs(&self) -> u64 {
-        15
+        1
     }
 }
 
-/// Gather network interface information from the system.
-fn gather_interface_info() -> Vec<InterfaceInfo> {
-    let Ok(interfaces) = rikitikitavi_network::list_interfaces() else {
-        return Vec::new();
+/// True when `iface` carries the default route or `gateway` lies within its subnet.
+fn carries_gateway(
+    iface: &NetworkInterface,
+    default_iface: Option<&str>,
+    gateway: Option<IpAddr>,
+) -> bool {
+    if default_iface == Some(iface.name.as_str()) {
+        return true;
+    }
+    let (Some(ip), Some(mask), Some(gw)) = (iface.ip, iface.netmask, gateway) else {
+        return false;
     };
+    IpNetwork::with_netmask(ip, mask).is_ok_and(|net| net.contains(gw))
+}
 
+/// Build analysis records from system interfaces.
+fn interface_info(
+    interfaces: &[NetworkInterface],
+    default_iface: Option<&str>,
+    gateway: Option<IpAddr>,
+) -> Vec<InterfaceInfo> {
     interfaces
         .iter()
         .map(|iface| InterfaceInfo {
             name: iface.name.clone(),
             ip: iface.ip,
             has_ip: iface.ip.is_some(),
-            has_gateway: false, // per-interface gateway not available from list_interfaces()
+            has_gateway: carries_gateway(iface, default_iface, gateway),
             is_loopback: iface.is_loopback,
         })
         .collect()
+}
+
+/// Gather network interface information from the system.
+fn gather_interface_info(gateway: Option<IpAddr>) -> Vec<InterfaceInfo> {
+    let Ok(interfaces) = rikitikitavi_network::list_interfaces() else {
+        return Vec::new();
+    };
+    let default_iface = rikitikitavi_network::interfaces::detect_default_interface()
+        .ok()
+        .flatten();
+    interface_info(&interfaces, default_iface.as_deref(), gateway)
 }
 
 #[cfg(test)]
@@ -273,6 +221,24 @@ mod tests {
             has_gateway,
             is_loopback,
         }
+    }
+
+    fn sys_iface(name: &str, ip: Option<&str>, netmask: Option<&str>) -> NetworkInterface {
+        NetworkInterface {
+            name: name.to_owned(),
+            ip: ip.map(|s| s.parse().unwrap()),
+            netmask: netmask.map(|s| s.parse().unwrap()),
+            mac: None,
+            is_up: true,
+            is_loopback: false,
+        }
+    }
+
+    fn no_gateway_count(anomalies: &[DhcpAnomaly]) -> usize {
+        anomalies
+            .iter()
+            .filter(|a| matches!(a, DhcpAnomaly::NoGateway { .. }))
+            .count()
     }
 
     // ── APIPA detection tests ───────────────────────────────────────
@@ -335,11 +301,7 @@ mod tests {
     fn test_no_gateway_detected() {
         let interfaces = vec![iface("eth0", Some("192.168.1.100"), false, false)];
         let anomalies = analyze_interface_config(&interfaces, None);
-        let no_gw_count = anomalies
-            .iter()
-            .filter(|a| matches!(a, DhcpAnomaly::NoGateway { .. }))
-            .count();
-        assert_eq!(no_gw_count, 1);
+        assert_eq!(no_gateway_count(&anomalies), 1);
     }
 
     #[test]
@@ -352,19 +314,72 @@ mod tests {
         );
     }
 
-    // ── Finding generation tests ────────────────────────────────────
+    // ── Gateway derivation tests ────────────────────────────────────
 
     #[test]
-    fn test_rogue_dhcp_finding() {
-        let anomaly = DhcpAnomaly::RogueDhcpServer {
-            ip: "192.168.1.50".parse().unwrap(),
-            port: 67,
-        };
-        let finding = anomaly_to_finding(&anomaly);
-        assert_eq!(finding.severity, Severity::High);
-        assert_eq!(finding.scanner, "dhcp");
-        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-923"));
+    fn test_default_route_interface_has_gateway() {
+        let sys = vec![sys_iface("eth0", Some("192.168.1.100"), None)];
+        let gw: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = interface_info(&sys, Some("eth0"), Some(gw));
+        assert!(info[0].has_gateway);
+        assert_eq!(
+            no_gateway_count(&analyze_interface_config(&info, Some(gw))),
+            0
+        );
     }
+
+    #[test]
+    fn test_on_link_gateway_without_default_interface() {
+        let sys = vec![sys_iface(
+            "en0",
+            Some("192.168.1.100"),
+            Some("255.255.255.0"),
+        )];
+        let gw: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = interface_info(&sys, None, Some(gw));
+        assert!(info[0].has_gateway);
+    }
+
+    #[test]
+    fn test_off_link_non_default_interface_flagged() {
+        let sys = vec![
+            sys_iface("eth0", Some("192.168.1.100"), Some("255.255.255.0")),
+            sys_iface("docker0", Some("172.17.0.1"), Some("255.255.0.0")),
+        ];
+        let gw: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = interface_info(&sys, Some("eth0"), Some(gw));
+        assert!(info[0].has_gateway);
+        assert!(!info[1].has_gateway);
+        let anomalies = analyze_interface_config(&info, Some(gw));
+        assert_eq!(no_gateway_count(&anomalies), 1);
+        assert!(matches!(
+            &anomalies[0],
+            DhcpAnomaly::NoGateway { interface } if interface == "docker0"
+        ));
+    }
+
+    #[test]
+    fn test_unknown_gateway_and_default_interface() {
+        let sys = vec![sys_iface(
+            "eth0",
+            Some("192.168.1.100"),
+            Some("255.255.255.0"),
+        )];
+        let info = interface_info(&sys, None, None);
+        assert!(!info[0].has_gateway);
+        assert_eq!(no_gateway_count(&analyze_interface_config(&info, None)), 1);
+    }
+
+    #[test]
+    fn test_interface_without_ip_not_flagged() {
+        let sys = vec![sys_iface("eth1", None, None)];
+        let gw: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = interface_info(&sys, Some("eth0"), Some(gw));
+        assert!(!info[0].has_gateway);
+        assert!(analyze_interface_config(&info, Some(gw)).is_empty());
+    }
+
+    // ── Finding generation tests ────────────────────────────────────
 
     #[test]
     fn test_apipa_finding_medium() {
@@ -374,6 +389,18 @@ mod tests {
         };
         let finding = anomaly_to_finding(&anomaly);
         assert_eq!(finding.severity, Severity::Medium);
+        assert_eq!(finding.scanner, "dhcp");
+        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-923"));
+    }
+
+    #[test]
+    fn test_no_gateway_finding_low() {
+        let anomaly = DhcpAnomaly::NoGateway {
+            interface: "eth0".to_owned(),
+        };
+        let finding = anomaly_to_finding(&anomaly);
+        assert_eq!(finding.severity, Severity::Low);
+        assert!(finding.title.contains("eth0"));
     }
 
     // ── Proptests ───────────────────────────────────────────────────
@@ -388,7 +415,6 @@ mod tests {
         ) {
             let ip: IpAddr = format!("{a}.{b}.{c}.{d}").parse().unwrap();
             let result = is_apipa_address(ip);
-            // Verify the invariant: APIPA iff first two octets are 169.254
             assert_eq!(result, a == 169 && b == 254);
         }
 

@@ -64,11 +64,20 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Leading characters a spreadsheet interprets as a formula (OWASP CSV injection).
+const FORMULA_TRIGGERS: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
+
+/// Quotes fields containing `,` `"` CR or LF; prefixes `'` to formula-leading fields.
 fn csv_escape(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
-        format!("\"{}\"", field.replace('"', "\"\""))
+    let neutralised = if field.starts_with(FORMULA_TRIGGERS) {
+        format!("'{field}")
     } else {
         field.to_owned()
+    };
+    if neutralised.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", neutralised.replace('"', "\"\""))
+    } else {
+        neutralised
     }
 }
 
@@ -98,6 +107,75 @@ mod tests {
     #[test]
     fn test_csv_escape_quotes() {
         assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn test_csv_escape_bare_cr_quoted() {
+        assert_eq!(csv_escape("a\rb"), "\"a\rb\"");
+    }
+
+    #[test]
+    fn test_csv_escape_formula_triggers_prefixed() {
+        for (input, expected) in [
+            ("=1+1", "'=1+1"),
+            ("+cmd", "'+cmd"),
+            ("-cmd", "'-cmd"),
+            ("@SUM(A1)", "'@SUM(A1)"),
+            ("\tx", "'\tx"),
+        ] {
+            assert_eq!(csv_escape(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn test_csv_escape_leading_cr_prefixed_and_quoted() {
+        assert_eq!(csv_escape("\rx"), "\"'\rx\"");
+    }
+
+    #[test]
+    fn test_csv_escape_formula_with_comma_prefixed_then_quoted() {
+        assert_eq!(
+            csv_escape("=cmd|' /C calc'!A0,x"),
+            "\"'=cmd|' /C calc'!A0,x\""
+        );
+    }
+
+    #[test]
+    fn test_csv_escape_negative_number_prefixed() {
+        assert_eq!(csv_escape("-5"), "'-5");
+    }
+
+    #[test]
+    fn test_csv_escape_trigger_not_at_start_untouched() {
+        assert_eq!(csv_escape("a=b"), "a=b");
+        assert_eq!(csv_escape("x-5"), "x-5");
+        assert_eq!(csv_escape("user@host"), "user@host");
+    }
+
+    #[test]
+    fn test_csv_export_neutralises_evidence_formula() {
+        let findings = vec![
+            Finding::new(
+                "test",
+                "=HYPERLINK(\"http://evil\")",
+                "desc",
+                Severity::High,
+            )
+            .with_hostname("@host")
+            .with_evidence("=1+1"),
+        ];
+        let results = make_results(findings);
+        let tmp = std::env::temp_dir().join("rikitikitavi_csv_test_formula.csv");
+        export_csv(&results, &tmp).unwrap();
+        let content = std::fs::read_to_string(&tmp).unwrap();
+        let row = content.lines().nth(1).unwrap();
+        assert!(
+            row.contains(",\"'=HYPERLINK(\"\"http://evil\"\")\","),
+            "{row}"
+        );
+        assert!(row.contains(",'@host,"), "{row}");
+        assert!(row.ends_with(",'=1+1"), "{row}");
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
@@ -174,10 +252,19 @@ mod tests {
                 assert!(!escaped.contains(','), "unquoted field contains comma");
                 assert!(!escaped.contains('"'), "unquoted field contains quote");
                 assert!(!escaped.contains('\n'), "unquoted field contains newline");
+                assert!(!escaped.contains('\r'), "unquoted field contains CR");
             }
         }
 
-        /// csv_escape preserves the original content (can be unescaped).
+        /// The unquoted cell value never starts with a formula trigger.
+        #[test]
+        fn prop_csv_escape_never_formula_leading(input in proptest::prelude::any::<String>()) {
+            let escaped = csv_escape(&input);
+            let cell = escaped.strip_prefix('"').unwrap_or(&escaped);
+            assert!(!cell.starts_with(FORMULA_TRIGGERS), "formula-leading cell: {escaped:?}");
+        }
+
+        /// csv_escape preserves the original content (can be unescaped) apart from the `'` guard.
         #[test]
         fn prop_csv_escape_roundtrip(input in proptest::prelude::any::<String>()) {
             let escaped = csv_escape(&input);
@@ -186,7 +273,12 @@ mod tests {
             } else {
                 escaped
             };
-            assert_eq!(recovered, input, "roundtrip failed for input: {input:?}");
+            let expected = if input.starts_with(FORMULA_TRIGGERS) {
+                format!("'{input}")
+            } else {
+                input.clone()
+            };
+            assert_eq!(recovered, expected, "roundtrip failed for input: {input:?}");
         }
     }
 }

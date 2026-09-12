@@ -101,6 +101,45 @@ pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
     added
 }
 
+/// ARP-cache discovery followed by the active TCP sweep; fills `ctx.discovered_devices`.
+/// Returns the number of hosts added by the sweep.
+pub async fn discover_hosts(ctx: &mut ScanContext) -> usize {
+    ctx.discovered_devices = discover_network(ctx);
+    active_host_discovery(ctx).await
+}
+
+/// Resolve `--modules` ids against `registry`; empty or unknown ids are an error listing valid ids.
+fn select_modules<'a>(
+    registry: &'a ScannerRegistry,
+    modules: &[String],
+) -> Result<Vec<&'a dyn rikitikitavi_scanners::Scanner>> {
+    let valid = || {
+        registry
+            .all()
+            .iter()
+            .map(|s| s.id())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let ids: Vec<&str> = modules.iter().map(|m| m.trim()).collect();
+    if ids.is_empty() {
+        anyhow::bail!("no scanner modules selected; valid modules: {}", valid());
+    }
+    let unknown: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| registry.get(id).is_none())
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "unknown scanner module(s): {}; valid modules: {}",
+            unknown.join(", "),
+            valid()
+        );
+    }
+    Ok(ids.iter().filter_map(|id| registry.get(id)).collect())
+}
+
 /// Run one scanner under a timeout of 4x its estimated duration, clamped to 60-600 s.
 async fn run_scanner_bounded(
     scanner: &dyn rikitikitavi_scanners::Scanner,
@@ -133,15 +172,10 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     let start = Instant::now();
     let registry = ScannerRegistry::new();
 
-    let scanners = ctx.config.modules.as_ref().map_or_else(
-        || registry.for_perspective(ctx.perspective),
-        |modules| {
-            modules
-                .iter()
-                .filter_map(|id| registry.get(id))
-                .collect::<Vec<_>>()
-        },
-    );
+    let scanners = match ctx.config.modules.as_ref() {
+        Some(modules) => select_modules(&registry, modules)?,
+        None => registry.for_perspective(ctx.perspective),
+    };
 
     let phase1_ids: &[&str] = &["network", "ports", "device"];
     let (phase1, phase2): (Vec<_>, Vec<_>) = scanners
@@ -722,6 +756,33 @@ mod tests {
             .with_ip(ip_addr)
             .with_port(port)
             .with_service("SVC")
+    }
+
+    #[test]
+    fn select_modules_rejects_unknown_ids() {
+        let registry = ScannerRegistry::new();
+        let Err(err) = select_modules(&registry, &["ports".to_owned(), "nope".to_owned()]) else {
+            panic!("unknown id must error");
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("unknown scanner module(s): nope;"), "{msg}");
+        assert!(
+            msg.contains("valid modules: network, ports, device,"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn select_modules_rejects_empty_selection() {
+        assert!(select_modules(&ScannerRegistry::new(), &[]).is_err());
+    }
+
+    #[test]
+    fn select_modules_resolves_known_ids_in_order() {
+        let registry = ScannerRegistry::new();
+        let scanners = select_modules(&registry, &["dns".to_owned(), " ports".to_owned()]).unwrap();
+        let ids: Vec<&str> = scanners.iter().map(|s| s.id()).collect();
+        assert_eq!(ids, ["dns", "ports"]);
     }
 
     #[test]

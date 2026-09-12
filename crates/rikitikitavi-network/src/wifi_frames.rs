@@ -106,6 +106,8 @@ const RADIOTAP_CHANNEL: u32 = 1 << 3;
 const RADIOTAP_FHSS: u32 = 1 << 4;
 const RADIOTAP_DBM_SIGNAL: u32 = 1 << 5;
 const RADIOTAP_DBM_NOISE: u32 = 1 << 6;
+/// Another `present` word follows this one.
+const RADIOTAP_EXT: u32 = 1 << 31;
 
 // 802.11 frame-control byte 0 (type + subtype, version bits masked).
 
@@ -133,7 +135,7 @@ const WPA_OUI: [u8; 4] = [0x00, 0x50, 0xF2, 0x01];
 const RSN_AKM_SAE: [u8; 4] = [0x00, 0x0F, 0xAC, 0x08];
 
 /// Parse the radiotap header at the front of a captured packet.
-pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
+pub const fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
     // Fixed header: version(1) + pad(1) + length(2) + present(4) = 8 bytes
     if data.len() < 8 {
         return None;
@@ -156,10 +158,9 @@ pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
     let mut signal_dbm = None;
     let mut channel_freq = None;
 
-    // Bit 31 set: another present word follows. Only the first word's fields are parsed.
+    // Extended present words follow the first at 8, 12, ... Only the first word's fields are parsed.
     let mut cur_present = present;
-    while cur_present & (1 << 31) != 0 {
-        offset += 4;
+    while cur_present & RADIOTAP_EXT != 0 {
         if offset + 4 > length {
             return Some(RadiotapHeader {
                 length,
@@ -585,6 +586,51 @@ mod tests {
         let header = parse_radiotap(&data).unwrap();
         assert_eq!(header.signal_dbm, Some(-50));
         assert_eq!(header.channel_freq, Some(2437));
+    }
+
+    #[test]
+    fn test_parse_radiotap_extended_present_word() {
+        let present = RADIOTAP_EXT | RADIOTAP_CHANNEL | RADIOTAP_DBM_SIGNAL;
+        let mut fields = vec![];
+        // Second present word at 8..12 (no further extension).
+        fields.extend_from_slice(&RADIOTAP_FLAGS.to_le_bytes());
+        // Channel at 12..16
+        fields.extend_from_slice(&5180u16.to_le_bytes());
+        fields.extend_from_slice(&[0x00, 0x00]);
+        // Signal at 16
+        fields.push((-42_i8).to_ne_bytes()[0]);
+
+        let data = build_radiotap(present, &fields);
+        let header = parse_radiotap(&data).unwrap();
+        assert_eq!(header.length, 17);
+        assert_eq!(header.channel_freq, Some(5180));
+        assert_eq!(header.signal_dbm, Some(-42));
+    }
+
+    #[test]
+    fn test_parse_radiotap_two_extended_present_words() {
+        let present = RADIOTAP_EXT | RADIOTAP_DBM_SIGNAL;
+        let mut fields = vec![];
+        // Present words at 8..12 and 12..16.
+        fields.extend_from_slice(&RADIOTAP_EXT.to_le_bytes());
+        fields.extend_from_slice(&0u32.to_le_bytes());
+        // Signal at 16
+        fields.push((-60_i8).to_ne_bytes()[0]);
+
+        let data = build_radiotap(present, &fields);
+        let header = parse_radiotap(&data).unwrap();
+        assert_eq!(header.signal_dbm, Some(-60));
+        assert!(header.channel_freq.is_none());
+    }
+
+    #[test]
+    fn test_parse_radiotap_extended_present_word_truncated() {
+        // EXT set but no second word within `length`.
+        let data = build_radiotap(RADIOTAP_EXT | RADIOTAP_DBM_SIGNAL, &[]);
+        let header = parse_radiotap(&data).unwrap();
+        assert_eq!(header.length, 8);
+        assert!(header.signal_dbm.is_none());
+        assert!(header.channel_freq.is_none());
     }
 
     #[test]

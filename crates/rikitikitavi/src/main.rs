@@ -143,14 +143,12 @@ async fn cmd_scan(
         println!("{}", intensity.profile_name());
         println!("Discovering network...");
     }
-    let devices = runner::discover_network(&mut ctx);
-    ctx.discovered_devices = devices;
-
     // Dry run must not touch the network, so the sweep is skipped.
     let swept = if args.dry_run {
+        ctx.discovered_devices = runner::discover_network(&mut ctx);
         0
     } else {
-        runner::active_host_discovery(&mut ctx).await
+        runner::discover_hosts(&mut ctx).await
     };
 
     if !args.quiet {
@@ -692,6 +690,53 @@ fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) {
     }
 }
 
+/// Discovery plus the full scanner run; used by the initial TUI scan and re-scans.
+#[cfg(feature = "tui")]
+async fn tui_scan(
+    scan_config: rikitikitavi_models::config::ScanConfig,
+) -> Result<rikitikitavi_models::ScanResults> {
+    let mut ctx = rikitikitavi_models::ScanContext {
+        target_network: None,
+        gateway: None,
+        perspective: scan_config.perspective,
+        network_mode: rikitikitavi_core::NetworkMode::Auto,
+        config: scan_config,
+        discovered_devices: Vec::new(),
+    };
+    runner::discover_hosts(&mut ctx).await;
+    runner::run_scan(&mut ctx).await
+}
+
+/// Apply a finished re-scan to `app`: store results or the error, and clear `scanning`.
+#[cfg(feature = "tui")]
+fn finish_rescan(
+    app: &mut rikitikitavi_tui::App,
+    history: Option<&rikitikitavi_analysis::ScanHistory>,
+    outcome: Result<rikitikitavi_models::ScanResults>,
+) {
+    match outcome {
+        Ok(results) => {
+            if let Some(prev) = app.results.as_ref() {
+                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
+                app.set_scan_diff(diff);
+            }
+            if let Some(h) = history
+                && let Err(e) = h.save(&results)
+            {
+                tracing::warn!("failed to save scan history: {e}");
+            }
+            app.results = Some(results);
+            app.scan_progress = 1.0;
+            app.status_message = Some("Re-scan complete".to_owned());
+        }
+        Err(e) => {
+            app.status_message = Some(format!("Re-scan failed: {e}"));
+        }
+    }
+    app.scanning = false;
+    app.scan_status = String::new();
+}
+
 #[cfg(feature = "tui")]
 #[allow(clippy::too_many_lines)]
 async fn cmd_tui(
@@ -730,23 +775,8 @@ async fn cmd_tui(
         ..app_config.scan.clone()
     };
 
-    let mut ctx = rikitikitavi_models::ScanContext {
-        target_network: None,
-        gateway: None,
-        perspective,
-        network_mode: rikitikitavi_core::NetworkMode::Auto,
-        config: scan_config.clone(),
-        discovered_devices: Vec::new(),
-    };
-
     app.scanning = true;
-    "Initial network discovery...".clone_into(&mut app.scan_status);
-
-    let devices = runner::discover_network(&mut ctx);
-    ctx.discovered_devices = devices;
-    "Running scanners...".clone_into(&mut app.scan_status);
-
-    match runner::run_scan(&mut ctx).await {
+    match tui_scan(scan_config.clone()).await {
         Ok(results) => {
             if let Some(ref prev) = previous_results {
                 let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
@@ -777,24 +807,19 @@ async fn cmd_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel::<rikitikitavi_models::ScanResults>(1);
+    let mut rescan: Option<tokio::task::JoinHandle<Result<rikitikitavi_models::ScanResults>>> =
+        None;
 
     loop {
-        if let Ok(results) = scan_rx.try_recv() {
-            if let Some(ref prev) = app.results {
-                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
-                app.set_scan_diff(diff);
-            }
-            if let Some(ref h) = history
-                && let Err(e) = h.save(&results)
-            {
-                tracing::warn!("failed to save scan history: {e}");
-            }
-            app.results = Some(results);
-            app.scanning = false;
-            app.scan_progress = 1.0;
-            app.scan_status = String::new();
-            app.status_message = Some("Re-scan complete".to_owned());
+        if rescan
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+            && let Some(handle) = rescan.take()
+        {
+            let outcome = handle
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("re-scan task aborted: {e}")));
+            finish_rescan(&mut app, history.as_ref(), outcome);
         }
 
         app.tick = app.tick.wrapping_add(1);
@@ -812,23 +837,7 @@ async fn cmd_tui(
                 false
             };
             if rescan_requested {
-                let tx = scan_tx.clone();
-                let rescan_config = scan_config.clone();
-                tokio::spawn(async move {
-                    let mut rescan_ctx = rikitikitavi_models::ScanContext {
-                        target_network: None,
-                        gateway: None,
-                        perspective,
-                        network_mode: rikitikitavi_core::NetworkMode::Auto,
-                        config: rescan_config,
-                        discovered_devices: Vec::new(),
-                    };
-                    let devices = runner::discover_network(&mut rescan_ctx);
-                    rescan_ctx.discovered_devices = devices;
-                    if let Ok(results) = runner::run_scan(&mut rescan_ctx).await {
-                        let _ = tx.send(results).await;
-                    }
-                });
+                rescan = Some(tokio::spawn(tui_scan(scan_config.clone())));
             }
         }
 
@@ -1350,6 +1359,40 @@ fn rustc_version() -> &'static str {
 mod tests {
     use super::{redact_secret, redacted_for_display};
     use rikitikitavi_models::config::{AppConfig, UniFiCloudConfig, UniFiControllerConfig};
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn finish_rescan_error_clears_scanning_and_reports() {
+        let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig::default());
+        app.scanning = true;
+        "Scanning...".clone_into(&mut app.scan_status);
+
+        super::finish_rescan(&mut app, None, Err(anyhow::anyhow!("boom")));
+
+        assert!(!app.scanning);
+        assert!(app.scan_status.is_empty());
+        assert!(app.results.is_none());
+        assert_eq!(app.status_message.as_deref(), Some("Re-scan failed: boom"));
+        // A new re-scan is accepted again.
+        assert!(app.handle_key(crossterm::event::KeyCode::Char('s')));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn finish_rescan_ok_stores_results_and_clears_scanning() {
+        let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig::default());
+        app.scanning = true;
+
+        super::finish_rescan(
+            &mut app,
+            None,
+            Ok(rikitikitavi_models::ScanResults::default()),
+        );
+
+        assert!(!app.scanning);
+        assert!(app.results.is_some());
+        assert_eq!(app.status_message.as_deref(), Some("Re-scan complete"));
+    }
 
     #[test]
     fn config_show_redacts_all_secrets() {

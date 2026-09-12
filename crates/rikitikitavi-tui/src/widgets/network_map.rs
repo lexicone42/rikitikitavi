@@ -124,6 +124,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ]),
     ];
 
+    // Rows above the first device row: top border + every line pushed before the loop.
+    let mut list_header_offset: u16 = 1;
+
     if devices.is_empty() {
         lines.push(Line::from(Span::styled(
             "              (no devices discovered)",
@@ -139,6 +142,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Style::default().fg(palette.border),
             ),
         ]));
+        list_header_offset += u16::try_from(lines.len()).unwrap_or(u16::MAX);
 
         for (i, device) in devices.iter().take(15).enumerate() {
             let ip_str = device.ip.to_string();
@@ -226,7 +230,61 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(footer, chunks[1]);
 
-    // Rows above the first device line (border + map header lines), for click mapping.
     app.hit_regions.list_area = Some(map_area);
-    app.hit_regions.list_header_offset = 13;
+    app.hit_regions.list_header_offset = list_header_offset;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Screen, TuiConfig};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use rikitikitavi_models::{Device, ScanResults};
+
+    fn device(ip: &str, host: &str) -> Device {
+        let mut d = Device::new(ip.parse().unwrap());
+        d.hostname = Some(host.to_owned());
+        d
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn click_offset_matches_rendered_device_rows() {
+        let mut app = App::new(TuiConfig::default());
+        app.screen = Screen::NetworkMap;
+        app.results = Some(ScanResults {
+            devices: vec![
+                device("10.0.0.1", "alpha"),
+                device("10.0.0.2", "bravo"),
+                device("10.0.0.3", "charlie"),
+            ],
+            ..Default::default()
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let first_row = (0..buf.area.height)
+            .find(|&y| row_text(buf, y).contains("alpha"))
+            .expect("first device row rendered");
+        let area = app.hit_regions.list_area.unwrap();
+        assert_eq!(area.y + app.hit_regions.list_header_offset, first_row);
+
+        for (i, row) in (first_row..first_row + 3).enumerate() {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 15,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+            assert_eq!(app.selected_device_index, i, "click on row {row}");
+        }
+    }
 }
