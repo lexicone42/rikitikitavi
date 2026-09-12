@@ -734,10 +734,13 @@ async fn try_telnet_login(ip: IpAddr, username: &str, password: &str) -> Option<
 /// Truncate evidence text to a maximum length, adding an ellipsis if needed.
 fn truncate_evidence(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
-        text.to_owned()
-    } else {
-        format!("{}...", &text[..max_len])
+        return text.to_owned();
     }
+    let mut end = max_len;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
 }
 
 /// Check a telnet service for default credentials.
@@ -1748,5 +1751,18 @@ mod tests {
         fn prop_parse_ftp_banner_no_panic(text in ".*") {
             let _ = parse_ftp_banner(&text);
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_evidence_does_not_split_multibyte_char() {
+        let text = "é".repeat(50); // 100 bytes, 2 per char
+        let out = truncate_evidence(&text, 79); // byte 79 is mid-char
+        assert!(out.ends_with("..."));
+        assert!(out.len() < 100);
     }
 }

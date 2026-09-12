@@ -273,6 +273,20 @@ impl UniFiClient {
         Ok(envelope.data)
     }
 
+    /// Unauthenticated liveness probe: a `UniFi` controller answers `/api/self/sites`
+    /// with 401 (`api.err.LoginRequired` on classic, `AUTHENTICATION_REQUIRED` on `UniFi` OS).
+    pub async fn probe(&self) -> bool {
+        let url = format!("{}/api/self/sites", self.base_url);
+        let Ok(resp) = self.client.get(&url).send().await else {
+            return false;
+        };
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return true;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        body.contains("api.err.LoginRequired") || body.contains("AUTHENTICATION_REQUIRED")
+    }
+
     /// Check if authenticated.
     pub const fn is_authenticated(&self) -> bool {
         self.authenticated
@@ -312,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_api_response_deserialization() {
-        let json = r#"{"meta":{"rc":"ok"},"data":[{"id":"abc","name":"default","desc":null}]}"#;
+        let json = r#"{"meta":{"rc":"ok"},"data":[{"_id":"abc","name":"default","desc":null}]}"#;
         let resp: ApiResponse<Site> = serde_json::from_str(json).unwrap();
         assert_eq!(resp.meta.rc, "ok");
         assert_eq!(resp.data.len(), 1);

@@ -251,7 +251,7 @@ pub fn parse_smtp_ehlo(response: &str) -> SmtpEhloInfo {
             continue;
         }
         if lower.starts_with("250") {
-            let ext = if line.len() > 4 { line[4..].trim() } else { "" };
+            let ext = line.get(4..).map_or("", str::trim);
             if !ext.is_empty() {
                 info.extensions.push(ext.to_owned());
             }
@@ -965,7 +965,7 @@ pub struct SshVersion {
 fn extract_ssh_version(banner: &str) -> Option<(u32, u32)> {
     let lower = banner.to_lowercase();
     let idx = lower.find("openssh_")?;
-    let rest = &banner[idx + 8..];
+    let rest = lower.get(idx + 8..)?;
     let version_chunk: String = rest
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
@@ -2383,5 +2383,23 @@ mod tests {
         fn prop_parse_os_from_ssh_banner_no_panic(banner in ".*") {
             let _ = parse_os_from_ssh_banner(&banner);
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn parse_smtp_ehlo_multibyte_after_code_does_not_panic() {
+        // "250é": byte 4 is inside the 2-byte 'é'.
+        let info = parse_smtp_ehlo("250é\n");
+        assert!(info.extensions.is_empty() || !info.extensions[0].is_empty());
+    }
+
+    #[test]
+    fn extract_ssh_version_non_ascii_prefix_does_not_panic() {
+        // 'İ' (U+0130) lowercases to 3 bytes, shifting byte offsets.
+        assert_eq!(extract_ssh_version("SSH-2.0-İOpenSSH_8.2"), Some((8, 2)));
     }
 }

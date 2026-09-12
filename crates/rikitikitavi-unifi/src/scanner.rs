@@ -48,6 +48,19 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
             )
             .with_cwe("CWE-319"),
         );
+    } else if security_lower == "wep" {
+        findings.push(
+            Finding::new(
+                "unifi",
+                &format!("WLAN \"{}\" uses WEP", wlan.name),
+                &format!(
+                    "WLAN \"{}\" uses WEP, which is broken and can be cracked in minutes.",
+                    wlan.name
+                ),
+                Severity::Critical,
+            )
+            .with_cwe("CWE-327"),
+        );
     }
 
     if let Some(wpa_mode) = &wlan.wpa_mode {
@@ -174,16 +187,7 @@ pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
             continue;
         }
 
-        let src_any = rule
-            .src
-            .as_deref()
-            .is_none_or(|s| s == "any" || s.is_empty());
-        let dst_any = rule
-            .dst
-            .as_deref()
-            .is_none_or(|d| d == "any" || d.is_empty());
-
-        if rule.action.to_lowercase() == "accept" && src_any && dst_any {
+        if rule.action.eq_ignore_ascii_case("accept") && rule.src_is_any() && rule.dst_is_any() {
             findings.push(
                 Finding::new(
                     "unifi",
@@ -269,97 +273,39 @@ impl Scanner for UniFiScanner {
             return Ok(findings);
         };
 
-        // TLS validation intentionally disabled: unauthenticated probe, no credentials sent.
+        // TLS validation disabled: unauthenticated probe, no credentials sent.
         let client =
             UniFiClient::new_insecure(&url, "default").map_err(|e| ScanError::ScannerFailed {
                 scanner: "unifi".to_owned(),
                 message: format!("failed to create UniFi client: {e}"),
             })?;
 
-        if !client.is_authenticated() {
+        let detected = local_env.is_some()
+            || tokio::time::timeout(std::time::Duration::from_secs(5), client.probe())
+                .await
+                .unwrap_or(false);
+
+        if detected {
             findings.push(Finding::new(
                 "unifi",
                 &format!("UniFi controller detected at {url}"),
                 &format!(
-                    "A UniFi controller was detected at {url}. Full security audit \
-                     requires authentication. Use `rikitikitavi unifi scan --username <user> \
-                     --password <pass>` for authenticated scanning."
+                    "A UniFi controller responded at {url}. The WLAN, firewall, device, \
+                     and IDS audit requires credentials: run `rikitikitavi unifi scan \
+                     --controller {url} --user <user> --password <pass>` or `--token <api-token>`."
                 ),
                 Severity::Info,
             ));
-            return Ok(findings);
-        }
-
-        match client.get_wlans().await {
-            Ok(wlans) => {
-                tracing::info!(wlan_count = wlans.len(), "fetched WLAN configs");
-                for wlan in &wlans {
-                    findings.extend(audit_wlan(wlan));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch WLANs: {e}");
-            }
-        }
-
-        match client.get_firewall_rules().await {
-            Ok(rules) => {
-                tracing::info!(rule_count = rules.len(), "fetched firewall rules");
-                findings.extend(audit_firewall_rules(&rules));
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch firewall rules: {e}");
-            }
-        }
-
-        match client.get_devices().await {
-            Ok(devices) => {
-                for device in &devices {
-                    let name = device.name.as_deref().unwrap_or(&device.model);
-                    findings.push(Finding::new(
-                        "unifi",
-                        &format!("{name}: firmware {}", device.firmware_version),
-                        &format!(
-                            "UniFi device \"{name}\" (model: {}, MAC: {}) is running \
-                             firmware version {}. Verify this is the latest version.",
-                            device.model, device.mac, device.firmware_version
-                        ),
-                        Severity::Info,
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch devices: {e}");
-            }
-        }
-
-        match client.get_ids_events(100).await {
-            Ok(events) => {
-                if events.is_empty() {
-                    findings.push(Finding::new(
-                        "unifi",
-                        "No IDS/IPS events recorded",
-                        "No IDS/IPS events were found. This could mean IDS/IPS is disabled \
-                         or no threats have been detected. Verify that Threat Management is \
-                         enabled in UniFi settings.",
-                        Severity::Low,
-                    ));
-                } else {
-                    findings.push(Finding::new(
-                        "unifi",
-                        &format!("{} IDS/IPS events recorded", events.len()),
-                        &format!(
-                            "{} IDS/IPS events were recorded. Review the threat management \
-                             dashboard for details.",
-                            events.len()
-                        ),
-                        Severity::Info,
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch IDS events: {e}");
-            }
+        } else {
+            findings.push(Finding::new(
+                "unifi",
+                "No UniFi controller detected",
+                &format!(
+                    "No UniFi controller responded at {url}. Use `rikitikitavi unifi scan \
+                     --controller <url>` if the controller is hosted elsewhere."
+                ),
+                Severity::Info,
+            ));
         }
 
         tracing::info!(findings_count = findings.len(), "UniFi scan complete");
@@ -448,9 +394,8 @@ mod tests {
             id: "r1".to_owned(),
             name: Some("Allow All".to_owned()),
             action: "accept".to_owned(),
-            src: Some("any".to_owned()),
-            dst: Some("any".to_owned()),
             enabled: true,
+            ..FirewallRule::default()
         };
         let findings = audit_firewall_rules(&[rule]);
         assert!(findings.iter().any(|f| f.severity == Severity::High));
@@ -462,9 +407,10 @@ mod tests {
             id: "r1".to_owned(),
             name: Some("Block IoT".to_owned()),
             action: "drop".to_owned(),
-            src: Some("iot".to_owned()),
-            dst: Some("lan".to_owned()),
+            src_networkconf_id: Some("iot".to_owned()),
+            dst_networkconf_id: Some("lan".to_owned()),
             enabled: false,
+            ..FirewallRule::default()
         };
         let findings = audit_firewall_rules(&[rule]);
         assert_eq!(findings.len(), 1);
@@ -477,9 +423,10 @@ mod tests {
             id: "r1".to_owned(),
             name: Some("Block IoT to LAN".to_owned()),
             action: "drop".to_owned(),
-            src: Some("iot-vlan".to_owned()),
-            dst: Some("lan".to_owned()),
+            src_networkconf_id: Some("iot-vlan".to_owned()),
+            dst_networkconf_id: Some("lan".to_owned()),
             enabled: true,
+            ..FirewallRule::default()
         };
         let findings = audit_firewall_rules(&[rule]);
         // Specific drop rule should produce no findings
@@ -524,9 +471,10 @@ mod tests {
                 id,
                 name,
                 action,
-                src,
-                dst,
+                src_address: src,
+                dst_address: dst,
                 enabled,
+                ..FirewallRule::default()
             })
     }
 
