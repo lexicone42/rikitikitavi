@@ -191,6 +191,7 @@ impl Scanner for DeviceScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_ieee_lookup_apple() {
@@ -251,5 +252,67 @@ mod tests {
         assert_eq!(vendor_to_device_type("Apple"), DeviceType::Unknown);
         assert_eq!(vendor_to_device_type("Samsung"), DeviceType::Unknown);
         assert_eq!(vendor_to_device_type("Cisco"), DeviceType::Unknown);
+    }
+
+    /// Every match arm of both classifiers, plus real OUI names and near-misses.
+    const VENDOR_SAMPLES: &[&str] = &[
+        "Synology",
+        "Sonos",
+        "D&M",
+        "Roku",
+        "Sony",
+        "Nintendo",
+        "Ring",
+        "Signify",
+        "Philips Lighting",
+        "Espressif",
+        "AI-Link",
+        "TI",
+        "Raspberry Pi",
+        "HP",
+        "Ubiquiti",
+        "TP-Link",
+        "Netgear",
+        "D-Link",
+        "Belkin",
+        "Amazon",
+        "Xiaomi",
+        "Arris",
+        "CommScope",
+        "Apple",
+        "Samsung",
+        "Google",
+        "LG",
+        "Intel",
+        "Dell",
+        "Lenovo",
+        "Asus",
+        "Motorola",
+        "Cisco",
+        "XEROX CORPORATION",
+        "IEEE Registration Authority",
+        "Hitachi Reftechno",
+        "hp",
+        "synology",
+        "Synology ",
+        "",
+    ];
+
+    fn vendor_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            proptest::sample::select(VENDOR_SAMPLES).prop_map(str::to_owned),
+            ".*",
+            "[A-Za-z&\\- ]{1,20}",
+        ]
+    }
+
+    proptest! {
+        /// A structured device type implies a non-`Unknown` vendor label.
+        #[test]
+        fn prop_device_type_implies_label(vendor in vendor_strategy()) {
+            if vendor_to_device_type(&vendor) != DeviceType::Unknown {
+                prop_assert_ne!(classify_by_vendor(&vendor), "Unknown", "{:?}", vendor);
+            }
+        }
     }
 }

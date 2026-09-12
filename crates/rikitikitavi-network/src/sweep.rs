@@ -142,4 +142,38 @@ mod tests {
             "unroutable documentation address should not be alive"
         );
     }
+
+    use std::net::Ipv4Addr;
+
+    use ipnetwork::Ipv4Network;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Targets are capped, strictly ascending, inside the network; endpoints absent for /0–/30, present for /31–/32.
+        #[test]
+        fn prop_sweep_targets_invariants(addr in any::<u32>(), prefix in 0_u8..=32) {
+            let v4 = Ipv4Network::new(Ipv4Addr::from(addr), prefix).unwrap();
+            let net = IpNetwork::V4(v4);
+            let targets = sweep_targets(&net);
+
+            prop_assert!(targets.len() <= MAX_SWEEP_HOSTS);
+            prop_assert!(targets.windows(2).all(|w| w[0] < w[1]));
+            prop_assert!(targets.iter().all(|ip| net.contains(*ip)));
+
+            let net_addr = IpAddr::V4(v4.network());
+            let bcast_addr = IpAddr::V4(v4.broadcast());
+            let hosts = 1_u64 << (32 - u32::from(prefix));
+            let cap = u64::try_from(MAX_SWEEP_HOSTS).unwrap();
+            let got = u64::try_from(targets.len()).unwrap();
+            if prefix <= 30 {
+                prop_assert!(!targets.contains(&net_addr));
+                prop_assert!(!targets.contains(&bcast_addr));
+                prop_assert_eq!(got, (hosts - 2).min(cap));
+            } else {
+                prop_assert!(targets.contains(&net_addr));
+                prop_assert!(targets.contains(&bcast_addr));
+                prop_assert_eq!(got, hosts);
+            }
+        }
+    }
 }

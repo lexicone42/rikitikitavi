@@ -218,4 +218,117 @@ board.sysid=0x789a
         let name = parse_board_info(content);
         assert_eq!(name, None);
     }
+
+    use proptest::prelude::*;
+
+    /// Exact-match keys of `classify_board`.
+    const BOARD_KEYS: &[&str] = &[
+        "udm",
+        "unifi-dream-machine",
+        "udmpro",
+        "udm-pro",
+        "unifi-dream-machine-pro",
+        "udmpromax",
+        "udm-pro-max",
+        "udmse",
+        "udm-se",
+        "udr",
+        "unifi-dream-router",
+        "udw",
+        "unifi-dream-wall",
+        "ucg-ultra",
+        "ucgultra",
+        "ucg-max",
+        "ucgmax",
+        "uck-g2-plus",
+        "uckg2plus",
+        "cloudkey-g2-plus",
+        "usg",
+        "unifi-security-gateway",
+        "usgp4",
+        "usg-pro-4",
+    ];
+
+    /// Per-char ASCII case flip driven by `mask` (missing entries lowercase).
+    fn mixed_case(s: &str, mask: &[bool]) -> String {
+        s.chars()
+            .zip(mask.iter().copied().chain(std::iter::repeat(false)))
+            .map(|(c, upper)| {
+                if upper {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect()
+    }
+
+    fn arb_board_info() -> impl Strategy<Value = String> {
+        prop_oneof![
+            proptest::collection::vec(any::<char>(), 0..200)
+                .prop_map(|chars| chars.into_iter().collect::<String>()),
+            (
+                ".{0,20}",
+                "[ \t]{0,2}",
+                "board\\.(name|shortname)=",
+                "[ \t]{0,2}",
+                ".{0,20}",
+                "[ \t]{0,2}",
+                ".{0,20}",
+            )
+                .prop_map(|(pre, pad_key, key, pad_left, value, pad_right, post)| {
+                    format!("{pre}\n{pad_key}{key}{pad_left}{value}{pad_right}\n{post}")
+                }),
+        ]
+    }
+
+    proptest! {
+        /// Surrounding whitespace and ASCII case do not change the classification.
+        #[test]
+        fn prop_classify_board_case_whitespace_invariant(
+            name in "[ -~]{0,24}",
+            mask in proptest::collection::vec(any::<bool>(), 0..24),
+            lead in "[ \t\r\n]{0,3}",
+            trail in "[ \t\r\n]{0,3}",
+        ) {
+            let mixed = mixed_case(&name, &mask);
+            let variant = format!("{lead}{mixed}{trail}");
+            prop_assert_eq!(classify_board(&variant), classify_board(&name));
+        }
+
+        /// Every exact-match key classifies to a known device under any case/whitespace variation.
+        #[test]
+        fn prop_classify_board_table_keys(
+            idx in 0..BOARD_KEYS.len(),
+            mask in proptest::collection::vec(any::<bool>(), 0..24),
+            lead in "[ \t\r\n]{0,3}",
+            trail in "[ \t\r\n]{0,3}",
+        ) {
+            let key = BOARD_KEYS[idx];
+            let mixed = mixed_case(key, &mask);
+            let variant = format!("{lead}{mixed}{trail}");
+            let got = classify_board(&variant);
+            prop_assert_ne!(got, UniFiDevice::Unknown);
+            prop_assert_eq!(got, classify_board(key));
+        }
+
+        /// `None` iff no trimmed line starts with a board key; `Some(v)` iff `v` is the trimmed value of such a line.
+        #[test]
+        fn prop_parse_board_info_spec(contents in arb_board_info()) {
+            let key_value = |line: &str| {
+                let line = line.trim();
+                line.strip_prefix("board.name=")
+                    .or_else(|| line.strip_prefix("board.shortname="))
+                    .map(str::trim)
+                    .map(str::to_owned)
+            };
+            match parse_board_info(&contents) {
+                None => prop_assert!(!contents.lines().any(|l| key_value(l).is_some())),
+                Some(v) => {
+                    prop_assert_eq!(v.trim(), v.as_str());
+                    prop_assert!(contents.lines().any(|l| key_value(l).as_deref() == Some(v.as_str())));
+                }
+            }
+        }
+    }
 }

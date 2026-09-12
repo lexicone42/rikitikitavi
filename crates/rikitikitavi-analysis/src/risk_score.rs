@@ -153,4 +153,94 @@ mod tests {
                 "{count} critical ({crit_score}) scored less than {count} info ({info_score})");
         }
     }
+
+    /// Grade letter as a rank: A=0 ... F=4.
+    fn grade_rank(label: &str) -> u8 {
+        match label.chars().next() {
+            Some('A') => 0,
+            Some('B') => 1,
+            Some('C') => 2,
+            Some('D') => 3,
+            Some('F') => 4,
+            other => panic!("unexpected grade letter {other:?}"),
+        }
+    }
+
+    fn grade_of(findings: &[Finding]) -> (&'static str, &'static str) {
+        let count = |sev: Severity| findings.iter().filter(|f| f.severity == sev).count();
+        risk_grade(
+            count(Severity::Critical),
+            count(Severity::High),
+            count(Severity::Medium),
+        )
+    }
+
+    fn arb_kev_finding() -> impl proptest::strategy::Strategy<Value = Finding> {
+        use proptest::strategy::Strategy;
+        (arb_severity(), proptest::bool::ANY).prop_map(|(sev, is_kev)| {
+            let mut finding = Finding::new("test", "title", "desc", sev);
+            finding.is_kev = is_kev;
+            finding
+        })
+    }
+
+    proptest::proptest! {
+        /// Grade never improves when any severity count grows.
+        #[test]
+        fn prop_grade_monotone_in_counts(
+            critical in 0_usize..6,
+            high in 0_usize..6,
+            medium in 0_usize..8,
+            dc in 0_usize..3,
+            dh in 0_usize..3,
+            dm in 0_usize..3,
+        ) {
+            let base = grade_rank(risk_grade(critical, high, medium).0);
+            proptest::prop_assert!(grade_rank(risk_grade(critical + dc, high, medium).0) >= base);
+            proptest::prop_assert!(grade_rank(risk_grade(critical, high + dh, medium).0) >= base);
+            proptest::prop_assert!(grade_rank(risk_grade(critical, high, medium + dm).0) >= base);
+            proptest::prop_assert!(
+                grade_rank(risk_grade(critical + dc, high + dh, medium + dm).0) >= base
+            );
+        }
+
+        /// Label letter and colour hint are paired one-to-one.
+        #[test]
+        fn prop_grade_label_color_paired(
+            critical in 0_usize..4,
+            high in 0_usize..6,
+            medium in 0_usize..8,
+        ) {
+            let (label, color) = risk_grade(critical, high, medium);
+            let expected = match grade_rank(label) {
+                0 => "info",
+                1 => "low",
+                2 => "medium",
+                3 => "high",
+                _ => "critical",
+            };
+            proptest::prop_assert_eq!(color, expected);
+        }
+
+        /// Adding a finding never improves the grade nor lowers the score; a strictly
+        /// worse grade comes with a strictly higher score unless already capped.
+        #[test]
+        fn prop_grade_and_score_agree_under_extension(
+            base in proptest::collection::vec(arb_kev_finding(), 0..20),
+            extra in arb_kev_finding(),
+        ) {
+            let base_grade = grade_rank(grade_of(&base).0);
+            let base_score = calculate_risk_score(&base);
+            let mut extended = base;
+            extended.push(extra);
+            let ext_grade = grade_rank(grade_of(&extended).0);
+            let ext_score = calculate_risk_score(&extended);
+
+            proptest::prop_assert!(ext_grade >= base_grade);
+            proptest::prop_assert!(ext_score >= base_score);
+            if ext_grade > base_grade {
+                proptest::prop_assert!(ext_score > base_score || base_score >= 100.0);
+            }
+        }
+    }
 }

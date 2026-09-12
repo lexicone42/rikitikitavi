@@ -343,7 +343,29 @@ mod tests {
     }
 
     fn arb_ip() -> impl Strategy<Value = IpAddr> {
-        prop_oneof![(0_u32..=u32::MAX).prop_map(|n| IpAddr::V4(std::net::Ipv4Addr::from(n))),]
+        prop_oneof![
+            any::<u32>().prop_map(|n| IpAddr::V4(std::net::Ipv4Addr::from(n))),
+            any::<u128>().prop_map(|n| IpAddr::V6(std::net::Ipv6Addr::from(n))),
+        ]
+    }
+
+    fn arb_confidence() -> impl Strategy<Value = Confidence> {
+        prop_oneof![
+            Just(Confidence::Inferred),
+            Just(Confidence::Probable),
+            Just(Confidence::Confirmed),
+        ]
+    }
+
+    fn edited(f: &Finding, edit: impl FnOnce(&mut Finding)) -> Finding {
+        let mut g = f.clone();
+        edit(&mut g);
+        g
+    }
+
+    /// Arbitrary text, biased toward the `0x`/whitespace/case forms `from_str` accepts.
+    fn arb_fingerprint_text() -> impl Strategy<Value = String> {
+        prop_oneof!["\\PC{0,40}", "[ \\t]{0,2}(0x)?[0-9a-fA-F]{0,20}[ \\t]{0,2}",]
     }
 
     fn arb_finding() -> impl Strategy<Value = Finding> {
@@ -456,6 +478,116 @@ mod tests {
             assert!(!finding.title.is_empty());
             assert!(!finding.description.is_empty());
         }
+
+        /// `Display` is exactly 16 lowercase hex chars.
+        #[test]
+        fn prop_fingerprint_display_is_16_lowercase_hex(v in any::<u64>()) {
+            let s = FindingFingerprint(v).to_string();
+            prop_assert_eq!(s.len(), 16);
+            prop_assert!(s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        }
+
+        /// `Display` then `FromStr` recovers the value; `0x`, whitespace, uppercase and unpadded forms parse the same.
+        #[test]
+        fn prop_fingerprint_display_parse_roundtrip(v in any::<u64>()) {
+            let fp = FindingFingerprint(v);
+            let hex = fp.to_string();
+            let forms = [
+                hex.clone(),
+                format!("0x{hex}"),
+                format!("  {hex}\t"),
+                hex.to_ascii_uppercase(),
+                format!("{v:x}"),
+                format!("0x{v:X}"),
+            ];
+            for form in forms {
+                prop_assert_eq!(form.parse::<FindingFingerprint>(), Ok(fp), "form {:?}", form);
+            }
+        }
+
+        /// `from_str` never panics; any accepted value re-renders and re-parses to itself.
+        #[test]
+        fn prop_fingerprint_from_str_total(s in arb_fingerprint_text()) {
+            if let Ok(fp) = s.parse::<FindingFingerprint>() {
+                prop_assert_eq!(fp.to_string().parse::<FindingFingerprint>(), Ok(fp));
+            }
+        }
+
+        /// JSON round-trip preserves the fingerprint value.
+        #[test]
+        fn prop_fingerprint_json_roundtrip(v in any::<u64>()) {
+            let fp = FindingFingerprint(v);
+            let json = serde_json::to_string(&fp).unwrap();
+            prop_assert_eq!(serde_json::from_str::<FindingFingerprint>(&json).unwrap(), fp);
+        }
+
+        /// Fingerprint survives a JSON round-trip of the whole finding.
+        #[test]
+        fn prop_fingerprint_survives_finding_json_roundtrip(f in arb_finding()) {
+            let back: Finding = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+            prop_assert_eq!(back.fingerprint(), f.fingerprint());
+        }
+
+        /// Fingerprint ignores id, description, severity, confidence, evidence, service, MAC, hostname, CWE, timestamp.
+        #[test]
+        fn prop_fingerprint_invariant_under_non_key_fields(
+            f in arb_finding(),
+            desc in "[a-zA-Z0-9 ]{0,60}",
+            sev in arb_severity(),
+            conf in arb_confidence(),
+            evidence in proptest::option::of("[a-zA-Z0-9 ._:-]{0,100}"),
+            service in proptest::option::of("[a-z]{0,10}"),
+            mac in proptest::option::of("[0-9a-f:]{0,17}"),
+            host in proptest::option::of("[a-z0-9.-]{0,30}"),
+            cwe in proptest::option::of("CWE-[0-9]{1,4}"),
+        ) {
+            let mut g = f.clone();
+            g.id = Uuid::new_v4();
+            g.description = desc;
+            g.severity = sev;
+            g.confidence = conf;
+            g.evidence = evidence;
+            g.affected_service = service;
+            g.affected_mac = mac;
+            g.affected_hostname = host;
+            g.cwe_id = cwe;
+            g.discovered_at = Utc::now();
+            prop_assert_eq!(g.fingerprint(), f.fingerprint());
+        }
+
+        /// Fingerprint changes when scanner, title, IP or port changes.
+        #[test]
+        fn prop_fingerprint_depends_on_key_fields(
+            f in arb_finding(),
+            scanner in "[a-z]{1,10}",
+            title in "[a-zA-Z0-9 ]{1,30}",
+            ip in proptest::option::of(arb_ip()),
+            port in proptest::option::of(any::<u16>()),
+        ) {
+            let fp = f.fingerprint();
+            if scanner != f.scanner {
+                prop_assert_ne!(edited(&f, |g| g.scanner = scanner).fingerprint(), fp);
+            }
+            if title != f.title {
+                prop_assert_ne!(edited(&f, |g| g.title = title).fingerprint(), fp);
+            }
+            if ip != f.affected_ip {
+                prop_assert_ne!(edited(&f, |g| g.affected_ip = ip).fingerprint(), fp);
+            }
+            if port != f.affected_port {
+                prop_assert_ne!(edited(&f, |g| g.affected_port = port).fingerprint(), fp);
+            }
+        }
+
+        /// `with_evidence` stores a prefix of the input, at most 256 bytes, cut at a char boundary (so >= 253 when truncated).
+        #[test]
+        fn prop_with_evidence_truncates_at_char_boundary(s in "\\PC{0,300}") {
+            let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s.clone());
+            let e = f.evidence.unwrap();
+            prop_assert!(e.len() <= 256);
+            prop_assert!(s.starts_with(&e));
+            prop_assert!(e.len() >= s.len().min(253));
+        }
     }
 }
 
@@ -469,6 +601,15 @@ mod hasher_tests {
         assert_eq!(h.finish(), 0xcbf2_9ce4_8422_2325);
         h.write(b"a");
         assert_eq!(h.finish(), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    /// Pinned value: FNV-1a over `(scanner, title, ip, port)` must not drift across releases.
+    #[test]
+    fn fingerprint_known_answer() {
+        let f = Finding::new("ports", "Telnet open", "d", Severity::High)
+            .with_ip("192.168.1.1".parse().unwrap())
+            .with_port(23);
+        assert_eq!(f.fingerprint().to_string(), "9919305a61aa445c");
     }
 
     #[test]

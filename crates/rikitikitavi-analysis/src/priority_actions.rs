@@ -108,6 +108,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rikitikitavi_models::Remediation;
+    use std::collections::HashSet;
 
     fn finding_with_remediation(
         title: &str,
@@ -286,5 +287,64 @@ mod tests {
             assert!(actions[0].severity >= Severity::Low);
             assert!(actions[0].severity >= sev);
         }
+
+        /// `severity_weight` is an order embedding of `Severity`.
+        #[test]
+        fn prop_severity_weight_order_embedding(a in arb_severity(), b in arb_severity()) {
+            prop_assert_eq!(severity_weight(a).cmp(&severity_weight(b)), a.cmp(&b));
+        }
+
+        /// Actions are in non-increasing score order and each reflects exactly its group.
+        #[test]
+        fn prop_actions_ranked_and_consistent(
+            findings in proptest::collection::vec(arb_maybe_remediated_finding(), 0..25)
+        ) {
+            let actions = generate_priority_actions(&findings);
+
+            let groups: HashSet<&str> = findings
+                .iter()
+                .filter_map(|f| f.remediation.as_ref())
+                .map(|r| r.description.as_str())
+                .collect();
+            prop_assert_eq!(actions.len(), groups.len().min(5));
+
+            let score = |a: &PriorityAction| {
+                severity_weight(a.severity) * 100
+                    + u32::try_from(a.affected_device_count).unwrap() * 10
+                    + u32::try_from(a.finding_count).unwrap()
+            };
+            for pair in actions.windows(2) {
+                prop_assert!(score(&pair[0]) >= score(&pair[1]));
+            }
+
+            for action in &actions {
+                let members: Vec<&Finding> = findings
+                    .iter()
+                    .filter(|f| action.finding_ids.contains(&f.id))
+                    .collect();
+                prop_assert_eq!(members.len(), action.finding_count);
+                prop_assert_eq!(action.finding_ids.len(), action.finding_count);
+                let same_group = members
+                    .iter()
+                    .all(|f| f.remediation.as_ref().is_some_and(|r| r.description == action.title));
+                prop_assert!(same_group);
+                prop_assert_eq!(action.severity, members.iter().map(|f| f.severity).max().unwrap());
+                let ips: HashSet<_> = members.iter().filter_map(|f| f.affected_ip).collect();
+                prop_assert_eq!(action.affected_device_count, ips.len());
+            }
+        }
+    }
+
+    fn arb_maybe_remediated_finding() -> impl Strategy<Value = Finding> {
+        (arb_severity(), 1_u8..5_u8, 0_u8..7_u8, any::<bool>()).prop_map(
+            |(sev, host, fix, remediated)| {
+                let addr = format!("10.0.0.{host}");
+                if remediated {
+                    finding_with_remediation("V", sev, &addr, &format!("Fix {fix}"))
+                } else {
+                    Finding::new("test", "V", "desc", sev).with_ip(addr.parse().unwrap())
+                }
+            },
+        )
     }
 }

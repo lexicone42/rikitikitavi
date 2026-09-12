@@ -1401,4 +1401,103 @@ mod tests {
             let _ = analyze_certificate(ip, 443, &cert);
         }
     }
+
+    const SIG_NAMES: &[&str] = &[
+        "sha1WithRSAEncryption",
+        "sha256WithRSAEncryption",
+        "sha384WithRSAEncryption",
+        "sha512WithRSAEncryption",
+        "ecdsaWithSHA256",
+        "ecdsaWithSHA384",
+        "ecdsaWithSHA512",
+        "Ed25519",
+    ];
+
+    /// Arbitrary strings, dotted-digit strings, and known signature OIDs with a tail.
+    fn oid_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ".*",
+            "[0-9.]{0,30}",
+            "(1\\.2\\.840\\.113549\\.1\\.1\\.(5|11|12|13)|1\\.2\\.840\\.10045\\.4\\.3\\.[234]|1\\.3\\.101\\.11[23]).*",
+        ]
+    }
+
+    fn cert_with_dates(not_before: &str, not_after: &str, days_until_expiry: i64) -> CertDetails {
+        CertDetails {
+            subject_cn: None,
+            issuer_cn: None,
+            not_before: not_before.to_owned(),
+            not_after: not_after.to_owned(),
+            days_until_expiry,
+            key_algorithm: "RSA".to_owned(),
+            key_bits: 2048,
+            signature_algorithm: "sha256WithRSAEncryption".to_owned(),
+            uses_sha1_signature: false,
+            san_dns: vec![],
+            is_self_signed: false,
+        }
+    }
+
+    fn ymd_strategy() -> impl Strategy<Value = chrono::NaiveDate> {
+        (1_i32..=9999, 1_u32..=12, 1_u32..=28)
+            .prop_map(|(y, m, d)| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap())
+    }
+
+    /// Wrong part count, non-numeric year, or out-of-range month/day.
+    fn malformed_date_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[^\\-]*",
+            "[^\\-]*-[^\\-]*",
+            "[^\\-]*-[^\\-]*-[^\\-]*-[^\\-]*",
+            "[a-zA-Z]{1,4}-[0-9]{2}-[0-9]{2}",
+            "[0-9]{4}-(1[3-9]|[2-9][0-9])-[0-9]{2}",
+            "[0-9]{4}-[0-9]{2}-(3[2-9]|[4-9][0-9])",
+        ]
+    }
+
+    proptest! {
+        /// `oid_to_sig_name` returns a known name or its input unchanged, and is idempotent.
+        #[test]
+        fn prop_oid_to_sig_name_total(oid in oid_strategy()) {
+            let name = oid_to_sig_name(&oid);
+            prop_assert!(SIG_NAMES.contains(&name.as_str()) || name == oid, "{:?} -> {:?}", oid, name);
+            prop_assert_eq!(oid_to_sig_name(&name), name);
+        }
+
+        /// Validity days equals the calendar difference; the sign follows the date order.
+        #[test]
+        fn prop_validity_days_valid_dates(
+            before in ymd_strategy(),
+            after in ymd_strategy(),
+            days in any::<i64>(),
+        ) {
+            let cert = cert_with_dates(
+                &before.format("%Y-%m-%d").to_string(),
+                &after.format("%Y-%m-%d").to_string(),
+                days,
+            );
+            let total = compute_total_validity_days(&cert);
+            prop_assert_eq!(total, after.signed_duration_since(before).num_days());
+            prop_assert_eq!(total >= 0, after >= before);
+        }
+
+        /// A malformed date on either side yields the `days_until_expiry` sentinel.
+        #[test]
+        fn prop_validity_days_malformed_sentinel(
+            bad in malformed_date_strategy(),
+            good in ymd_strategy(),
+            days in any::<i64>(),
+        ) {
+            let good = good.format("%Y-%m-%d").to_string();
+            prop_assert_eq!(compute_total_validity_days(&cert_with_dates(&bad, &good, days)), days);
+            prop_assert_eq!(compute_total_validity_days(&cert_with_dates(&good, &bad, days)), days);
+            prop_assert_eq!(compute_total_validity_days(&cert_with_dates(&bad, &bad, days)), days);
+        }
+
+        /// `compute_total_validity_days` never panics on arbitrary date strings.
+        #[test]
+        fn prop_validity_days_no_panic(not_before in ".*", not_after in ".*", days in any::<i64>()) {
+            let _ = compute_total_validity_days(&cert_with_dates(&not_before, &not_after, days));
+        }
+    }
 }

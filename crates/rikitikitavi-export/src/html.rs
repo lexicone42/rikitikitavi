@@ -343,7 +343,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
                 let _ = write!(
                     html,
                     r#"<a href="https://cwe.mitre.org/data/definitions/{num}.html">{cwe}</a> "#,
-                    num = cwe.trim_start_matches("CWE-"),
+                    num = html_escape(cwe.trim_start_matches("CWE-")),
                     cwe = html_escape(cwe),
                 );
             }
@@ -600,6 +600,153 @@ mod tests {
             // Must not contain raw < or > (they should be escaped)
             assert!(!escaped.contains('<'));
             assert!(!escaped.contains('>'));
+        }
+    }
+
+    use rikitikitavi_models::attack_path::AttackDifficulty;
+    use rikitikitavi_models::{AttackPath, AttackStep, Device, PriorityAction};
+    use uuid::Uuid;
+
+    /// Inverse of `html_escape`; `None` if some `&` does not start one of the five entities.
+    fn html_unescape(s: &str) -> Option<String> {
+        const ENTITIES: [(&str, char); 5] = [
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&quot;", '"'),
+            ("&#x27;", '\''),
+        ];
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(i) = rest.find('&') {
+            out.push_str(&rest[..i]);
+            let tail = &rest[i..];
+            let (entity, ch) = ENTITIES.iter().find(|(e, _)| tail.starts_with(e))?;
+            out.push(*ch);
+            rest = &tail[entity.len()..];
+        }
+        out.push_str(rest);
+        Some(out)
+    }
+
+    fn arb_severity() -> impl Strategy<Value = Severity> {
+        prop_oneof![
+            Just(Severity::Info),
+            Just(Severity::Low),
+            Just(Severity::Medium),
+            Just(Severity::High),
+            Just(Severity::Critical),
+        ]
+    }
+
+    /// `prefix<script>suffix` with printable-ASCII affixes.
+    fn tainted() -> impl Strategy<Value = String> {
+        ("[ -~]{0,8}", "[ -~]{0,8}").prop_map(|(a, b)| format!("{a}<script>{b}"))
+    }
+
+    fn arb_tainted_finding() -> impl Strategy<Value = Finding> {
+        (
+            (tainted(), tainted(), tainted(), tainted(), tainted()),
+            (tainted(), tainted(), tainted(), arb_severity()),
+        )
+            .prop_map(
+                |((title, desc, evidence, cwe, cve), (fix, step, effort, severity))| {
+                    Finding::new("t", &title, &desc, severity)
+                        .with_ip("10.0.0.1".parse().unwrap())
+                        .with_port(80)
+                        .with_evidence(evidence)
+                        .with_cwe(cwe)
+                        .with_cve_ids(vec![cve])
+                        .with_remediation(Remediation {
+                            description: fix,
+                            steps: vec![step],
+                            effort: Some(effort),
+                        })
+                },
+            )
+    }
+
+    fn arb_tainted_device() -> impl Strategy<Value = Device> {
+        tainted().prop_map(|vendor| Device {
+            vendor: Some(vendor),
+            ..Device::new("10.0.0.2".parse().unwrap())
+        })
+    }
+
+    fn arb_tainted_action() -> impl Strategy<Value = PriorityAction> {
+        (tainted(), tainted(), tainted(), arb_severity()).prop_map(
+            |(title, step, effort, severity)| PriorityAction {
+                id: Uuid::nil(),
+                rank: 1,
+                title,
+                severity,
+                affected_device_count: 1,
+                finding_count: 1,
+                steps: vec![step],
+                effort: Some(effort),
+                finding_ids: Vec::new(),
+            },
+        )
+    }
+
+    fn arb_tainted_path() -> impl Strategy<Value = AttackPath> {
+        (
+            tainted(),
+            tainted(),
+            tainted(),
+            tainted(),
+            tainted(),
+            arb_severity(),
+        )
+            .prop_map(
+                |(name, description, step_title, step_desc, technique, severity)| AttackPath {
+                    id: Uuid::nil(),
+                    name,
+                    description,
+                    severity,
+                    steps: vec![AttackStep {
+                        order: 1,
+                        title: step_title,
+                        description: step_desc,
+                        technique: Some(technique),
+                        difficulty: AttackDifficulty::Easy,
+                        finding_id: None,
+                    }],
+                    finding_ids: Vec::new(),
+                },
+            )
+    }
+
+    proptest! {
+        /// No bare `<>"'` survive; unescaping recovers the input exactly (every `&` starts one of the five entities).
+        #[test]
+        fn prop_html_escape_roundtrip(input in ".*") {
+            let escaped = html_escape(&input);
+            prop_assert!(!escaped.contains(['<', '>', '"', '\'']));
+            prop_assert!(escaped.len() >= input.len());
+            prop_assert_eq!(html_unescape(&escaped), Some(input));
+        }
+
+        /// A `<script>` marker in every rendered free-text field never reaches the output unescaped.
+        #[test]
+        fn prop_render_html_report_escapes_all_text(
+            findings in proptest::collection::vec(arb_tainted_finding(), 1..4),
+            devices in proptest::collection::vec(arb_tainted_device(), 0..3),
+            priority_actions in proptest::collection::vec(arb_tainted_action(), 0..3),
+            attack_paths in proptest::collection::vec(arb_tainted_path(), 0..3),
+            risk_score in 0.0_f64..=100.0,
+        ) {
+            let results = ScanResults {
+                findings,
+                devices,
+                priority_actions,
+                attack_paths,
+                risk_score,
+                ..Default::default()
+            };
+            let html = render_html_report(&results);
+            prop_assert!(!html.contains("<script"));
+            prop_assert!(html.contains("&lt;script&gt;"));
         }
     }
 }

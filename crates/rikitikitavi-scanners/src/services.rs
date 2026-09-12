@@ -717,9 +717,13 @@ fn is_date_past(date_str: &str) -> bool {
     if parts.len() != 3 {
         return false;
     }
-    let y: i32 = parts[0].parse().unwrap_or(9999);
-    let m: u32 = parts[1].parse().unwrap_or(1);
-    let d: u32 = parts[2].parse().unwrap_or(1);
+    let (Ok(y), Ok(m), Ok(d)) = (
+        parts[0].parse::<i32>(),
+        parts[1].parse::<u32>(),
+        parts[2].parse::<u32>(),
+    ) else {
+        return false;
+    };
 
     chrono::NaiveDate::from_ymd_opt(y, m, d)
         .is_some_and(|eol| eol < chrono::Utc::now().date_naive())
@@ -1277,7 +1281,7 @@ fn check_openresty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 
 fn check_miniserv_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     // Webmin (MiniServ) < 1.990: CVE-2022-0824; `1.950` parses as major=1, minor=950
-    let webmin_version = sv.major * 1000 + sv.minor;
+    let webmin_version = u64::from(sv.major) * 1000 + u64::from(sv.minor);
     if webmin_version < 1990 {
         return Some(ServerVersionIssue {
             severity: Severity::High,
@@ -2401,5 +2405,205 @@ mod boundary_tests {
     fn extract_ssh_version_non_ascii_prefix_does_not_panic() {
         // 'İ' (U+0130) lowercases to 3 bytes, shifting byte offsets.
         assert_eq!(extract_ssh_version("SSH-2.0-İOpenSSH_8.2"), Some((8, 2)));
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strict `YYYY-MM-DD` oracle for `is_date_past`.
+    fn well_formed_date(s: &str) -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let (Ok(year), Ok(month), Ok(day)) = (
+            parts[0].parse::<i32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<u32>(),
+        ) else {
+            return false;
+        };
+        chrono::NaiveDate::from_ymd_opt(year, month, day).is_some()
+    }
+
+    /// Arbitrary strings plus near-miss dates.
+    fn date_like_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ".*",
+            "[0-9]{1,4}-[0-9a-z]{1,2}-[0-9a-z]{1,2}",
+            "[+\\-]?[0-9]{4}-[0-9]{2}-[0-9]{2}",
+            "[0-9]{4}-[0-9]{2}-[0-9]{2}-?",
+        ]
+    }
+
+    fn ymd_strategy() -> impl Strategy<Value = chrono::NaiveDate> {
+        (1_i32..=9999, 1_u32..=12, 1_u32..=28)
+            .prop_map(|(y, m, d)| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap())
+    }
+
+    /// Arbitrary strings plus headers that reach every `check_server_version` arm.
+    fn server_header_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ".*",
+            "(nginx|Apache|lighttpd|Microsoft-IIS|openresty|mini_httpd|MiniServ|Jetty)/[0-9]{1,10}(\\.[0-9]{1,10}){0,3}( \\(.*\\))?",
+            "Jetty\\([0-9]{1,10}(\\.[0-9]{1,10}){0,3}\\)",
+        ]
+    }
+
+    const SERVER_PRODUCTS: &[&str] = &[
+        "nginx",
+        "apache",
+        "lighttpd",
+        "microsoft-iis",
+        "openresty",
+        "mini_httpd",
+        "mini-httpd",
+        "minihttpd",
+        "miniserv",
+        "jetty",
+        "other",
+    ];
+
+    proptest! {
+        /// `parse_debian_version` never panics; a hit names a Debian release.
+        #[test]
+        fn prop_parse_debian_version_total(banner in ".*") {
+            if let Some(os) = parse_debian_version(&banner) {
+                prop_assert!(os.contains("Debian "), "{}", os);
+            }
+        }
+
+        /// `+deb<N>` always yields `Linux (Debian <N>` followed by ` ` or `)`.
+        #[test]
+        fn prop_parse_debian_version_hit(
+            prefix in "[^+]*",
+            version in 0_u32..1000,
+            tail in "([^0-9].*)?",
+        ) {
+            let os = parse_debian_version(&format!("{prefix}+deb{version}{tail}"));
+            let head = format!("Linux (Debian {version}");
+            let rest = os.as_deref().and_then(|s| s.strip_prefix(head.as_str()));
+            prop_assert!(rest.is_some_and(|r| r.starts_with(' ') || r.starts_with(')')), "{:?}", os);
+        }
+
+        /// `parse_ubuntu_version` never panics; a hit names an Ubuntu release.
+        #[test]
+        fn prop_parse_ubuntu_version_total(banner in ".*") {
+            if let Some(os) = parse_ubuntu_version(&banner) {
+                prop_assert!(os.contains("Ubuntu "), "{}", os);
+            }
+        }
+
+        /// `OpenSSH_<M>.<m>` round-trips through `extract_ssh_version`; the Ubuntu hit matches the table.
+        #[test]
+        fn prop_openssh_version_roundtrip(
+            prefix in "(SSH-2\\.0-)?",
+            major in 0_u32..20,
+            minor in 0_u32..20,
+            tail in "(p[0-9].*)?",
+        ) {
+            let banner = format!("{prefix}OpenSSH_{major}.{minor}{tail}");
+            prop_assert_eq!(extract_ssh_version(&banner), Some((major, minor)));
+            prop_assert_eq!(
+                parse_ubuntu_version(&banner).is_some(),
+                ubuntu_from_openssh(major, minor).is_some()
+            );
+        }
+
+        /// `parse_version_numbers` never panics.
+        #[test]
+        fn prop_parse_version_numbers_no_panic(version in ".*") {
+            let _ = parse_version_numbers(&version);
+        }
+
+        /// `parse_version_numbers` round-trips `a.b.c` with any non-numeric suffix.
+        #[test]
+        fn prop_parse_version_numbers_roundtrip(
+            major in any::<u32>(),
+            minor in any::<u32>(),
+            patch in any::<u32>(),
+            tail in "([^0-9.].*)?",
+        ) {
+            let version = format!("{major}.{minor}.{patch}{tail}");
+            prop_assert_eq!(parse_version_numbers(&version), Some((major, minor, patch)));
+        }
+
+        /// `product/a.b.c` parses to the lowercased product, exact numbers and raw header.
+        #[test]
+        fn prop_parse_server_header_roundtrip(
+            product in "[A-Za-z][A-Za-z0-9_-]{0,15}",
+            major in any::<u32>(),
+            minor in any::<u32>(),
+            patch in any::<u32>(),
+            tail in "( \\(.*\\))?",
+        ) {
+            let header = format!("{product}/{major}.{minor}.{patch}{tail}");
+            let expected = ServerVersion {
+                product: product.to_lowercase(),
+                major,
+                minor,
+                patch,
+                raw: header.clone(),
+            };
+            prop_assert_eq!(parse_server_header(&header), Some(expected));
+        }
+
+        /// `parse_server_header` then `check_server_version` never panics on any header.
+        #[test]
+        fn prop_check_server_version_from_header_no_panic(header in server_header_strategy()) {
+            let _ = parse_server_header(&header).and_then(|sv| check_server_version(&sv));
+        }
+
+        /// `check_server_version` never panics for any product and version numbers.
+        #[test]
+        fn prop_check_server_version_no_panic(
+            product in proptest::sample::select(SERVER_PRODUCTS),
+            major in any::<u32>(),
+            minor in any::<u32>(),
+            patch in any::<u32>(),
+        ) {
+            let sv = ServerVersion {
+                product: product.to_owned(),
+                major,
+                minor,
+                patch,
+                raw: format!("{product}/{major}.{minor}.{patch}"),
+            };
+            let _ = check_server_version(&sv);
+        }
+
+        /// `is_date_past` never panics and is true only for a well-formed valid date.
+        #[test]
+        fn prop_is_date_past_malformed_is_false(date in date_like_strategy()) {
+            if is_date_past(&date) {
+                prop_assert!(well_formed_date(&date), "{:?}", date);
+            }
+        }
+
+        /// `is_date_past` is monotone: the earlier date is past whenever the later one is.
+        #[test]
+        fn prop_is_date_past_monotone(first in ymd_strategy(), second in ymd_strategy()) {
+            let (early, late) = if first <= second { (first, second) } else { (second, first) };
+            let early_past = is_date_past(&early.format("%Y-%m-%d").to_string());
+            let late_past = is_date_past(&late.format("%Y-%m-%d").to_string());
+            prop_assert!(early_past || !late_past);
+        }
+
+        /// Any date up to year 2000 is past; any date from year 3000 is not.
+        #[test]
+        fn prop_is_date_past_bounds(
+            past_year in 1_i32..=2000,
+            future_year in 3000_i32..=9999,
+            month in 1_u32..=12,
+            day in 1_u32..=28,
+        ) {
+            let past = format!("{past_year:04}-{month:02}-{day:02}");
+            let future = format!("{future_year:04}-{month:02}-{day:02}");
+            prop_assert!(is_date_past(&past));
+            prop_assert!(!is_date_past(&future));
+        }
     }
 }

@@ -147,7 +147,10 @@ fn read_ber_tlv(data: &[u8]) -> Option<Tlv> {
         }
         (2 + num, len)
     };
-    if data.len() < content_offset + content_len {
+    if content_offset
+        .checked_add(content_len)
+        .is_none_or(|end| data.len() < end)
+    {
         return None;
     }
     Some((tag, content_offset, content_len))
@@ -795,6 +798,113 @@ mod tests {
             } else {
                 prop_assert_eq!(resp.sys_descr.as_deref(), Some(trimmed));
             }
+        }
+    }
+
+    /// `request-id`, `error-status`, `error-index` INTEGER TLVs.
+    fn pdu_header(request_id: u32, status: u32, index: u32) -> Vec<u8> {
+        let mut body = ber_tlv(0x02, &ber_integer_content(request_id));
+        body.extend_from_slice(&ber_tlv(0x02, &ber_integer_content(status)));
+        body.extend_from_slice(&ber_tlv(0x02, &ber_integer_content(index)));
+        body
+    }
+
+    /// Arbitrary bytes, or a valid PDU prefix (three INTEGERs, varbind SEQUENCE
+    /// header, optionally the OID) followed by arbitrary bytes.
+    fn pdu_body_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..512),
+            (
+                any::<u32>(),
+                any::<u32>(),
+                any::<u32>(),
+                proptest::collection::vec(any::<u8>(), 0..256),
+            )
+                .prop_map(|(request_id, status, index, tail)| {
+                    let mut body = pdu_header(request_id, status, index);
+                    body.push(0x30);
+                    encode_ber_length(tail.len(), &mut body);
+                    body.extend_from_slice(&tail);
+                    body
+                }),
+            (
+                any::<u32>(),
+                any::<u32>(),
+                any::<u32>(),
+                proptest::collection::vec(any::<u8>(), 0..256),
+            )
+                .prop_map(|(request_id, status, index, tail)| {
+                    let mut binding = ber_tlv(0x06, OID_SYSDESCR_0);
+                    binding.extend_from_slice(&tail);
+                    let mut body = pdu_header(request_id, status, index);
+                    body.extend_from_slice(&ber_tlv(0x30, &ber_tlv(0x30, &binding)));
+                    body
+                }),
+        ]
+    }
+
+    proptest! {
+        /// `extract_sys_descr` never panics on arbitrary or structured PDU bodies.
+        #[test]
+        fn prop_extract_sys_descr_no_panic(body in pdu_body_strategy()) {
+            let _ = extract_sys_descr(&body);
+        }
+
+        /// A varbind with an OCTET STRING value round-trips (lossy UTF-8, trimmed, empty → `None`).
+        #[test]
+        fn prop_extract_sys_descr_roundtrip(
+            request_id in any::<u32>(),
+            value in proptest::collection::vec(any::<u8>(), 0..128),
+        ) {
+            let mut binding = ber_tlv(0x06, OID_SYSDESCR_0);
+            binding.extend_from_slice(&ber_tlv(0x04, &value));
+            let mut body = pdu_header(request_id, 0, 0);
+            body.extend_from_slice(&ber_tlv(0x30, &ber_tlv(0x30, &binding)));
+            let text = String::from_utf8_lossy(&value).trim().to_owned();
+            let expected = if text.is_empty() { None } else { Some(text) };
+            prop_assert_eq!(extract_sys_descr(&body), expected);
+        }
+
+        /// `parse_snmp_response` never panics on a SEQUENCE header followed by arbitrary bytes.
+        #[test]
+        fn prop_parse_snmp_sequence_header_no_panic(
+            tail in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let _ = parse_snmp_response(&ber_tlv(0x30, &tail));
+        }
+
+        /// `encode_ber_length` uses the minimal header, round-trips through
+        /// `read_ber_tlv`, and a body short by one byte is rejected.
+        #[test]
+        fn prop_ber_length_roundtrip(len in 0_usize..70_000, tag in any::<u8>(), fill in any::<u8>()) {
+            let mut data = vec![tag];
+            encode_ber_length(len, &mut data);
+            let header_len = data.len();
+            let expected_header = match len {
+                0..=0x7f => 2,
+                0x80..=0xff => 3,
+                0x100..=0xffff => 4,
+                _ => 5,
+            };
+            prop_assert_eq!(header_len, expected_header);
+            data.resize(header_len + len, fill);
+            prop_assert_eq!(read_ber_tlv(&data), Some((tag, header_len, len)));
+            if len > 0 {
+                prop_assert_eq!(read_ber_tlv(&data[..data.len() - 1]), None);
+            }
+        }
+
+        /// `ber_integer_content` is 1–5 bytes, top bit clear, minimal, and decodes to the value.
+        #[test]
+        fn prop_ber_integer_content(value in any::<u32>()) {
+            let content = ber_integer_content(value);
+            prop_assert!(!content.is_empty() && content.len() <= 5);
+            prop_assert_eq!(content[0] & 0x80, 0);
+            if content.len() > 1 {
+                prop_assert!(content[0] != 0 || content[1] & 0x80 != 0);
+            }
+            let decoded = content.iter().fold(0_u64, |acc, &b| (acc << 8) | u64::from(b));
+            prop_assert_eq!(decoded, u64::from(value));
         }
     }
 }

@@ -195,4 +195,83 @@ mod tests {
             }
         }
     }
+
+    use rikitikitavi_models::Remediation;
+
+    /// Any Unicode scalar values, including newlines and quotes.
+    fn arb_text() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 0..24)
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+    }
+
+    fn arb_finding() -> impl Strategy<Value = Finding> {
+        (
+            arb_text(),
+            arb_text(),
+            arb_text(),
+            arb_severity(),
+            proptest::option::of(any::<u32>().prop_map(|n| std::net::Ipv4Addr::from(n).into())),
+            proptest::option::of(any::<u16>()),
+            proptest::option::of(arb_text()),
+            proptest::collection::vec(arb_text(), 0..3),
+            proptest::option::of(arb_text()),
+        )
+            .prop_map(
+                |(scanner, title, desc, severity, ip, port, cwe, cve_ids, fix)| {
+                    let mut f = Finding::new(&scanner, &title, &desc, severity)
+                        .with_cve_ids(cve_ids)
+                        .with_opt_remediation(fix.map(|description| Remediation {
+                            description,
+                            steps: Vec::new(),
+                            effort: None,
+                        }));
+                    if let Some(ip) = ip {
+                        f = f.with_ip(ip);
+                    }
+                    if let Some(port) = port {
+                        f = f.with_port(port);
+                    }
+                    if let Some(cwe) = cwe {
+                        f = f.with_cwe(cwe);
+                    }
+                    f
+                },
+            )
+    }
+
+    proptest! {
+        /// Line i is the OCSF conversion of finding i (modulo per-event `metadata.uid`/`logged_time`), with `risk_score` copied only when > 0.
+        #[test]
+        fn prop_ndjson_lines_match_conversion(
+            findings in proptest::collection::vec(arb_finding(), 0..6),
+            risk in prop_oneof![Just(0.0_f64), 0.0_f64..=100.0],
+        ) {
+            let results = ScanResults {
+                risk_score: risk,
+                findings,
+                ..Default::default()
+            };
+            let ndjson = to_ocsf_ndjson(&results).unwrap();
+            let lines: Vec<&str> = ndjson.lines().collect();
+            prop_assert_eq!(lines.len(), results.findings.len());
+
+            for (line, finding) in lines.iter().zip(&results.findings) {
+                let mut got: serde_json::Value = serde_json::from_str(line).unwrap();
+                let mut expected = OcsfFinding::from(finding);
+                if risk > 0.0 {
+                    expected.risk_score = Some(risk);
+                }
+                let mut want: serde_json::Value =
+                    serde_json::from_str(&serde_json::to_string(&expected).unwrap()).unwrap();
+                for v in [&mut got, &mut want] {
+                    let meta = v["metadata"].as_object_mut().unwrap();
+                    meta.remove("uid");
+                    meta.remove("logged_time");
+                }
+                let id = finding.id.to_string();
+                prop_assert_eq!(got["finding_info"]["uid"].as_str(), Some(id.as_str()));
+                prop_assert_eq!(got, want);
+            }
+        }
+    }
 }

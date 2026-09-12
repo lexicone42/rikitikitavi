@@ -80,7 +80,7 @@ impl FromStr for MacAddr {
             return Err(ParseMacError);
         }
         let mut octets = [0u8; 6];
-        for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let pair = std::str::from_utf8(chunk).map_err(|_| ParseMacError)?;
             octets[i] = u8::from_str_radix(pair, 16).map_err(|_| ParseMacError)?;
         }
@@ -231,5 +231,121 @@ mod tests {
         assert_eq!(json, "\"aa:bb:cc:dd:ee:ff\"");
         let back: MacAddr = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
+    }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn mixed_case(s: &str) -> String {
+            s.chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        }
+
+        /// Colon, hyphen, dotted and bare forms, each lower/upper/mixed case.
+        fn renderings(o: [u8; 6]) -> Vec<String> {
+            let pairs: Vec<String> = o.iter().map(|b| format!("{b:02x}")).collect();
+            let bare = pairs.concat();
+            let (a, b, c) = (&bare[0..4], &bare[4..8], &bare[8..12]);
+            let lower = [
+                pairs.join(":"),
+                pairs.join("-"),
+                format!("{a}.{b}.{c}"),
+                bare.clone(),
+            ];
+            lower
+                .iter()
+                .flat_map(|s| [s.clone(), s.to_ascii_uppercase(), mixed_case(s)])
+                .collect()
+        }
+
+        /// Arbitrary text, biased toward valid renderings and near-misses.
+        fn arb_mac_text() -> impl Strategy<Value = String> {
+            prop_oneof![
+                ".{0,40}",
+                "[0-9a-fA-F:. -]{0,24}",
+                any::<[u8; 6]>().prop_flat_map(|o| proptest::sample::select(renderings(o))),
+                (any::<[u8; 6]>(), "[0-9a-fA-F:. -]{0,4}")
+                    .prop_map(|(o, noise)| format!("{noise}{}", MacAddr::new(o))),
+            ]
+        }
+
+        proptest! {
+            /// `Display` then `FromStr` recovers the octets.
+            #[test]
+            fn prop_display_parse_roundtrip(o in any::<[u8; 6]>()) {
+                let m = MacAddr::new(o);
+                prop_assert_eq!(m.to_string().parse::<MacAddr>(), Ok(m));
+            }
+
+            /// `Display` is 17 chars: lowercase hex pairs joined by `:`.
+            #[test]
+            fn prop_display_is_canonical(o in any::<[u8; 6]>()) {
+                let s = MacAddr::new(o).to_string();
+                prop_assert_eq!(s.len(), 17);
+                for (i, c) in s.chars().enumerate() {
+                    if i % 3 == 2 {
+                        prop_assert_eq!(c, ':');
+                    } else {
+                        prop_assert!(c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+                    }
+                }
+            }
+
+            /// Colon, hyphen, dotted and bare forms in any case parse to the same address.
+            #[test]
+            fn prop_format_and_case_invariance(o in any::<[u8; 6]>()) {
+                let m = MacAddr::new(o);
+                for s in renderings(o) {
+                    prop_assert_eq!(s.parse::<MacAddr>(), Ok(m), "form {:?}", s);
+                }
+            }
+
+            /// JSON form is the quoted canonical string and round-trips.
+            #[test]
+            fn prop_serde_json_roundtrip(o in any::<[u8; 6]>()) {
+                let m = MacAddr::new(o);
+                let json = serde_json::to_string(&m).unwrap();
+                prop_assert_eq!(&json, &format!("\"{m}\""));
+                prop_assert_eq!(serde_json::from_str::<MacAddr>(&json).unwrap(), m);
+            }
+
+            /// `from_str` never panics and accepts exactly: hex digits plus `:-. ` separators, 12 digits total.
+            #[test]
+            fn prop_from_str_accepts_exactly_documented_language(s in arb_mac_text()) {
+                let parsed = s.parse::<MacAddr>();
+                let alphabet_ok = s
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '-' | '.' | ' '));
+                let digits = s.chars().filter(char::is_ascii_hexdigit).count();
+                prop_assert_eq!(parsed.is_ok(), alphabet_ok && digits == 12, "input {:?}", s);
+                if let Ok(m) = parsed {
+                    prop_assert_eq!(m.to_string().parse::<MacAddr>(), Ok(m));
+                }
+            }
+
+            /// Bit classifiers agree with octet 0; broadcast sets both bits, unspecified neither.
+            #[test]
+            fn prop_bit_classifiers(o in any::<[u8; 6]>()) {
+                let m = MacAddr::new(o);
+                prop_assert_eq!(m.oui(), [o[0], o[1], o[2]]);
+                prop_assert_eq!(m.is_multicast(), o[0] & 0x01 != 0);
+                prop_assert_eq!(m.is_locally_administered(), o[0] & 0x02 != 0);
+                if m.is_broadcast() {
+                    prop_assert!(m.is_multicast() && m.is_locally_administered());
+                }
+                if m.is_unspecified() {
+                    prop_assert!(!m.is_multicast() && !m.is_locally_administered());
+                }
+            }
+        }
     }
 }

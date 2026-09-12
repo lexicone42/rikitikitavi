@@ -327,4 +327,118 @@ mod tests {
         assert_eq!(e.dst_ip.as_deref(), Some("10.0.0.1"));
         assert_eq!(e.action, "allowed");
     }
+
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    #[derive(Deserialize)]
+    struct FlexProbe {
+        #[serde(default, deserialize_with = "flex_i64")]
+        i: i64,
+        #[serde(default, deserialize_with = "flex_opt_u16")]
+        u: Option<u16>,
+    }
+
+    /// Numeric-looking strings, including i64 overflow and whitespace, plus arbitrary text.
+    fn arb_flex_string() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "-?[0-9]{1,20}",
+            "[ \t]{0,2}-?[0-9]{0,6}[ \t]{0,2}",
+            proptest::collection::vec(any::<char>(), 0..12)
+                .prop_map(|chars| chars.into_iter().collect::<String>()),
+        ]
+    }
+
+    fn scoped_rule(
+        side_src: bool,
+        group: Vec<String>,
+        net: Option<String>,
+        addr: Option<String>,
+    ) -> FirewallRule {
+        if side_src {
+            FirewallRule {
+                src_firewallgroup_ids: group,
+                src_networkconf_id: net,
+                src_address: addr,
+                ..FirewallRule::default()
+            }
+        } else {
+            FirewallRule {
+                dst_firewallgroup_ids: group,
+                dst_networkconf_id: net,
+                dst_address: addr,
+                ..FirewallRule::default()
+            }
+        }
+    }
+
+    proptest! {
+        /// JSON number `n` and string `"n"` (optionally padded) deserialize identically; out-of-u16 `n` gives `None`.
+        #[test]
+        fn prop_flex_int_number_and_string_agree(n in any::<i64>(), pad in "[ \t]{0,2}") {
+            let from_num: FlexProbe = serde_json::from_value(json!({ "i": n, "u": n })).unwrap();
+            let s = format!("{pad}{n}{pad}");
+            let from_str: FlexProbe = serde_json::from_value(json!({ "i": s, "u": s })).unwrap();
+            prop_assert_eq!(from_num.i, n);
+            prop_assert_eq!(from_str.i, n);
+            prop_assert_eq!(from_num.u, u16::try_from(n).ok());
+            prop_assert_eq!(from_str.u, from_num.u);
+        }
+
+        /// Every string is accepted: parseable → its value, otherwise `0` / `None`.
+        #[test]
+        fn prop_flex_int_accepts_any_string(s in arb_flex_string()) {
+            let probe: FlexProbe = serde_json::from_value(json!({ "i": s, "u": s })).unwrap();
+            let parsed = s.trim().parse::<i64>().ok();
+            prop_assert_eq!(probe.i, parsed.unwrap_or(0));
+            prop_assert_eq!(probe.u, parsed.and_then(|n| u16::try_from(n).ok()));
+        }
+
+        /// Default is any/any; empty ids and `""`/`"any"` addresses keep it; a non-empty group id, network id, or other address flips only its side.
+        #[test]
+        fn prop_firewall_rule_scoping(
+            id in ".{1,16}",
+            addr in ".{1,16}".prop_filter("not the any keyword", |a| a != "any"),
+            empties in 0_usize..3,
+            side_src in any::<bool>(),
+        ) {
+            let base = FirewallRule::default();
+            prop_assert!(base.src_is_any() && base.dst_is_any());
+
+            let padded = scoped_rule(
+                side_src,
+                vec![String::new(); empties],
+                Some(String::new()),
+                Some(if side_src { String::new() } else { "any".to_owned() }),
+            );
+            prop_assert!(padded.src_is_any() && padded.dst_is_any());
+
+            let mut groups = vec![String::new(); empties];
+            groups.push(id.clone());
+            for rule in [
+                scoped_rule(side_src, groups, None, None),
+                scoped_rule(side_src, Vec::new(), Some(id), None),
+                scoped_rule(side_src, Vec::new(), None, Some(addr)),
+            ] {
+                prop_assert_eq!(rule.src_is_any(), !side_src);
+                prop_assert_eq!(rule.dst_is_any(), side_src);
+            }
+        }
+
+        /// Codes 0..=11 round-trip through `i64` and serde; every other code is `Unknown` (0).
+        #[test]
+        fn prop_device_state_round_trip(code in prop_oneof![3 => 0_i64..=12, 1 => any::<i64>()]) {
+            let state = DeviceState::from(code);
+            let back = i64::from(state);
+            if (0..=11).contains(&code) {
+                prop_assert_eq!(back, code);
+            } else {
+                prop_assert_eq!(state, DeviceState::Unknown);
+                prop_assert_eq!(back, 0);
+            }
+            let via_serde: DeviceState = serde_json::from_value(json!(code)).unwrap();
+            prop_assert_eq!(via_serde, state);
+            prop_assert_eq!(serde_json::to_value(state).unwrap(), json!(back));
+        }
+    }
 }

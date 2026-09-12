@@ -136,7 +136,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rikitikitavi_core::Severity;
-    use rikitikitavi_models::Device;
+    use rikitikitavi_models::{Device, DeviceFingerprint};
+    use std::collections::HashSet;
     use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
@@ -325,6 +326,10 @@ mod tests {
 
     // ── Property-based tests ────────────────────────────────────────
 
+    const SCANNERS: &[&str] = &["ports", "ssl", "dns", "creds"];
+    const TITLES: &[&str] = &["Open", "Weak", "Expired", "Default"];
+    const PORTS: &[u16] = &[22, 80, 443, 53];
+
     fn arb_severity() -> impl Strategy<Value = Severity> {
         prop_oneof![
             Just(Severity::Info),
@@ -337,18 +342,155 @@ mod tests {
 
     fn arb_finding() -> impl Strategy<Value = Finding> {
         (
-            prop_oneof![Just("ports"), Just("ssl"), Just("dns"), Just("creds")],
-            prop_oneof![Just("Open"), Just("Weak"), Just("Expired"), Just("Default")],
+            proptest::sample::select(SCANNERS),
+            proptest::sample::select(TITLES),
             arb_severity(),
             (1_u8..5_u8),
-            prop_oneof![Just(22_u16), Just(80), Just(443), Just(53)],
+            proptest::sample::select(PORTS),
         )
             .prop_map(|(scanner, title, sev, host, port)| {
                 make_finding(scanner, title, sev, &format!("10.0.0.{host}"), port)
             })
     }
 
+    /// Keyed by fingerprint components, so fingerprints within one scan are unique.
+    fn arb_unique_findings() -> impl Strategy<Value = Vec<Finding>> {
+        proptest::collection::hash_map(
+            (
+                0..SCANNERS.len(),
+                0..TITLES.len(),
+                1_u8..5_u8,
+                0..PORTS.len(),
+            ),
+            arb_severity(),
+            0..12,
+        )
+        .prop_map(|m| {
+            m.into_iter()
+                .map(|((s, t, host, p), sev)| {
+                    make_finding(
+                        SCANNERS[s],
+                        TITLES[t],
+                        sev,
+                        &format!("10.0.0.{host}"),
+                        PORTS[p],
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn arb_device() -> impl Strategy<Value = Device> {
+        (1_u8..5_u8, proptest::option::of(0_u8..3_u8)).prop_map(|(host, mac)| {
+            let addr = ip(&format!("10.0.0.{host}"));
+            mac.map_or_else(
+                || Device::new(addr),
+                |m| Device::new(addr).with_mac(format!("aa:bb:cc:dd:ee:{m:02x}")),
+            )
+        })
+    }
+
+    fn finding_fps(findings: &[Finding]) -> HashSet<FindingFingerprint> {
+        findings.iter().map(Finding::fingerprint).collect()
+    }
+
+    fn device_fps(devices: &[Device]) -> HashSet<DeviceFingerprint> {
+        devices.iter().map(Device::fingerprint).collect()
+    }
+
+    /// Two finding sets: identical, one severity flipped, or independent.
+    fn arb_finding_pair() -> impl Strategy<Value = (Vec<Finding>, Vec<Finding>)> {
+        arb_unique_findings().prop_flat_map(|a| {
+            let flipped = (Just(a.clone()), 0..a.len().max(1)).prop_map(|(mut b, i)| {
+                if let Some(f) = b.get_mut(i) {
+                    f.severity = if f.severity == Severity::Critical {
+                        Severity::Info
+                    } else {
+                        Severity::Critical
+                    };
+                }
+                b
+            });
+            let b = prop_oneof![Just(a.clone()), flipped, arb_unique_findings()];
+            (Just(a), b)
+        })
+    }
+
+    /// Two device sets: identical or independent.
+    fn arb_device_pair() -> impl Strategy<Value = (Vec<Device>, Vec<Device>)> {
+        proptest::collection::vec(arb_device(), 0..6).prop_flat_map(|a| {
+            let b = prop_oneof![
+                Just(a.clone()),
+                proptest::collection::vec(arb_device(), 0..6)
+            ];
+            (Just(a), b)
+        })
+    }
+
     proptest! {
+        /// diff(a, b) mirrors diff(b, a): new<->resolved, new_devices<->disappeared,
+        /// unchanged equal, severity changes swapped.
+        #[test]
+        fn prop_diff_symmetric(
+            a_findings in proptest::collection::vec(arb_finding(), 0..15),
+            b_findings in proptest::collection::vec(arb_finding(), 0..15),
+            a_devices in proptest::collection::vec(arb_device(), 0..6),
+            b_devices in proptest::collection::vec(arb_device(), 0..6),
+        ) {
+            let a = make_results(a_findings, a_devices);
+            let b = make_results(b_findings, b_devices);
+            let ab = diff_scan_results(&a, &b);
+            let ba = diff_scan_results(&b, &a);
+
+            prop_assert_eq!(finding_fps(&ab.new_findings), finding_fps(&ba.resolved_findings));
+            prop_assert_eq!(finding_fps(&ab.resolved_findings), finding_fps(&ba.new_findings));
+            prop_assert_eq!(
+                finding_fps(&ab.unchanged_findings),
+                finding_fps(&ba.unchanged_findings)
+            );
+
+            let ab_changes: HashSet<_> = ab
+                .severity_changes
+                .iter()
+                .map(|c| (c.finding.fingerprint(), c.old_severity, c.new_severity))
+                .collect();
+            let ba_swapped: HashSet<_> = ba
+                .severity_changes
+                .iter()
+                .map(|c| (c.finding.fingerprint(), c.new_severity, c.old_severity))
+                .collect();
+            prop_assert_eq!(ab_changes, ba_swapped);
+
+            prop_assert_eq!(device_fps(&ab.new_devices), device_fps(&ba.disappeared_devices));
+            prop_assert_eq!(device_fps(&ab.disappeared_devices), device_fps(&ba.new_devices));
+            prop_assert_eq!(device_fps(&ab.unchanged_devices), device_fps(&ba.unchanged_devices));
+            prop_assert_eq!(ab.has_changes(), ba.has_changes());
+        }
+
+        /// `has_changes()` is false exactly when both scans have the same finding
+        /// fingerprints with equal severities and the same device fingerprints.
+        #[test]
+        fn prop_has_changes_iff_scans_differ(
+            (a_findings, b_findings) in arb_finding_pair(),
+            (a_devices, b_devices) in arb_device_pair(),
+        ) {
+            let a_sev: HashMap<_, _> = a_findings
+                .iter()
+                .map(|f| (f.fingerprint(), f.severity))
+                .collect();
+            let b_sev: HashMap<_, _> = b_findings
+                .iter()
+                .map(|f| (f.fingerprint(), f.severity))
+                .collect();
+            let same = a_sev == b_sev && device_fps(&a_devices) == device_fps(&b_devices);
+
+            let diff = diff_scan_results(
+                &make_results(a_findings, a_devices),
+                &make_results(b_findings, b_devices),
+            );
+            prop_assert_eq!(diff.has_changes(), !same);
+        }
+
         /// Diffing a scan against itself produces zero changes.
         #[test]
         fn prop_diff_with_self_no_changes(
