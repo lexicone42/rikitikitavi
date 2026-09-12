@@ -109,7 +109,6 @@ fn init_registry() -> RemediationRegistry {
         include_str!("../templates/arp.yaml"),
         include_str!("../templates/credentials.yaml"),
         include_str!("../templates/database.yaml"),
-        include_str!("../templates/dhcp.yaml"),
         include_str!("../templates/dns.yaml"),
         include_str!("../templates/exposure.yaml"),
         include_str!("../templates/http_audit.yaml"),
@@ -206,7 +205,6 @@ mod tests {
         "rikitikitavi.database.elasticsearch-no-auth",
         "rikitikitavi.database.memcached-no-auth",
         "rikitikitavi.database.postgresql-exposed",
-        "rikitikitavi.dhcp.rogue-server",
         "rikitikitavi.dns.hijacking-detected",
         "rikitikitavi.dns.cross-validation-mismatch",
         "rikitikitavi.dns.dnssec-not-enforced",
@@ -252,7 +250,7 @@ mod tests {
     #[test]
     fn test_all_templates_parse() {
         let registry = REGISTRY.get_or_init(init_registry);
-        assert_eq!(registry.templates.len(), 54);
+        assert_eq!(registry.templates.len(), EXPECTED_IDS.len());
     }
 
     #[test]

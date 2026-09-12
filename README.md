@@ -98,7 +98,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **Database Security** | Auth-less Redis/MongoDB/MySQL/Elasticsearch/Memcached |
 | **SMB Security** | SMBv1 (EternalBlue-vulnerable) detection, NetBIOS exposure |
 | **ARP Security** | ARP spoofing detection (duplicate MACs/IPs, broadcast MACs) |
-| **DHCP Security** | Rogue DHCP server detection, APIPA address detection |
+| **DHCP Security** | APIPA (self-assigned) address and missing-gateway detection |
 | **SNMP** | Default community strings (`public`/`private`) over UDP; sysDescr leak |
 | **MQTT** | Broker anonymous-access probe (CONNECT/CONNACK, non-destructive) |
 | **Management Plane** | Unauthenticated Docker API, kubelet, and Kubernetes API exposure |

@@ -588,9 +588,7 @@ fn classify_telnet_response(response: &str) -> TelnetOutcome {
         return TelnetOutcome::Failure;
     }
 
-    // Positive success indicators: welcome banner, last-login line, BusyBox shell.
-    // Checked before the login/password re-prompt test because "last login:"
-    // legitimately contains "login:".
+    // Checked before the re-prompt test: "last login:" contains "login:".
     let success_indicators = ["welcome", "last login", "busybox"];
     if success_indicators.iter().any(|kw| lower.contains(kw)) {
         return TelnetOutcome::Success;
@@ -826,7 +824,8 @@ fn is_thin_redirect(lower: &str) -> bool {
 
 /// Extract the `<title>` content from an HTML response.
 fn extract_html_title(body: &str) -> Option<String> {
-    let lower = body.to_lowercase();
+    // ASCII lowercasing keeps byte offsets valid for `body`.
+    let lower = body.to_ascii_lowercase();
     let start = lower.find("<title>")? + 7;
     let end = lower[start..].find("</title>")? + start;
     let title = body[start..end].trim().to_owned();
@@ -838,7 +837,7 @@ fn extract_html_title(body: &str) -> Option<String> {
 /// PASV response format: `227 Entering Passive Mode (h1,h2,h3,h4,p1,p2).`
 fn parse_pasv_response(response: &str) -> Option<SocketAddr> {
     let start = response.find('(')? + 1;
-    let end = response.find(')')?;
+    let end = response[start..].find(')')? + start;
     let parts: Vec<&str> = response[start..end].split(',').collect();
     if parts.len() != 6 {
         return None;
@@ -1859,6 +1858,43 @@ mod tests {
         fn prop_parse_ftp_banner_no_panic(text in ".*") {
             let _ = parse_ftp_banner(&text);
         }
+
+        /// Title is always a trimmed substring of the body.
+        #[test]
+        fn prop_extract_html_title_substring(text in "\\PC*") {
+            if let Some(title) = extract_html_title(&text) {
+                prop_assert!(text.contains(&title));
+                prop_assert_eq!(title.trim(), title.as_str());
+            }
+        }
+
+        #[test]
+        fn prop_parse_pasv_no_panic(text in ".*") {
+            let _ = parse_pasv_response(&text);
+        }
+
+        #[test]
+        fn prop_parse_pasv_roundtrip(o in proptest::array::uniform4(any::<u8>()), port in any::<u16>()) {
+            let [p1, p2] = port.to_be_bytes();
+            let line = format!("227 Entering Passive Mode ({},{},{},{},{p1},{p2}).", o[0], o[1], o[2], o[3]);
+            let want = SocketAddr::new(IpAddr::from(o), port);
+            prop_assert_eq!(parse_pasv_response(&line), Some(want));
+        }
+    }
+
+    #[test]
+    fn extract_html_title_non_ascii_before_title() {
+        let body = "<p>İİİİİİİİİİ</p><title> Café Router </title>";
+        assert_eq!(extract_html_title(body).as_deref(), Some("Café Router"));
+    }
+
+    #[test]
+    fn parse_pasv_close_paren_before_open() {
+        assert_eq!(parse_pasv_response(")("), None);
+        assert_eq!(
+            parse_pasv_response("227 ) x (1,2,3,4,5,6)"),
+            Some("1.2.3.4:1286".parse().unwrap())
+        );
     }
 }
 

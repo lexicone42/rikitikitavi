@@ -46,10 +46,19 @@
 //   impl Finding {
 //       pub fn fingerprint(&self) -> FindingFingerprint {
 //           let mut hasher = Fnv1a64::new();
-//           self.scanner.hash(&mut hasher);
-//           self.title.hash(&mut hasher);
-//           self.affected_ip.hash(&mut hasher);
-//           self.affected_port.hash(&mut hasher);
+//           hasher.write(self.scanner.as_bytes());
+//           hasher.write_u8(0xff);
+//           hasher.write(self.title.as_bytes());
+//           hasher.write_u8(0xff);
+//           match self.affected_ip {                 // tag byte, then octets
+//               None => hasher.write_u8(0),
+//               Some(IpAddr::V4(v4)) => { hasher.write_u8(4); hasher.write(&v4.octets()); }
+//               Some(IpAddr::V6(v6)) => { hasher.write_u8(6); hasher.write(&v6.octets()); }
+//           }
+//           match self.affected_port {               // tag byte, then big-endian u16
+//               None => hasher.write_u8(0),
+//               Some(p) => { hasher.write_u8(1); hasher.write(&p.to_be_bytes()); }
+//           }
 //           FindingFingerprint(hasher.finish())
 //       }
 //   }
@@ -58,10 +67,11 @@
 // - std's `DefaultHasher` (SipHash) is NOT guaranteed stable across Rust
 //   releases. Fingerprints are written to baseline/suppression files, so the
 //   code uses its own FNV-1a hasher, whose output never changes.
-// - `.hash(&mut hasher)` feeds bytes into the hasher's state.
+// - The bytes are written explicitly with fixed-width tags. Derived `Hash`
+//   impls (e.g. for `Option<u16>`) write the enum discriminant as a native
+//   `isize`, so the same value would hash differently on 32-bit or big-endian
+//   machines and a baseline file would not be portable between them.
 // - `.finish()` produces a u64 digest.
-// - `Option<T>` implements `Hash` if `T: Hash`, so `affected_ip: Option<IpAddr>`
-//   works — `None` hashes differently than any `Some(ip)`.
 //
 // ── THE NEWTYPE PATTERN ─────────────────────────────────────────────────────
 //

@@ -223,11 +223,31 @@ impl Finding {
 
     /// Hash of `(scanner, title, affected_ip, affected_port)`.
     pub fn fingerprint(&self) -> FindingFingerprint {
+        // Byte layout: scanner 0xff title 0xff ip-tag [octets] port-tag [port BE].
+        // Fixed-width tags keep the digest identical across pointer width and endianness.
         let mut hasher = Fnv1a64::new();
-        self.scanner.hash(&mut hasher);
-        self.title.hash(&mut hasher);
-        self.affected_ip.hash(&mut hasher);
-        self.affected_port.hash(&mut hasher);
+        hasher.write(self.scanner.as_bytes());
+        hasher.write_u8(0xff);
+        hasher.write(self.title.as_bytes());
+        hasher.write_u8(0xff);
+        match self.affected_ip {
+            None => hasher.write_u8(0),
+            Some(IpAddr::V4(v4)) => {
+                hasher.write_u8(4);
+                hasher.write(&v4.octets());
+            }
+            Some(IpAddr::V6(v6)) => {
+                hasher.write_u8(6);
+                hasher.write(&v6.octets());
+            }
+        }
+        match self.affected_port {
+            None => hasher.write_u8(0),
+            Some(port) => {
+                hasher.write_u8(1);
+                hasher.write(&port.to_be_bytes());
+            }
+        }
         FindingFingerprint(hasher.finish())
     }
 
@@ -609,7 +629,7 @@ mod hasher_tests {
         let f = Finding::new("ports", "Telnet open", "d", Severity::High)
             .with_ip("192.168.1.1".parse().unwrap())
             .with_port(23);
-        assert_eq!(f.fingerprint().to_string(), "9919305a61aa445c");
+        assert_eq!(f.fingerprint().to_string(), "818cbae87e71ada1");
     }
 
     #[test]
