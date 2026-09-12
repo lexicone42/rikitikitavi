@@ -149,7 +149,7 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
 /// - Bytes 37-38: `DialectIndex` (LE u16, `0xFFFF` = no dialect accepted)
 /// - Byte 39: `SecurityMode` (bit 0 = signing supported, bit 1 = signing required)
 /// - Bytes 44-47: `Capabilities` (LE u32, bit 31 = extended security)
-fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
+const fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
     let mut details = SmbV1NegotiateDetails {
         dialect_accepted: false,
         signing_required: false,

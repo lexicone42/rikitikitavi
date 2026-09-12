@@ -101,7 +101,7 @@ fn build_connect_packet(client_id: &str) -> Vec<u8> {
 /// A CONNACK is `0x20 0x02 <ack flags> <return code>`. We treat return code
 /// `0x00` as proof the broker accepts anonymous connections. Anything that is
 /// not a well-formed CONNACK is [`ConnackVerdict::Malformed`].
-fn classify_connack(data: &[u8]) -> ConnackVerdict {
+const fn classify_connack(data: &[u8]) -> ConnackVerdict {
     // Need at least: type(1) + remaining len(1) + ack flags(1) + return code(1).
     if data.len() < 4 || data[0] != 0x20 {
         return ConnackVerdict::Malformed;
