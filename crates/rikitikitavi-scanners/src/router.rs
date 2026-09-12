@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 /// Gateway scanner: admin ports, HTTP→HTTPS redirect, Telnet, FTP, `UPnP` root description.
 pub struct RouterScanner;
@@ -23,13 +24,8 @@ async fn is_port_open(ip: IpAddr, port: u16) -> bool {
 
 /// Check if HTTP on port 80 redirects to HTTPS.
 async fn check_http_redirect(ip: IpAddr) -> Option<bool> {
-    // TLS validation disabled: unauthenticated probe, no credentials sent.
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(true)
-        .build()
-        .ok()?;
+    let client =
+        unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::none()).ok()?;
 
     let url = format!("http://{ip}/");
     client.get(&url).send().await.ok().map(|resp| {

@@ -9,6 +9,7 @@ use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 // ── UPnP device description parsing ─────────────────────────────────
 
@@ -173,12 +174,8 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
 
 /// Fetch a `UPnP` device description XML from a LOCATION URL.
 async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
-    // TLS validation disabled: unauthenticated probe, no credentials sent.
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
+    let client =
+        unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::default()).ok()?;
 
     let resp = client.get(location).send().await.ok()?;
     // Body read is capped (untrusted device).
@@ -194,6 +191,8 @@ async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
 
 /// mDNS/SSDP discovery scanner; fetches `UPnP` device descriptions in Active mode.
 pub struct MdnsScanner;
+
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// SSDP multicast address and port.
 const SSDP_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(239, 255, 255, 250), 1900);

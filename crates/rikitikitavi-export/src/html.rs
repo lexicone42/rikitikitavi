@@ -9,7 +9,7 @@ pub fn export_html(results: &ScanResults, path: &Path) -> Result<()> {
     tracing::info!(?path, "exporting HTML report");
 
     let html = render_html_report(results);
-    std::fs::write(path, html)?;
+    rikitikitavi_core::fs::write_private(path, html.as_bytes())?;
 
     Ok(())
 }
@@ -499,6 +499,17 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<html"));
         assert!(html.contains("</html>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_html_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.html");
+        export_html(&make_results(Vec::new(), 0.0), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

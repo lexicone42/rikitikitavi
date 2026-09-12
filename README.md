@@ -282,6 +282,22 @@ rikitikitavi scan --suppress .rikitikitavi-baseline \
 > attempts* are gated behind `--aggressive`; the default scan detects and flags
 > exposures without attempting logins.
 
+### Configuration File
+
+`rikitikitavi` loads `./config.yaml`, `./config.yml`, or `/etc/rikitikitavi/config.yaml` (first found) and prints the path it used. Safety-relevant keys under `scan`:
+
+```yaml
+scan:
+  intensity: active            # passive | active | aggressive; a file value of aggressive is capped
+                               # at active, login attempts require `scan --aggressive`
+  parallelism: 64              # 1..=4096
+  timeout_seconds: 0           # 0 = unbounded; otherwise the whole scan aborts after N seconds
+  excluded_networks: ["192.168.50.0/24"]                    # CIDRs never probed
+  excluded_devices: ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]  # IPs or MACs never probed
+```
+
+Reports, baseline and known-device files are written with mode `0600`; the scan-history directory with `0700`.
+
 ### Host Discovery
 
 In the default (Active) mode, rikitikitavi runs a bounded, unprivileged

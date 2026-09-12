@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::Scanner;
-use crate::http_util::read_body_capped;
+use crate::http_util::{read_body_capped, unauthenticated_probe_client};
 
 /// Container / orchestration management-plane exposure scanner.
 pub struct MgmtPlaneScanner;
@@ -106,17 +106,9 @@ fn classify_kubelet_pods(body: &str) -> bool {
 
 // ── Network probes (all I/O bounded by a timeout) ───────────────────
 
-/// Build a reqwest client for management-plane detection probes.
-///
-/// TLS validation intentionally disabled: unauthenticated detection GETs only,
-/// no credentials sent; kubelet/API-server present untrusted self-signed certs.
+/// Client for management-plane detection probes.
 fn detection_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(true)
-        .build()
-        .ok()
+    unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::none()).ok()
 }
 
 /// Issue a credential-free GET and return the (capped) body if the server

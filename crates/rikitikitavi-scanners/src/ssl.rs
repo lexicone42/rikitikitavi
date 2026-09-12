@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use x509_parser::prelude::*;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 /// TLS scanner: direct `rustls` handshake (protocol version, cipher suite,
 /// leaf certificate analysis) plus an HSTS header check on discovered TLS ports.
@@ -837,13 +838,9 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
         }
     }
 
-    // HSTS check. TLS validation disabled: unauthenticated probe, no credentials sent.
+    // HSTS check.
     let url = format!("https://{ip}:{port}/");
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build();
+    let client = unauthenticated_probe_client(CONNECT_TIMEOUT, reqwest::redirect::Policy::none());
 
     if let Ok(client) = client
         && let Ok(resp) = client.head(&url).send().await

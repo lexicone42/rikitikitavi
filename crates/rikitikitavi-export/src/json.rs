@@ -6,7 +6,7 @@ use std::path::Path;
 pub fn export_json(results: &ScanResults, path: &Path) -> Result<()> {
     tracing::info!(?path, "exporting JSON report");
     let json = serde_json::to_string_pretty(results)?;
-    std::fs::write(path, json)?;
+    rikitikitavi_core::fs::write_private(path, json.as_bytes())?;
     Ok(())
 }
 
@@ -75,6 +75,17 @@ mod tests {
         let json = to_json_string(&results).unwrap();
         // Must be valid JSON
         assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_json_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        export_json(&make_results(Vec::new()), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     proptest! {

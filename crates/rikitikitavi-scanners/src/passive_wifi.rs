@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rikitikitavi_core::Severity;
-use rikitikitavi_models::Finding;
+use rikitikitavi_models::{Finding, MacAddr};
 use rikitikitavi_network::wifi_frames::{
     self, BeaconFrame, DeauthFrame, DisassocFrame, EncryptionType, FrameType, MacAddress,
     ProbeRequestFrame,
@@ -181,7 +181,7 @@ fn detect_weak_encryption(beacons: &HashMap<MacAddress, BeaconFrame>, findings: 
                         ),
                         Severity::Critical,
                     )
-                    .with_mac(wifi_frames::format_mac(&beacon.bssid))
+                    .with_mac(MacAddr::new(beacon.bssid))
                     .with_cwe("CWE-319"),
                 );
             }
@@ -197,7 +197,7 @@ fn detect_weak_encryption(beacons: &HashMap<MacAddress, BeaconFrame>, findings: 
                         ),
                         Severity::High,
                     )
-                    .with_mac(wifi_frames::format_mac(&beacon.bssid))
+                    .with_mac(MacAddr::new(beacon.bssid))
                     .with_cwe("CWE-326"),
                 );
             }
@@ -225,7 +225,7 @@ fn detect_deauth_flood(
             findings.push(
                 Finding::new(
                     SCANNER_ID,
-                    &format!("Deauth flood from {}", wifi_frames::format_mac(source),),
+                    &format!("Deauth flood from {}", wifi_frames::format_mac(source)),
                     &format!(
                         "Detected {count} deauthentication/disassociation frames from {}. \
                          This may indicate a WiFi deauthentication attack attempting to \
@@ -234,7 +234,7 @@ fn detect_deauth_flood(
                     ),
                     Severity::High,
                 )
-                .with_mac(wifi_frames::format_mac(source))
+                .with_mac(MacAddr::new(*source))
                 .with_cwe("CWE-400")
                 .with_evidence(format!("{count} deauth/disassoc frames from single source")),
             );
@@ -270,7 +270,7 @@ fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
                     ),
                     Severity::High,
                 )
-                .with_mac(wifi_frames::format_mac(&beacon.bssid))
+                .with_mac(MacAddr::new(beacon.bssid))
                 .with_cwe("CWE-290")
                 .with_evidence(format!(
                     "SSID \"{home_ssid}\" from unknown BSSID {}",
@@ -413,6 +413,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Critical);
         assert!(findings[0].title.contains("Open WiFi"));
+        assert_eq!(findings[0].affected_mac, Some(MacAddr::new(bssid)));
     }
 
     #[test]
@@ -458,6 +459,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::High);
         assert!(findings[0].title.contains("Deauth flood"));
+        assert_eq!(findings[0].affected_mac, Some(MacAddr::new(source)));
     }
 
     #[test]
@@ -509,6 +511,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::High);
         assert!(findings[0].title.contains("rogue AP"));
+        assert_eq!(findings[0].affected_mac, Some(MacAddr::new(rogue_bssid)));
     }
 
     #[test]

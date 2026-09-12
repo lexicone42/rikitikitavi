@@ -25,13 +25,13 @@ impl ScanHistory {
 
     /// Save scan results to a timestamped JSON file. Prunes old scans.
     pub fn save(&self, results: &ScanResults) -> Result<PathBuf> {
-        std::fs::create_dir_all(&self.data_dir)
+        rikitikitavi_core::fs::create_private_dir(&self.data_dir)
             .with_context(|| format!("creating scan history dir: {}", self.data_dir.display()))?;
 
         let filename = format!("scan-{}.json", results.scanned_at.format("%Y%m%d-%H%M%S"));
         let path = self.data_dir.join(filename);
         let json = serde_json::to_string_pretty(results).context("serializing scan results")?;
-        std::fs::write(&path, json)
+        rikitikitavi_core::fs::write_private(&path, json.as_bytes())
             .with_context(|| format!("writing scan file: {}", path.display()))?;
         self.prune()?;
         Ok(path)
@@ -113,6 +113,22 @@ mod tests {
         assert_eq!(loaded.findings.len(), 1);
         assert_eq!(loaded.findings[0].title, "SSH open");
         assert!((loaded.risk_score - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_private_dir_and_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("rikitikitavi").join("scans");
+        let history = ScanHistory::with_dir(data_dir.clone());
+
+        let path = history.save(&sample_results()).unwrap();
+
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data_dir), 0o700);
+        assert_eq!(mode(data_dir.parent().unwrap()), 0o700);
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]

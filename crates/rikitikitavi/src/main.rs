@@ -18,19 +18,20 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let app_config = config::load_config(cli.config.as_deref())?;
+    let loaded = config::load_config(cli.config.as_deref())?;
+    let app_config = &loaded.config;
 
     match cli.command {
-        Command::Scan(args) => cmd_scan(args, &app_config).await,
+        Command::Scan(args) => cmd_scan(args, &loaded).await,
         #[cfg(feature = "tui")]
-        Command::Tui(args) => cmd_tui(args, &app_config).await,
+        Command::Tui(args) => cmd_tui(args, app_config).await,
         Command::Report(args) => {
-            cmd_report(&args, &app_config);
+            cmd_report(&args, app_config);
             Ok(())
         }
         #[cfg(feature = "unifi")]
-        Command::Unifi(args) => cmd_unifi(args, &app_config).await,
-        Command::Aws(args) => cmd_aws(args, &app_config).await,
+        Command::Unifi(args) => cmd_unifi(args, app_config).await,
+        Command::Aws(args) => cmd_aws(args, app_config).await,
         Command::Modules(args) => {
             cmd_modules(args);
             Ok(())
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
             cmd_init();
             Ok(())
         }
-        Command::Config(args) => cmd_config(&args, &app_config),
+        Command::Config(args) => cmd_config(&args, &loaded),
         #[cfg(feature = "monitor")]
         Command::Monitor(args) => cmd_monitor(args).await,
         Command::UpdateDb => cmd_update_db().await,
@@ -68,27 +69,41 @@ fn unimplemented_scan_flags(args: &cli::ScanArgs) -> Vec<&'static str> {
     if args.upload {
         ignored.push("--upload");
     }
+    #[cfg(feature = "unifi")]
     if args.unifi_local {
         ignored.push("--unifi-local");
     }
     ignored
 }
 
+/// `--quick` wins, then `--aggressive`; a config-file `aggressive` is capped at `Active`.
+/// Second value: `true` when capped.
+const fn effective_intensity(
+    quick: bool,
+    aggressive: bool,
+    configured: rikitikitavi_models::config::ScanIntensity,
+) -> (rikitikitavi_models::config::ScanIntensity, bool) {
+    use rikitikitavi_models::config::ScanIntensity;
+    if quick {
+        (ScanIntensity::Passive, false)
+    } else if aggressive {
+        (ScanIntensity::Aggressive, false)
+    } else if matches!(configured, ScanIntensity::Aggressive) {
+        (ScanIntensity::Active, true)
+    } else {
+        (configured, false)
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-async fn cmd_scan(
-    args: cli::ScanArgs,
-    app_config: &rikitikitavi_models::config::AppConfig,
-) -> Result<()> {
+async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<()> {
     use rikitikitavi_models::config::{PortRange, ScanIntensity, TOP_20_PORTS};
 
-    if !args.quiet {
-        let ignored = unimplemented_scan_flags(&args);
-        if !ignored.is_empty() {
-            eprintln!(
-                "Warning: these flags are not yet implemented and will be ignored: {}",
-                ignored.join(", ")
-            );
-        }
+    let app_config = &loaded.config;
+
+    let ignored = unimplemented_scan_flags(&args);
+    if !ignored.is_empty() {
+        anyhow::bail!("not yet implemented: {}", ignored.join(", "));
     }
 
     // Network discovery is only implemented for Linux and macOS.
@@ -100,16 +115,34 @@ async fn cmd_scan(
         );
     }
 
+    config::validate_scan_config(&app_config.scan)?;
+    if !args.quiet
+        && let Some(path) = loaded.path.as_ref()
+    {
+        println!("Config: {}", path.display());
+    }
+
+    // Control files are read before any network activity.
+    let suppressions = args
+        .suppress
+        .as_deref()
+        .map(|p| load_list(p, "suppression", parse_fingerprint))
+        .transpose()?;
+    let known_devices = args
+        .known_devices
+        .as_deref()
+        .map(|p| load_list(p, "known-devices", parse_device_identifier))
+        .transpose()?;
+
     let perspective: rikitikitavi_core::Perspective = args.perspective.into();
 
-    // --quick takes precedence over --aggressive.
-    let intensity = if args.quick {
-        ScanIntensity::Passive
-    } else if args.aggressive {
-        ScanIntensity::Aggressive
-    } else {
-        app_config.scan.intensity
-    };
+    let (intensity, capped) =
+        effective_intensity(args.quick, args.aggressive, app_config.scan.intensity);
+    if capped {
+        eprintln!(
+            "Note: config intensity 'aggressive' capped at 'active'; pass --aggressive to enable login attempts."
+        );
+    }
 
     let port_scan_range = match intensity {
         ScanIntensity::Passive => PortRange::Custom(TOP_20_PORTS.to_vec()),
@@ -123,8 +156,10 @@ async fn cmd_scan(
         port_scan_range,
         modules: args.modules,
         attack_paths: args.attack_paths,
+        parallelism: app_config.scan.effective_parallelism(),
         ..app_config.scan.clone()
     };
+    let exclusions = scan_config.exclusions()?;
 
     let mut ctx = rikitikitavi_models::ScanContext {
         target_network: None,
@@ -146,9 +181,10 @@ async fn cmd_scan(
     // Dry run must not touch the network, so the sweep is skipped.
     let swept = if args.dry_run {
         ctx.discovered_devices = runner::discover_network(&mut ctx);
+        runner::apply_exclusions(&mut ctx.discovered_devices, &exclusions);
         0
     } else {
-        runner::discover_hosts(&mut ctx).await
+        runner::discover_hosts(&mut ctx).await?
     };
 
     if !args.quiet {
@@ -174,11 +210,14 @@ async fn cmd_scan(
         }
     }
 
+    let registry = rikitikitavi_scanners::ScannerRegistry::new();
+    let selection = runner::plan_scanners(&registry, &ctx)?;
+    for note in selection_notices(&selection, perspective) {
+        eprintln!("{note}");
+    }
     if args.dry_run {
-        let registry = rikitikitavi_scanners::ScannerRegistry::new();
-        let scanners = registry.for_perspective(perspective);
-        println!("Would run {} scanners:", scanners.len());
-        for s in &scanners {
+        println!("Would run {} scanners:", selection.scanners.len());
+        for s in &selection.scanners {
             println!("  - {} ({})", s.name(), s.id());
         }
         return Ok(());
@@ -187,6 +226,22 @@ async fn cmd_scan(
     let mut results = runner::run_scan(&mut ctx).await?;
 
     // New-device detection
+    if let (Some(known), Some(path)) = (known_devices.as_ref(), args.known_devices.as_ref()) {
+        let new_devices: Vec<_> = results
+            .devices
+            .iter()
+            .filter(|d| !known.contains(&device_identifier(d)))
+            .map(new_device_finding)
+            .collect();
+        if !new_devices.is_empty() && !args.quiet {
+            println!(
+                "Detected {} new device(s) not in {}",
+                new_devices.len(),
+                path.display()
+            );
+        }
+        results.findings.extend(new_devices);
+    }
     if let Some(path) = args.write_known_devices.as_ref() {
         match write_known_devices_file(path, &results.devices) {
             Ok(n) if !args.quiet => println!("Wrote {n} known device(s) to {}", path.display()),
@@ -194,32 +249,6 @@ async fn cmd_scan(
             Err(e) => {
                 eprintln!(
                     "Warning: could not write known-devices {}: {e}",
-                    path.display()
-                );
-            }
-        }
-    }
-    if let Some(path) = args.known_devices.as_ref() {
-        match load_known_devices(path) {
-            Ok(known) => {
-                let new_devices: Vec<_> = results
-                    .devices
-                    .iter()
-                    .filter(|d| !known.contains(&device_identifier(d)))
-                    .map(new_device_finding)
-                    .collect();
-                if !new_devices.is_empty() && !args.quiet {
-                    println!(
-                        "Detected {} new device(s) not in {}",
-                        new_devices.len(),
-                        path.display()
-                    );
-                }
-                results.findings.extend(new_devices);
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: could not read known-devices {}: {e}",
                     path.display()
                 );
             }
@@ -261,23 +290,15 @@ async fn cmd_scan(
             Err(e) => eprintln!("Warning: could not write baseline {}: {e}", path.display()),
         }
     }
-    if let Some(path) = args.suppress.as_ref() {
-        match load_suppressions(path) {
-            Ok(set) => {
-                let before = results.findings.len();
-                results.findings.retain(|f| !set.contains(&f.fingerprint()));
-                let suppressed = before - results.findings.len();
-                if suppressed > 0 && !args.quiet {
-                    println!(
-                        "Suppressed {suppressed} finding(s) listed in {}",
-                        path.display()
-                    );
-                }
-            }
-            Err(e) => eprintln!(
-                "Warning: could not read suppression file {}: {e}",
+    if let (Some(set), Some(path)) = (suppressions.as_ref(), args.suppress.as_ref()) {
+        let before = results.findings.len();
+        results.findings.retain(|f| !set.contains(&f.fingerprint()));
+        let suppressed = before - results.findings.len();
+        if suppressed > 0 && !args.quiet {
+            println!(
+                "Suppressed {suppressed} finding(s) listed in {}",
                 path.display()
-            ),
+            );
         }
     }
 
@@ -298,6 +319,9 @@ async fn cmd_scan(
         print_comparison_report(&diff);
     }
 
+    if let Some(note) = exit_code_note(args.quiet, args.fail_on) {
+        eprintln!("{note}");
+    }
     if let Some(threshold) = fail_on_threshold(args.fail_on) {
         let breach = results
             .findings
@@ -315,6 +339,54 @@ async fn cmd_scan(
     Ok(())
 }
 
+/// Stderr lines for ids dropped or added by `--modules` resolution.
+fn selection_notices(
+    selection: &runner::ModuleSelection<'_>,
+    perspective: rikitikitavi_core::Perspective,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !selection.skipped.is_empty() {
+        notes.push(format!(
+            "Warning: modules skipped (unsupported by {perspective} perspective): {}",
+            selection.skipped.join(", ")
+        ));
+    }
+    if !selection.added.is_empty() {
+        notes.push(format!(
+            "Note: phase-1 modules added: {}",
+            selection.added.join(", ")
+        ));
+    }
+    notes
+}
+
+/// Stderr note when `--quiet` hides the report and no `--fail-on` threshold is set.
+const fn exit_code_note(quiet: bool, fail_on: cli::FailOnArg) -> Option<&'static str> {
+    if quiet && matches!(fail_on, cli::FailOnArg::Never) {
+        Some("Note: --fail-on not set; exit code does not reflect findings.")
+    } else {
+        None
+    }
+}
+
+/// Create or truncate `path` for writing; mode `0o600` on Unix, existing files included.
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 /// Write deduplicated fingerprints to `path`, one per line with the title as a `#`
 /// comment. Returns the count written.
 fn write_baseline_file(
@@ -328,7 +400,7 @@ fn write_baseline_file(
         seen.entry(f.fingerprint().to_string())
             .or_insert_with(|| f.title.clone());
     }
-    let mut file = std::fs::File::create(path)?;
+    let mut file = create_private(path)?;
     writeln!(
         file,
         "# rikitikitavi suppression baseline — listed findings are muted with --suppress"
@@ -339,24 +411,75 @@ fn write_baseline_file(
     Ok(seen.len())
 }
 
-/// Parse a baseline file: one hex fingerprint per line, `#` starts a comment,
-/// unparseable tokens are skipped.
-fn load_suppressions(
-    path: &std::path::Path,
-) -> std::io::Result<std::collections::HashSet<rikitikitavi_models::FindingFingerprint>> {
-    use std::str::FromStr as _;
-    let contents = std::fs::read_to_string(path)?;
-    let mut set = std::collections::HashSet::new();
+/// Entries parsed from a baseline / known-devices file.
+struct ListFile<T> {
+    entries: std::collections::HashSet<T>,
+    invalid: usize,
+}
+
+/// One token per line, `#` starts a comment; tokens `parse` rejects count as `invalid`.
+fn parse_list_file<T: Eq + std::hash::Hash>(
+    contents: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> ListFile<T> {
+    let mut entries = std::collections::HashSet::new();
+    let mut invalid = 0;
     for line in contents.lines() {
         let token = line.split('#').next().unwrap_or("").trim();
         if token.is_empty() {
             continue;
         }
-        if let Ok(fp) = rikitikitavi_models::FindingFingerprint::from_str(token) {
-            set.insert(fp);
+        match parse(token) {
+            Some(entry) => {
+                entries.insert(entry);
+            }
+            None => invalid += 1,
         }
     }
-    Ok(set)
+    ListFile { entries, invalid }
+}
+
+/// Read a `--suppress` / `--known-devices` file. Unreadable, or invalid lines with no
+/// valid entry, is an error; other invalid lines are counted on stderr.
+fn load_list<T: Eq + std::hash::Hash>(
+    path: &std::path::Path,
+    what: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<std::collections::HashSet<T>> {
+    use anyhow::Context as _;
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read {what} file {}", path.display()))?;
+    let parsed = parse_list_file(&contents, parse);
+    if parsed.invalid > 0 {
+        if parsed.entries.is_empty() {
+            anyhow::bail!(
+                "{what} file {} has no valid entries ({} unparseable line(s))",
+                path.display(),
+                parsed.invalid
+            );
+        }
+        eprintln!(
+            "Warning: {} unparseable line(s) in {what} file {}",
+            parsed.invalid,
+            path.display()
+        );
+    }
+    Ok(parsed.entries)
+}
+
+fn parse_fingerprint(token: &str) -> Option<rikitikitavi_models::FindingFingerprint> {
+    token.parse().ok()
+}
+
+/// Canonical known-devices token: MAC as `aa:bb:cc:dd:ee:ff`, else IP.
+fn parse_device_identifier(token: &str) -> Option<String> {
+    if let Ok(ip) = token.parse::<std::net::IpAddr>() {
+        return Some(ip.to_string());
+    }
+    token
+        .parse::<rikitikitavi_models::MacAddr>()
+        .ok()
+        .map(|m| m.to_string())
 }
 
 /// Known-devices identifier: MAC if known, otherwise IP.
@@ -397,7 +520,7 @@ fn write_known_devices_file(
         seen.entry(device_identifier(d))
             .or_insert_with(|| device_identity_label(d));
     }
-    let mut file = std::fs::File::create(path)?;
+    let mut file = create_private(path)?;
     writeln!(
         file,
         "# rikitikitavi known devices — absent devices are flagged as new"
@@ -406,21 +529,6 @@ fn write_known_devices_file(
         writeln!(file, "{id}  # {label}")?;
     }
     Ok(seen.len())
-}
-
-/// Load the known-devices set (identifiers; `#` comments and blanks ignored).
-fn load_known_devices(
-    path: &std::path::Path,
-) -> std::io::Result<std::collections::HashSet<String>> {
-    let contents = std::fs::read_to_string(path)?;
-    let mut set = std::collections::HashSet::new();
-    for line in contents.lines() {
-        let token = line.split('#').next().unwrap_or("").trim();
-        if !token.is_empty() {
-            set.insert(token.to_owned());
-        }
-    }
-    Ok(set)
 }
 
 /// Minimum `Severity` that triggers a non-zero exit for `--fail-on`; `None` disables.
@@ -703,7 +811,7 @@ async fn tui_scan(
         config: scan_config,
         discovered_devices: Vec::new(),
     };
-    runner::discover_hosts(&mut ctx).await;
+    runner::discover_hosts(&mut ctx).await?;
     runner::run_scan(&mut ctx).await
 }
 
@@ -768,10 +876,18 @@ async fn cmd_tui(
         .and_then(|h| h.load_latest().ok().flatten());
 
     let perspective = rikitikitavi_core::Perspective::Authenticated;
+    let (intensity, capped) = effective_intensity(false, false, app_config.scan.intensity);
+    if capped {
+        eprintln!(
+            "Note: config intensity 'aggressive' capped at 'active'; login attempts run only via `scan --aggressive`."
+        );
+    }
     let scan_config = rikitikitavi_models::config::ScanConfig {
         perspective,
         modules: None,
         attack_paths: true,
+        intensity,
+        parallelism: app_config.scan.effective_parallelism(),
         ..app_config.scan.clone()
     };
 
@@ -1072,15 +1188,13 @@ async fn cmd_aws(
     args: cli::AwsArgs,
     _app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
-    match args.command {
-        cli::AwsCommand::RegisterSource => println!("Source registration not yet implemented."),
-        cli::AwsCommand::Validate => println!("AWS validation not yet implemented."),
-        cli::AwsCommand::GeneratePolicy => println!("IAM policy generation not yet implemented."),
-        cli::AwsCommand::Upload { path } => {
-            println!("Upload from {} not yet implemented.", path.display());
-        }
-    }
-    Ok(())
+    let what = match args.command {
+        cli::AwsCommand::RegisterSource => "aws register-source".to_owned(),
+        cli::AwsCommand::Validate => "aws validate".to_owned(),
+        cli::AwsCommand::GeneratePolicy => "aws generate-policy".to_owned(),
+        cli::AwsCommand::Upload { path } => format!("aws upload {}", path.display()),
+    };
+    anyhow::bail!("{what}: not yet implemented")
 }
 
 fn cmd_modules(args: cli::ModulesArgs) {
@@ -1117,17 +1231,17 @@ fn cmd_init() {
     println!("Create a config.yaml file manually — see config.example.yaml for reference.");
 }
 
-fn cmd_config(
-    args: &cli::ConfigArgs,
-    app_config: &rikitikitavi_models::config::AppConfig,
-) -> Result<()> {
+fn cmd_config(args: &cli::ConfigArgs, loaded: &config::LoadedConfig) -> Result<()> {
     match args.command {
         cli::ConfigCommand::Validate => {
-            config::validate_config(app_config)?;
-            println!("Configuration is valid.");
+            config::validate_config(&loaded.config)?;
+            match loaded.path.as_ref() {
+                Some(p) => println!("Configuration is valid: {}", p.display()),
+                None => println!("Configuration is valid (no config file found; defaults)."),
+            }
         }
         cli::ConfigCommand::Show => {
-            let yaml = serde_yaml_ng::to_string(&redacted_for_display(app_config))?;
+            let yaml = serde_yaml_ng::to_string(&redacted_for_display(&loaded.config))?;
             println!("{yaml}");
         }
     }
@@ -1468,6 +1582,215 @@ mod tests {
             panic!("expected scan command");
         };
         assert!(unimplemented_scan_flags(&args).is_empty());
+    }
+
+    #[test]
+    fn effective_intensity_caps_config_aggressive() {
+        use crate::effective_intensity;
+        use rikitikitavi_models::config::ScanIntensity;
+
+        assert_eq!(
+            effective_intensity(false, false, ScanIntensity::Aggressive),
+            (ScanIntensity::Active, true)
+        );
+        assert_eq!(
+            effective_intensity(false, true, ScanIntensity::Aggressive),
+            (ScanIntensity::Aggressive, false)
+        );
+        assert_eq!(
+            effective_intensity(false, true, ScanIntensity::Passive),
+            (ScanIntensity::Aggressive, false)
+        );
+        assert_eq!(
+            effective_intensity(true, true, ScanIntensity::Aggressive),
+            (ScanIntensity::Passive, false)
+        );
+        assert_eq!(
+            effective_intensity(false, false, ScanIntensity::Passive),
+            (ScanIntensity::Passive, false)
+        );
+        assert_eq!(
+            effective_intensity(false, false, ScanIntensity::Active),
+            (ScanIntensity::Active, false)
+        );
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rikitikitavi-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn parse_list_file_counts_invalid_tokens() {
+        use crate::{parse_device_identifier, parse_fingerprint, parse_list_file};
+
+        let parsed = parse_list_file(
+            "# header\n01a2b3c4d5e6f708  # t\n\nzzz\n0x0000000000000001\n",
+            parse_fingerprint,
+        );
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.invalid, 1);
+
+        let parsed = parse_list_file(
+            "AA-BB-CC-DD-EE-FF\n192.168.1.5 # printer\nkitchen-tv\n",
+            parse_device_identifier,
+        );
+        assert!(parsed.entries.contains("aa:bb:cc:dd:ee:ff"));
+        assert!(parsed.entries.contains("192.168.1.5"));
+        assert_eq!(parsed.invalid, 1);
+    }
+
+    #[test]
+    fn load_list_fails_closed() {
+        use crate::{load_list, parse_fingerprint};
+
+        let missing = temp_path("missing-baseline");
+        let msg = load_list(&missing, "suppression", parse_fingerprint)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.starts_with("cannot read suppression file "), "{msg}");
+
+        let garbled = temp_path("garbled-baseline");
+        std::fs::write(&garbled, "not-hex\nalso bad\n").unwrap();
+        let msg = load_list(&garbled, "suppression", parse_fingerprint)
+            .unwrap_err()
+            .to_string();
+        std::fs::remove_file(&garbled).ok();
+        assert!(
+            msg.ends_with("has no valid entries (2 unparseable line(s))"),
+            "{msg}"
+        );
+
+        let header_only = temp_path("empty-baseline");
+        std::fs::write(&header_only, "# rikitikitavi suppression baseline\n").unwrap();
+        let set = load_list(&header_only, "suppression", parse_fingerprint).unwrap();
+        std::fs::remove_file(&header_only).ok();
+        assert!(set.is_empty());
+
+        let mixed = temp_path("mixed-baseline");
+        std::fs::write(&mixed, "01a2b3c4d5e6f708\nnot-hex\n").unwrap();
+        let set = load_list(&mixed, "suppression", parse_fingerprint).unwrap();
+        std::fs::remove_file(&mixed).ok();
+        assert_eq!(set.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn written_control_files_are_private() {
+        use crate::{write_baseline_file, write_known_devices_file};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let baseline = temp_path("baseline-mode");
+        write_baseline_file(&baseline, &[]).unwrap();
+        let mode = std::fs::metadata(&baseline).unwrap().permissions().mode();
+        std::fs::remove_file(&baseline).ok();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let known = temp_path("known-mode");
+        write_known_devices_file(&known, &[]).unwrap();
+        let mode = std::fs::metadata(&known).unwrap().permissions().mode();
+        std::fs::remove_file(&known).ok();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewritten_control_file_becomes_private() {
+        use crate::write_baseline_file;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = temp_path("baseline-rewrite-mode");
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_baseline_file(&path, &[]).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!contents.contains("old"));
+    }
+
+    #[test]
+    fn selection_notices_name_skipped_and_added() {
+        use crate::selection_notices;
+        use rikitikitavi_core::Perspective;
+
+        let registry = rikitikitavi_scanners::ScannerRegistry::new();
+        let modules = ["neighbor".to_owned(), "dns".to_owned()];
+        let sel = crate::runner::select_modules(&registry, &modules, Perspective::Unauthenticated)
+            .unwrap();
+        assert_eq!(
+            selection_notices(&sel, Perspective::Unauthenticated),
+            [
+                "Warning: modules skipped (unsupported by unauthenticated perspective): neighbor",
+                "Note: phase-1 modules added: network, ports, device",
+            ]
+        );
+
+        let modules = ["ports".to_owned()];
+        let sel = crate::runner::select_modules(&registry, &modules, Perspective::Unauthenticated)
+            .unwrap();
+        assert!(selection_notices(&sel, Perspective::Unauthenticated).is_empty());
+    }
+
+    #[test]
+    fn exit_code_note_only_for_quiet_without_fail_on() {
+        use crate::{cli::FailOnArg, exit_code_note};
+
+        assert_eq!(
+            exit_code_note(true, FailOnArg::Never),
+            Some("Note: --fail-on not set; exit code does not reflect findings.")
+        );
+        assert_eq!(exit_code_note(true, FailOnArg::High), None);
+        assert_eq!(exit_code_note(false, FailOnArg::Never), None);
+    }
+
+    #[tokio::test]
+    async fn cmd_scan_rejects_unimplemented_flags() {
+        use crate::{Cli, Command, cmd_scan, config::LoadedConfig};
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["rikitikitavi", "scan", "--upload", "--interface", "eth0"]);
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        let loaded = LoadedConfig {
+            config: AppConfig::default(),
+            path: None,
+        };
+        let msg = cmd_scan(args, &loaded).await.unwrap_err().to_string();
+        assert_eq!(msg, "not yet implemented: --interface, --upload");
+    }
+
+    #[tokio::test]
+    async fn cmd_aws_is_unimplemented() {
+        use crate::{Cli, Command, cmd_aws};
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["rikitikitavi", "aws", "validate"]);
+        let Command::Aws(args) = cli.command else {
+            panic!("expected aws command");
+        };
+        let msg = cmd_aws(args, &AppConfig::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(msg, "aws validate: not yet implemented");
+    }
+
+    #[test]
+    fn written_baseline_round_trips_through_loader() {
+        use crate::{load_list, parse_fingerprint, write_baseline_file};
+        use rikitikitavi_core::Severity;
+
+        let f = rikitikitavi_models::Finding::new("ports", "Telnet open", "d", Severity::High);
+        let path = temp_path("baseline-roundtrip");
+        assert_eq!(
+            write_baseline_file(&path, std::slice::from_ref(&f)).unwrap(),
+            1
+        );
+        let set = load_list(&path, "suppression", parse_fingerprint).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(set.contains(&f.fingerprint()));
     }
 
     #[test]

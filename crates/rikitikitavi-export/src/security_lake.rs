@@ -7,7 +7,7 @@ use rikitikitavi_models::ocsf::OcsfFinding;
 /// Write findings as OCSF 1.1 Vulnerability Finding (class 2002) NDJSON.
 pub fn export_ocsf_json(results: &ScanResults, path: &Path) -> Result<()> {
     let ndjson = to_ocsf_ndjson(results)?;
-    std::fs::write(path, ndjson)?;
+    rikitikitavi_core::fs::write_private(path, ndjson.as_bytes())?;
     Ok(())
 }
 
@@ -160,6 +160,17 @@ mod tests {
         for line in content.lines() {
             let _: serde_json::Value = serde_json::from_str(line).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_ocsf_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("findings.ndjson");
+        export_ocsf_json(&make_results(Vec::new()), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     fn arb_severity() -> impl Strategy<Value = Severity> {

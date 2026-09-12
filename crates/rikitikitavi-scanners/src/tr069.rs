@@ -13,6 +13,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 /// TR-069 / CWMP LAN-exposure scanner.
 ///
@@ -86,12 +87,8 @@ impl Tr069Signal {
 /// Returns `None` if no HTTP response could be obtained. All network I/O is
 /// bounded by [`HTTP_TIMEOUT`]; the body is capped by [`BODY_CAP`].
 async fn probe_tr069(ip: IpAddr, port: u16) -> Option<Tr069Response> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(HTTP_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .ok()?;
+    let client =
+        unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::none()).ok()?;
 
     let url = format!("http://{ip}:{port}/");
     let resp = tokio::time::timeout(HTTP_TIMEOUT, client.get(&url).send())

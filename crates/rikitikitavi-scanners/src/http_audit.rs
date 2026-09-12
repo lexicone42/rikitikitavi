@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 /// Upper bound on concurrently audited HTTP endpoints.
 const MAX_AUDIT_CONCURRENCY: usize = 8;
@@ -1272,12 +1273,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         "http"
     };
 
-    // TLS validation disabled: unauthenticated probe, no credentials sent.
-    let Ok(client) = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(HTTP_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
+    let Ok(client) =
+        unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::limited(3))
     else {
         return findings;
     };

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::config::PortRange;
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::config::{ExclusionSet, PortRange};
+use rikitikitavi_models::{Finding, MacAddr, ScanContext};
+use rikitikitavi_network::ArpEntry;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -396,6 +397,25 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
     }
 }
 
+/// ARP entries inside the target network, minus excluded IPs and MACs.
+fn select_targets(
+    entries: &[ArpEntry],
+    in_scope: impl Fn(IpAddr) -> bool,
+    exclusions: &ExclusionSet,
+) -> Vec<IpAddr> {
+    entries
+        .iter()
+        .filter(|e| in_scope(e.ip))
+        .filter(|e| !exclusions.excludes_ip(e.ip))
+        .filter(|e| {
+            !e.mac
+                .parse::<MacAddr>()
+                .is_ok_and(|m| exclusions.excludes_mac(m))
+        })
+        .map(|e| e.ip)
+        .collect()
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Scanner for PortScanner {
@@ -425,15 +445,17 @@ impl Scanner for PortScanner {
                 message: format!("failed to read ARP cache: {e}"),
             })?;
 
-        let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
-            || arp_entries.iter().map(|e| e.ip).collect(),
-            |network| {
-                arp_entries
-                    .iter()
-                    .filter(|e| network.contains(e.ip))
-                    .map(|e| e.ip)
-                    .collect()
-            },
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "ports".to_owned(),
+                message: e.to_string(),
+            })?;
+        let targets = select_targets(
+            &arp_entries,
+            |ip| ctx.target_network.as_ref().is_none_or(|n| n.contains(ip)),
+            &exclusions,
         );
 
         if targets.is_empty() {
@@ -807,5 +829,28 @@ mod tests {
             assert_eq!(finding.affected_ip, Some(ip));
             assert_eq!(finding.affected_port, Some(port));
         }
+    }
+    #[test]
+    fn select_targets_drops_excluded_ip_cidr_and_mac() {
+        let entry = |ip: &str, mac: &str| ArpEntry {
+            ip: ip.parse().unwrap(),
+            mac: mac.to_owned(),
+            interface: "eth0".to_owned(),
+        };
+        let entries = [
+            entry("192.168.1.10", "aa:aa:aa:aa:aa:aa"),
+            entry("192.168.1.40", "bb:bb:bb:bb:bb:bb"),
+            entry("192.168.1.41", "cc:cc:cc:cc:cc:cc"),
+            entry("10.0.0.2", "dd:dd:dd:dd:dd:dd"),
+            entry("172.16.0.5", "ee:ee:ee:ee:ee:ee"),
+        ];
+        let exclusions = ExclusionSet::parse(
+            &["10.0.0.0/30".to_owned()],
+            &["192.168.1.40".to_owned(), "CC:CC:CC:CC:CC:CC".to_owned()],
+        )
+        .unwrap();
+        let in_scope = |ip: IpAddr| !matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 172);
+        let targets = select_targets(&entries, in_scope, &exclusions);
+        assert_eq!(targets, vec!["192.168.1.10".parse::<IpAddr>().unwrap()]);
     }
 }

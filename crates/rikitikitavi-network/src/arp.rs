@@ -135,11 +135,20 @@ fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> {
 
             Some(ArpEntry {
                 ip,
-                mac: mac.to_owned(),
+                mac: pad_mac_octets(mac),
                 interface: interface.to_owned(),
             })
         })
         .collect()
+}
+
+/// BSD `arp -a` prints octets unpadded (`0:1c:42:0:0:8`).
+#[cfg(any(target_os = "macos", test))]
+fn pad_mac_octets(raw: &str) -> String {
+    raw.split(':')
+        .map(|o| format!("{o:0>2}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 #[cfg(test)]
@@ -294,5 +303,13 @@ myhost.local (10.0.0.50) at de:ad:be:ef:00:02 on en1 [ethernet]
                 assert!(!entry.interface.is_empty());
             }
         }
+    }
+    #[test]
+    fn macos_arp_pads_unpadded_octets() {
+        let out = "? (192.168.1.5) at 0:1c:42:0:0:8 on en0 ifscope [ethernet]\n";
+        let entries = parse_macos_arp(out);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mac, "00:1c:42:00:00:08");
+        assert_eq!(pad_mac_octets("aa:bb:cc:dd:ee:ff"), "aa:bb:cc:dd:ee:ff");
     }
 }

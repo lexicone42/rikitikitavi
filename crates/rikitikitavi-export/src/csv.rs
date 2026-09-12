@@ -60,7 +60,7 @@ pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
         out.push('\n');
     }
 
-    std::fs::write(path, out)?;
+    rikitikitavi_core::fs::write_private(path, out.as_bytes())?;
     Ok(())
 }
 
@@ -231,6 +231,17 @@ mod tests {
         assert!(content.contains("Fix this vulnerability"));
         assert!(content.contains("5 minutes"));
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_csv_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.csv");
+        export_csv(&make_results(Vec::new()), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     // ─── Property-based tests ─────────────────────────────────────────

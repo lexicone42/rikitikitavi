@@ -1,7 +1,7 @@
-use crate::DeviceHint;
+use crate::{DeviceHint, MacAddr};
 use chrono::{DateTime, Utc};
 use rikitikitavi_core::{Confidence, Severity};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use uuid::Uuid;
@@ -65,6 +65,72 @@ impl Hasher for Fnv1a64 {
     }
 }
 
+/// Byte cap on stored evidence.
+const EVIDENCE_MAX_BYTES: usize = 256;
+
+/// Removes C0/C1 controls except `\n`/`\t`, CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ST`) and ST (`ESC \`).
+fn strip_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // Parameter/intermediate bytes, then one final byte.
+                    while chars.next_if(|ch| ('\x20'..='\x3f').contains(ch)).is_some() {}
+                    chars.next_if(|ch| ('\x40'..='\x7e').contains(ch));
+                }
+                Some(']') => {
+                    chars.next();
+                    // Body ends at BEL or at the ESC of an ST; that ESC is left for the outer loop.
+                    while chars.next_if(|ch| !matches!(ch, '\x07' | '\x1b')).is_some() {}
+                    chars.next_if_eq(&'\x07');
+                }
+                Some('\\') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Longest prefix of `s` of at most `max` bytes that ends on a char boundary.
+fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    // `floor_char_boundary` is above MSRV.
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Argument to [`Finding::with_mac`]: a [`MacAddr`], or text in any form [`MacAddr::from_str`] accepts.
+pub trait IntoMacAddr {
+    /// `None` when text does not parse.
+    fn into_mac_addr(self) -> Option<MacAddr>;
+}
+
+impl IntoMacAddr for MacAddr {
+    fn into_mac_addr(self) -> Option<MacAddr> {
+        Some(self)
+    }
+}
+
+impl<S: AsRef<str>> IntoMacAddr for S {
+    fn into_mac_addr(self) -> Option<MacAddr> {
+        self.as_ref().parse().ok()
+    }
+}
+
 /// A security finding produced by a scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
@@ -84,7 +150,8 @@ pub struct Finding {
     /// Affected device IP (if applicable).
     pub affected_ip: Option<IpAddr>,
     /// Affected device MAC (if applicable).
-    pub affected_mac: Option<String>,
+    #[serde(default, deserialize_with = "lenient_mac")]
+    pub affected_mac: Option<MacAddr>,
     /// Affected device hostname.
     pub affected_hostname: Option<String>,
     /// Affected port (if applicable).
@@ -113,6 +180,11 @@ pub struct Finding {
     pub device_hint: Option<DeviceHint>,
     /// When the finding was discovered.
     pub discovered_at: DateTime<Utc>,
+}
+
+/// Unparseable stored MACs (e.g. unpadded BSD output from older binaries) become `None`.
+fn lenient_mac<'de, D: Deserializer<'de>>(d: D) -> Result<Option<MacAddr>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.and_then(|s| s.parse().ok()))
 }
 
 impl Finding {
@@ -156,10 +228,10 @@ impl Finding {
         self
     }
 
-    /// Builder-style setter for affected MAC address.
+    /// Builder-style setter for affected MAC address; unparseable text is dropped.
     #[must_use]
-    pub fn with_mac(mut self, mac: impl Into<String>) -> Self {
-        self.affected_mac = Some(mac.into());
+    pub fn with_mac(mut self, mac: impl IntoMacAddr) -> Self {
+        self.affected_mac = mac.into_mac_addr();
         self
     }
 
@@ -251,20 +323,12 @@ impl Finding {
         FindingFingerprint(hasher.finish())
     }
 
-    /// Builder-style setter for `PoC` evidence (truncated to 256 chars at a char boundary).
+    /// Builder-style setter for `PoC` evidence: control characters and ANSI escapes are
+    /// stripped, then the text is truncated to 256 bytes at a char boundary.
     #[must_use]
     pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
-        let s = evidence.into();
-        if s.len() <= 256 {
-            self.evidence = Some(s);
-        } else {
-            // Last char boundary at or before byte 256 (`floor_char_boundary` is above MSRV).
-            let mut end = 256;
-            while end > 0 && !s.is_char_boundary(end) {
-                end -= 1;
-            }
-            self.evidence = Some(s[..end].to_owned());
-        }
+        let clean = strip_controls(&evidence.into());
+        self.evidence = Some(truncate_at_char_boundary(&clean, EVIDENCE_MAX_BYTES).to_owned());
         self
     }
 
@@ -352,6 +416,92 @@ mod tests {
         assert_eq!(parsed.confidence, Confidence::Probable);
     }
 
+    #[test]
+    fn affected_mac_serializes_as_canonical_string() {
+        let mac: MacAddr = "AA:BB:CC:DD:EE:FF".parse().unwrap();
+        let f = Finding::new("s", "t", "d", Severity::Low).with_mac(mac);
+        assert_eq!(f.affected_mac, Some(mac));
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["affected_mac"], "aa:bb:cc:dd:ee:ff");
+        let back: Finding = serde_json::from_value(json).unwrap();
+        assert_eq!(back.affected_mac, Some(mac));
+
+        let none = serde_json::to_value(Finding::new("s", "t", "d", Severity::Low)).unwrap();
+        assert_eq!(none["affected_mac"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn with_mac_accepts_text_forms_and_drops_invalid() {
+        let want = MacAddr::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        let f = Finding::new("s", "t", "d", Severity::Low);
+        assert_eq!(
+            f.clone().with_mac("AA-BB-CC-DD-EE-FF").affected_mac,
+            Some(want)
+        );
+        let dotted = "aabb.ccdd.eeff".to_owned();
+        assert_eq!(f.clone().with_mac(&dotted).affected_mac, Some(want));
+        assert_eq!(f.clone().with_mac(dotted).affected_mac, Some(want));
+        assert_eq!(f.with_mac("not a mac").affected_mac, None);
+    }
+
+    #[test]
+    fn affected_mac_deserializes_from_legacy_string() {
+        let legacy = r#"{"id":"00000000-0000-0000-0000-000000000000","scanner":"s","title":"t","description":"d","severity":"low","affected_ip":null,"affected_mac":"aa:bb:cc:dd:ee:ff","affected_hostname":null,"affected_port":null,"affected_service":null,"remediation":null,"cwe_id":null,"cve_ids":[],"references":[],"discovered_at":"2026-07-02T00:00:00Z"}"#;
+        let parsed: Finding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.affected_mac,
+            Some(MacAddr::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]))
+        );
+    }
+
+    #[test]
+    fn evidence_plain_text_unchanged() {
+        let s = "SSH-2.0-OpenSSH_9.6\n\tbanner é ✓";
+        let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s);
+        assert_eq!(f.evidence.as_deref(), Some(s));
+    }
+
+    #[test]
+    fn evidence_strips_ansi_sequences() {
+        let cases = [
+            ("\x1b[31mred\x1b[0m", "red"),
+            ("\x1b[1;38;5;196mx", "x"),
+            ("\x1b[?25lx", "x"),
+            ("\x1b]0;title\x07x", "x"),
+            ("\x1b]8;;http://evil\x1b\\link\x1b]8;;\x1b\\", "link"),
+            ("a\x1bb", "ab"),
+            ("\x1b[31é", "é"),
+            ("\x1b]unterminated", ""),
+            ("\x1b]osc\x1b[32mgreen", "green"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(strip_controls(input), want, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn evidence_strips_control_characters() {
+        assert_eq!(
+            strip_controls("a\x00b\x07c\r\nd\u{7f}e\u{85}f\tg\u{9b}31mh"),
+            "abc\ndef\tg31mh"
+        );
+    }
+
+    #[test]
+    fn evidence_truncates_after_sanitising() {
+        let s = format!("\x1b[31m{}", "x".repeat(300));
+        let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s);
+        assert_eq!(f.evidence.unwrap(), "x".repeat(256));
+    }
+
+    #[test]
+    fn truncate_keeps_char_boundary() {
+        assert_eq!(truncate_at_char_boundary("héllo", 2), "h");
+        assert_eq!(truncate_at_char_boundary("héllo", 3), "hé");
+        assert_eq!(truncate_at_char_boundary("héllo", 6), "héllo");
+        assert_eq!(truncate_at_char_boundary("é", 1), "");
+    }
+
     fn arb_severity() -> impl Strategy<Value = Severity> {
         prop_oneof![
             Just(Severity::Info),
@@ -377,6 +527,26 @@ mod tests {
         ]
     }
 
+    fn arb_mac() -> impl Strategy<Value = MacAddr> {
+        any::<[u8; 6]>().prop_map(MacAddr::new)
+    }
+
+    /// Plain text, `\n`, CSI/OSC sequences, bare controls and truncated escapes, concatenated.
+    fn arb_evidence_text() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            4 => "\\PC{1,8}",
+            1 => Just("\n".to_owned()),
+            1 => "[0-9;?]{0,6}[@-~]".prop_map(|s| format!("\x1b[{s}")),
+            1 => ("[^\\x07\\x1b]{0,12}", any::<bool>()).prop_map(|(body, bel)| {
+                let end = if bel { "\x07" } else { "\x1b\\" };
+                format!("\x1b]{body}{end}")
+            }),
+            1 => "[\\x00-\\x1f\\x7f-\\x9f]",
+            1 => "\\x1b(\\[[0-9;]{0,3})?",
+        ];
+        proptest::collection::vec(piece, 0..40).prop_map(|v| v.concat())
+    }
+
     fn edited(f: &Finding, edit: impl FnOnce(&mut Finding)) -> Finding {
         let mut g = f.clone();
         edit(&mut g);
@@ -398,23 +568,29 @@ mod tests {
             proptest::option::of(0_u16..=u16::MAX),
             proptest::option::of("[A-Z]{3,4}-[0-9]{1,5}"),
             proptest::option::of("[a-zA-Z0-9 ._:-]{1,100}"),
+            proptest::option::of(arb_mac()),
         )
-            .prop_map(|(scanner, title, desc, sev, ip, port, cwe, evidence)| {
-                let mut f = Finding::new(&scanner, &title, &desc, sev);
-                if let Some(ip) = ip {
-                    f = f.with_ip(ip);
-                }
-                if let Some(port) = port {
-                    f = f.with_port(port);
-                }
-                if let Some(cwe) = cwe {
-                    f = f.with_cwe(cwe);
-                }
-                if let Some(evidence) = evidence {
-                    f = f.with_evidence(evidence);
-                }
-                f
-            })
+            .prop_map(
+                |(scanner, title, desc, sev, ip, port, cwe, evidence, mac)| {
+                    let mut f = Finding::new(&scanner, &title, &desc, sev);
+                    if let Some(ip) = ip {
+                        f = f.with_ip(ip);
+                    }
+                    if let Some(mac) = mac {
+                        f = f.with_mac(mac);
+                    }
+                    if let Some(port) = port {
+                        f = f.with_port(port);
+                    }
+                    if let Some(cwe) = cwe {
+                        f = f.with_cwe(cwe);
+                    }
+                    if let Some(evidence) = evidence {
+                        f = f.with_evidence(evidence);
+                    }
+                    f
+                },
+            )
     }
 
     #[test]
@@ -557,7 +733,7 @@ mod tests {
             conf in arb_confidence(),
             evidence in proptest::option::of("[a-zA-Z0-9 ._:-]{0,100}"),
             service in proptest::option::of("[a-z]{0,10}"),
-            mac in proptest::option::of("[0-9a-f:]{0,17}"),
+            mac in proptest::option::of(arb_mac()),
             host in proptest::option::of("[a-z0-9.-]{0,30}"),
             cwe in proptest::option::of("CWE-[0-9]{1,4}"),
         ) {
@@ -599,6 +775,36 @@ mod tests {
             }
         }
 
+        /// Stored evidence never contains ESC or controls other than `\n`/`\t`, fits in 256 bytes,
+        /// and is the char-boundary prefix of the sanitised text.
+        #[test]
+        fn prop_with_evidence_is_sanitised_and_bounded(s in arb_evidence_text()) {
+            let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s.clone());
+            let e = f.evidence.unwrap();
+            prop_assert!(e.len() <= 256);
+            prop_assert!(!e.contains('\x1b'));
+            prop_assert!(e.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+            let full = strip_controls(&s);
+            prop_assert!(full.starts_with(&e));
+            prop_assert!(e.len() >= full.len().min(253));
+        }
+
+        /// `strip_controls` only removes chars: the output is a subsequence of the input.
+        #[test]
+        fn prop_strip_controls_is_subsequence(s in arb_evidence_text()) {
+            let out = strip_controls(&s);
+            let mut input = s.chars();
+            prop_assert!(out.chars().all(|c| input.any(|i| i == c)));
+        }
+
+        /// Text without ESC or controls (other than `\n`/`\t`) is unchanged.
+        #[test]
+        fn prop_plain_evidence_unchanged(s in "(\\PC|[\\n\\t]){0,60}") {
+            prop_assert_eq!(&strip_controls(&s), &s);
+            let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s.clone());
+            prop_assert_eq!(f.evidence.unwrap(), s);
+        }
+
         /// `with_evidence` stores a prefix of the input, at most 256 bytes, cut at a char boundary (so >= 253 when truncated).
         #[test]
         fn prop_with_evidence_truncates_at_char_boundary(s in "\\PC{0,300}") {
@@ -638,5 +844,17 @@ mod hasher_tests {
             .with_ip("192.168.1.1".parse().unwrap())
             .with_port(23);
         assert_eq!(f.fingerprint(), f.fingerprint());
+    }
+    #[test]
+    fn affected_mac_unparseable_string_becomes_none() {
+        let base = r#"{"id":"00000000-0000-0000-0000-000000000000","scanner":"s","title":"t","description":"d","severity":"low","affected_ip":null,"affected_mac":MAC,"affected_hostname":null,"affected_port":null,"affected_service":null,"remediation":null,"cwe_id":null,"cve_ids":[],"references":[],"discovered_at":"2026-07-02T00:00:00Z"}"#;
+        let f: Finding = serde_json::from_str(&base.replace("MAC", "\"0:1c:42:0:0:8\"")).unwrap();
+        assert_eq!(f.affected_mac, None);
+        let f: Finding =
+            serde_json::from_str(&base.replace("MAC", "\"AA:BB:CC:DD:EE:FF\"")).unwrap();
+        assert_eq!(
+            f.affected_mac.map(|m| m.to_string()).as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
     }
 }

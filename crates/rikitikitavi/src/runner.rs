@@ -4,11 +4,30 @@ use futures::future::join_all;
 use rikitikitavi_analysis::{
     calculate_risk_score, generate_attack_paths, generate_priority_actions,
 };
+use rikitikitavi_core::Perspective;
+use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
-use rikitikitavi_models::{Device, DeviceHint, DeviceType, Finding, ScanContext, ScanResults};
-use rikitikitavi_scanners::ScannerRegistry;
+use rikitikitavi_models::{
+    Device, DeviceHint, DeviceType, Finding, MacAddr, ScanContext, ScanResults,
+};
+use rikitikitavi_scanners::{Scanner, ScannerRegistry};
+use std::collections::HashSet;
+use std::future::Future;
 use std::net::IpAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Scanners that run first and populate `discovered_devices`.
+pub const PHASE1_IDS: [&str; 3] = ["network", "ports", "device"];
+
+/// Phase-2 scanners that read the raw ARP cache when `discovered_devices` is empty.
+const ARP_FALLBACK_IDS: [&str; 6] = [
+    "credentials",
+    "services",
+    "smb",
+    "snmp",
+    "database",
+    "mgmt_plane",
+];
 
 /// Detect gateway and target network into `ctx`; return devices from the ARP cache.
 pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
@@ -70,9 +89,10 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
     devices
 }
 
-/// TCP-connect sweep of the target network; merges new hosts into `ctx.discovered_devices`.
-/// Skipped at Passive intensity or without a target network. Returns the number of hosts added.
-pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
+/// TCP-connect sweep of the target network; merges new, non-excluded hosts into
+/// `ctx.discovered_devices`. Skipped at Passive intensity or without a target network.
+/// Returns the number of hosts added.
+pub async fn active_host_discovery(ctx: &mut ScanContext, exclusions: &ExclusionSet) -> usize {
     use rikitikitavi_models::config::ScanIntensity;
 
     if !ctx.config.intensity.at_least(ScanIntensity::Active) {
@@ -82,11 +102,13 @@ pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
         return 0;
     };
 
-    let found =
-        rikitikitavi_network::tcp_sweep(&network, std::time::Duration::from_millis(400), 256).await;
+    let found = rikitikitavi_network::tcp_sweep(&network, Duration::from_millis(400), 256).await;
 
     let mut added = 0;
     for ip in found {
+        if exclusions.excludes_ip(ip) {
+            continue;
+        }
         if !ctx.discovered_devices.iter().any(|d| d.ip == ip) {
             let mut dev = Device::new(ip);
             if ctx.gateway == Some(ip) {
@@ -101,18 +123,72 @@ pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
     added
 }
 
-/// ARP-cache discovery followed by the active TCP sweep; fills `ctx.discovered_devices`.
-/// Returns the number of hosts added by the sweep.
-pub async fn discover_hosts(ctx: &mut ScanContext) -> usize {
-    ctx.discovered_devices = discover_network(ctx);
-    active_host_discovery(ctx).await
+/// Remove devices matched by `scan.excluded_networks` / `scan.excluded_devices`.
+/// Returns the number removed.
+pub fn apply_exclusions(devices: &mut Vec<Device>, exclusions: &ExclusionSet) -> usize {
+    if exclusions.is_empty() {
+        return 0;
+    }
+    let before = devices.len();
+    devices.retain(|d| !exclusions.excludes_device(d));
+    let removed = before - devices.len();
+    if removed > 0 {
+        tracing::info!(removed, "excluded devices dropped from discovery");
+    }
+    removed
 }
 
-/// Resolve `--modules` ids against `registry`; empty or unknown ids are an error listing valid ids.
-fn select_modules<'a>(
+/// ARP-cache discovery followed by the active TCP sweep; fills `ctx.discovered_devices`
+/// with exclusions applied. Returns the number of hosts added by the sweep.
+pub async fn discover_hosts(ctx: &mut ScanContext) -> Result<usize> {
+    let exclusions = ctx.config.exclusions()?;
+    ctx.discovered_devices = discover_network(ctx);
+    apply_exclusions(&mut ctx.discovered_devices, &exclusions);
+    Ok(active_host_discovery(ctx, &exclusions).await)
+}
+
+/// ARP-cache IPs whose MAC is excluded.
+fn arp_ips_of_excluded_macs(exclusions: &ExclusionSet) -> HashSet<IpAddr> {
+    rikitikitavi_network::read_arp_cache()
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| {
+            e.mac
+                .parse::<MacAddr>()
+                .is_ok_and(|m| exclusions.excludes_mac(m))
+        })
+        .map(|e| e.ip)
+        .collect()
+}
+
+/// `true` when the finding's IP is excluded directly or via `excluded_mac_ips`; `arp` findings are exempt.
+fn is_excluded_finding(
+    finding: &Finding,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> bool {
+    finding.scanner != "arp"
+        && finding
+            .affected_ip
+            .is_some_and(|ip| exclusions.excludes_ip(ip) || excluded_mac_ips.contains(&ip))
+}
+
+/// Scanners resolved for a run.
+pub struct ModuleSelection<'a> {
+    pub scanners: Vec<&'a dyn Scanner>,
+    /// Requested ids that do not support the perspective.
+    pub skipped: Vec<&'static str>,
+    /// Phase-1 ids added because a phase-2 module was requested.
+    pub added: Vec<&'static str>,
+}
+
+/// Resolve `--modules` ids: dedupe, reject unknown, drop ids unsupported by `perspective`,
+/// and prepend missing phase-1 scanners when any phase-2 scanner is requested.
+pub fn select_modules<'a>(
     registry: &'a ScannerRegistry,
     modules: &[String],
-) -> Result<Vec<&'a dyn rikitikitavi_scanners::Scanner>> {
+    perspective: Perspective,
+) -> Result<ModuleSelection<'a>> {
     let valid = || {
         registry
             .all()
@@ -121,7 +197,12 @@ fn select_modules<'a>(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let ids: Vec<&str> = modules.iter().map(|m| m.trim()).collect();
+    let mut ids: Vec<&str> = Vec::new();
+    for id in modules.iter().map(|m| m.trim()).filter(|m| !m.is_empty()) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
     if ids.is_empty() {
         anyhow::bail!("no scanner modules selected; valid modules: {}", valid());
     }
@@ -137,7 +218,158 @@ fn select_modules<'a>(
             valid()
         );
     }
-    Ok(ids.iter().filter_map(|id| registry.get(id)).collect())
+
+    let supports = |s: &dyn Scanner| s.supported_perspectives().contains(&perspective);
+    let mut scanners: Vec<&dyn Scanner> = Vec::new();
+    let mut skipped = Vec::new();
+    for scanner in ids.iter().filter_map(|id| registry.get(id)) {
+        if supports(scanner) {
+            scanners.push(scanner);
+        } else {
+            skipped.push(scanner.id());
+        }
+    }
+    if scanners.is_empty() {
+        anyhow::bail!(
+            "none of the selected modules support the {perspective} perspective: {}",
+            skipped.join(", ")
+        );
+    }
+
+    let mut added = Vec::new();
+    let (phase1, phase2): (Vec<_>, Vec<_>) = scanners
+        .into_iter()
+        .partition(|s| PHASE1_IDS.contains(&s.id()));
+    let scanners = if phase2.is_empty() {
+        phase1
+    } else {
+        let mut ordered: Vec<&dyn Scanner> = Vec::new();
+        for id in PHASE1_IDS {
+            if let Some(s) = phase1.iter().find(|s| s.id() == id) {
+                ordered.push(*s);
+            } else if let Some(s) = registry.get(id)
+                && supports(s)
+            {
+                added.push(id);
+                ordered.push(s);
+            }
+        }
+        ordered.extend(phase2);
+        ordered
+    };
+    Ok(ModuleSelection {
+        scanners,
+        skipped,
+        added,
+    })
+}
+
+/// Scanners for this run: the `--modules` selection, else all for the perspective.
+pub fn plan_scanners<'a>(
+    registry: &'a ScannerRegistry,
+    ctx: &ScanContext,
+) -> Result<ModuleSelection<'a>> {
+    ctx.config.modules.as_ref().map_or_else(
+        || {
+            Ok(ModuleSelection {
+                scanners: registry.for_perspective(ctx.perspective),
+                skipped: Vec::new(),
+                added: Vec::new(),
+            })
+        },
+        |modules| select_modules(registry, modules, ctx.perspective),
+    )
+}
+
+/// Info-level record of skipped and auto-added ids; `cmd_scan` prints the user-facing notices.
+fn log_selection(selection: &ModuleSelection<'_>, perspective: Perspective) {
+    if !selection.skipped.is_empty() {
+        tracing::info!(
+            %perspective,
+            skipped = selection.skipped.join(", "),
+            "modules skipped: not supported by this perspective"
+        );
+    }
+    if !selection.added.is_empty() {
+        tracing::info!(
+            added = selection.added.join(", "),
+            "phase-1 modules added so the requested modules have devices and ports"
+        );
+    }
+}
+
+/// Phase-2 scanners to run. Dropped: none of `relevant_ports()` discovered; non-essential
+/// at Passive; `ARP_FALLBACK_IDS` when exclusions left `discovered_devices` empty; `router`
+/// when the gateway is excluded.
+fn filter_phase2<'a>(
+    phase2: Vec<&'a dyn Scanner>,
+    ctx: &ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> Vec<&'a dyn Scanner> {
+    let discovered_ports: HashSet<u16> = ctx
+        .discovered_devices
+        .iter()
+        .flat_map(|d| d.open_ports.iter().map(|p| p.port))
+        .collect();
+
+    // Scanners that run at Passive intensity even without matching open ports.
+    let passive_essential: &[&str] = &[
+        "credentials",
+        "router",
+        "wifi",
+        "dns",
+        "arp",
+        "dhcp",
+        "exposure",
+    ];
+
+    let all_excluded = !exclusions.is_empty() && ctx.discovered_devices.is_empty();
+    let gateway_excluded = ctx
+        .gateway
+        .is_some_and(|gw| exclusions.excludes_ip(gw) || excluded_mac_ips.contains(&gw));
+
+    phase2
+        .into_iter()
+        .filter(|scanner| {
+            let id = scanner.id();
+            if all_excluded && ARP_FALLBACK_IDS.contains(&id) {
+                tracing::warn!(scanner = id, "skipping: no non-excluded devices discovered");
+                return false;
+            }
+            if gateway_excluded && id == "router" {
+                tracing::warn!(scanner = id, "skipping — gateway is excluded");
+                return false;
+            }
+            let ports = scanner.relevant_ports();
+            if !ports.is_empty() && !ports.iter().any(|p| discovered_ports.contains(p)) {
+                tracing::debug!(scanner = id, "skipping — no relevant ports discovered");
+                return false;
+            }
+            if ctx.config.intensity == rikitikitavi_models::config::ScanIntensity::Passive
+                && !passive_essential.contains(&id)
+                && ports.is_empty()
+            {
+                tracing::debug!(scanner = id, "skipping — non-essential in quick scan");
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// Bound `fut` to `limit`; `None` = unbounded.
+async fn bounded<T>(limit: Option<Duration>, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    let Some(limit) = limit else {
+        return fut.await;
+    };
+    match tokio::time::timeout(limit, fut).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "scan exceeded scan.timeout_seconds ({}s); raise it or set 0 to disable",
+            limit.as_secs()
+        ),
+    }
 }
 
 /// Run one scanner under a timeout of 4x its estimated duration, clamped to 60-600 s.
@@ -167,20 +399,33 @@ async fn run_scanner_bounded(
 
 /// Run all applicable scanners in two phases: `network`, `ports`, `device` run first
 /// and populate `discovered_devices`; the remaining scanners then run concurrently.
-#[allow(clippy::too_many_lines)]
+/// Bounded by `scan.timeout_seconds` (0 = unbounded).
 pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
+    let secs = ctx.config.timeout_seconds;
+    let limit = (secs > 0).then(|| Duration::from_secs(secs));
+    bounded(limit, run_scan_inner(ctx)).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     let start = Instant::now();
     let registry = ScannerRegistry::new();
 
-    let scanners = match ctx.config.modules.as_ref() {
-        Some(modules) => select_modules(&registry, modules)?,
-        None => registry.for_perspective(ctx.perspective),
+    let exclusions = ctx.config.exclusions()?;
+    apply_exclusions(&mut ctx.discovered_devices, &exclusions);
+    let excluded_mac_ips = if exclusions.is_empty() {
+        HashSet::new()
+    } else {
+        arp_ips_of_excluded_macs(&exclusions)
     };
 
-    let phase1_ids: &[&str] = &["network", "ports", "device"];
-    let (phase1, phase2): (Vec<_>, Vec<_>) = scanners
+    let selection = plan_scanners(&registry, ctx)?;
+    log_selection(&selection, ctx.perspective);
+
+    let (phase1, phase2): (Vec<_>, Vec<_>) = selection
+        .scanners
         .into_iter()
-        .partition(|s| phase1_ids.contains(&s.id()));
+        .partition(|s| PHASE1_IDS.contains(&s.id()));
 
     let phase2_count = phase2.len();
     tracing::info!(
@@ -227,47 +472,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     );
 
     // Phase 2: deep analysis, concurrent
-    let discovered_ports: std::collections::HashSet<u16> = ctx
-        .discovered_devices
-        .iter()
-        .flat_map(|d| d.open_ports.iter().map(|p| p.port))
-        .collect();
-
-    // Scanners that run at Passive intensity even without matching open ports.
-    let passive_essential: &[&str] = &[
-        "credentials",
-        "router",
-        "wifi",
-        "dns",
-        "arp",
-        "dhcp",
-        "exposure",
-    ];
-
-    let phase2_filtered: Vec<_> = phase2
-        .into_iter()
-        .filter(|scanner| {
-            let ports = scanner.relevant_ports();
-            if !ports.is_empty() && !ports.iter().any(|p| discovered_ports.contains(p)) {
-                tracing::debug!(
-                    scanner = scanner.id(),
-                    "skipping — no relevant ports discovered"
-                );
-                return false;
-            }
-            if ctx.config.intensity == rikitikitavi_models::config::ScanIntensity::Passive
-                && !passive_essential.contains(&scanner.id())
-                && ports.is_empty()
-            {
-                tracing::debug!(
-                    scanner = scanner.id(),
-                    "skipping — non-essential in quick scan"
-                );
-                return false;
-            }
-            true
-        })
-        .collect();
+    let phase2_filtered = filter_phase2(phase2, ctx, &exclusions, &excluded_mac_ips);
 
     let phase2_skipped = phase2_count - phase2_filtered.len();
     tracing::info!(
@@ -303,6 +508,15 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
                 );
             }
         }
+    }
+
+    if !exclusions.is_empty() {
+        let before = all_findings.len();
+        all_findings.retain(|f| !is_excluded_finding(f, &exclusions, &excluded_mac_ips));
+        tracing::info!(
+            removed = before - all_findings.len(),
+            "dropped findings on excluded hosts"
+        );
     }
 
     post_enrich_devices(&mut ctx.discovered_devices, &all_findings);
@@ -758,10 +972,22 @@ mod tests {
             .with_service("SVC")
     }
 
+    fn owned(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn ids(selection: &ModuleSelection<'_>) -> Vec<&'static str> {
+        selection.scanners.iter().map(|s| s.id()).collect()
+    }
+
     #[test]
     fn select_modules_rejects_unknown_ids() {
         let registry = ScannerRegistry::new();
-        let Err(err) = select_modules(&registry, &["ports".to_owned(), "nope".to_owned()]) else {
+        let Err(err) = select_modules(
+            &registry,
+            &owned(&["ports", "nope"]),
+            Perspective::Unauthenticated,
+        ) else {
             panic!("unknown id must error");
         };
         let msg = err.to_string();
@@ -774,15 +1000,227 @@ mod tests {
 
     #[test]
     fn select_modules_rejects_empty_selection() {
-        assert!(select_modules(&ScannerRegistry::new(), &[]).is_err());
+        let registry = ScannerRegistry::new();
+        assert!(select_modules(&registry, &[], Perspective::Unauthenticated).is_err());
+        assert!(
+            select_modules(&registry, &owned(&["", " "]), Perspective::Unauthenticated).is_err()
+        );
     }
 
     #[test]
-    fn select_modules_resolves_known_ids_in_order() {
+    fn select_modules_adds_phase1_for_phase2_request() {
         let registry = ScannerRegistry::new();
-        let scanners = select_modules(&registry, &["dns".to_owned(), " ports".to_owned()]).unwrap();
-        let ids: Vec<&str> = scanners.iter().map(|s| s.id()).collect();
-        assert_eq!(ids, ["dns", "ports"]);
+        let sel = select_modules(
+            &registry,
+            &owned(&["dns", " ports"]),
+            Perspective::Unauthenticated,
+        )
+        .unwrap();
+        assert_eq!(ids(&sel), ["network", "ports", "device", "dns"]);
+        assert_eq!(sel.added, ["network", "device"]);
+        assert!(sel.skipped.is_empty());
+    }
+
+    #[test]
+    fn select_modules_phase1_only_keeps_requested_order() {
+        let registry = ScannerRegistry::new();
+        let sel = select_modules(
+            &registry,
+            &owned(&["device", "ports", "device"]),
+            Perspective::Unauthenticated,
+        )
+        .unwrap();
+        assert_eq!(ids(&sel), ["device", "ports"]);
+        assert!(sel.added.is_empty());
+    }
+
+    #[test]
+    fn select_modules_dedupes_repeated_ids() {
+        let registry = ScannerRegistry::new();
+        let sel = select_modules(
+            &registry,
+            &owned(&["dns", "dns", "ports", "dns"]),
+            Perspective::Unauthenticated,
+        )
+        .unwrap();
+        assert_eq!(ids(&sel), ["network", "ports", "device", "dns"]);
+    }
+
+    #[test]
+    fn select_modules_skips_unsupported_perspective() {
+        let registry = ScannerRegistry::new();
+        let sel = select_modules(
+            &registry,
+            &owned(&["neighbor", "ports"]),
+            Perspective::Unauthenticated,
+        )
+        .unwrap();
+        assert_eq!(ids(&sel), ["ports"]);
+        assert_eq!(sel.skipped, ["neighbor"]);
+
+        let Err(err) = select_modules(
+            &registry,
+            &owned(&["neighbor"]),
+            Perspective::Unauthenticated,
+        ) else {
+            panic!("all-skipped selection must error");
+        };
+        assert_eq!(
+            err.to_string(),
+            "none of the selected modules support the unauthenticated perspective: neighbor"
+        );
+    }
+
+    #[test]
+    fn select_modules_never_adds_phase1_unsupported_by_perspective() {
+        let registry = ScannerRegistry::new();
+        let sel = select_modules(&registry, &owned(&["neighbor"]), Perspective::Neighbor).unwrap();
+        assert_eq!(ids(&sel), ["neighbor"]);
+        assert!(sel.added.is_empty());
+    }
+
+    fn ctx_with(modules: Option<Vec<String>>, perspective: Perspective) -> ScanContext {
+        ScanContext {
+            target_network: None,
+            gateway: None,
+            perspective,
+            network_mode: rikitikitavi_core::NetworkMode::Auto,
+            config: rikitikitavi_models::config::ScanConfig {
+                modules,
+                ..Default::default()
+            },
+            discovered_devices: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn plan_scanners_without_modules_uses_perspective_set() {
+        let registry = ScannerRegistry::new();
+        let ctx = ctx_with(None, Perspective::Authenticated);
+        let sel = plan_scanners(&registry, &ctx).unwrap();
+        assert_eq!(
+            sel.scanners.len(),
+            registry.for_perspective(Perspective::Authenticated).len()
+        );
+        assert!(sel.skipped.is_empty() && sel.added.is_empty());
+    }
+
+    #[test]
+    fn plan_scanners_with_modules_selects() {
+        let registry = ScannerRegistry::new();
+        let ctx = ctx_with(Some(owned(&["ports"])), Perspective::Unauthenticated);
+        assert_eq!(ids(&plan_scanners(&registry, &ctx).unwrap()), ["ports"]);
+    }
+
+    #[test]
+    fn apply_exclusions_removes_by_ip_cidr_and_mac() {
+        let exclusions = ExclusionSet::parse(
+            &owned(&["10.0.9.0/24"]),
+            &owned(&["10.0.0.5", "aa:bb:cc:dd:ee:ff"]),
+        )
+        .unwrap();
+        let mut devices = vec![
+            Device::new(ip("10.0.0.5")),
+            Device::new(ip("10.0.0.6")).with_mac("AA:BB:CC:DD:EE:FF"),
+            Device::new(ip("10.0.9.7")),
+            Device::new(ip("10.0.0.8")).with_mac("00:11:22:33:44:55"),
+        ];
+        assert_eq!(apply_exclusions(&mut devices, &exclusions), 3);
+        let left: Vec<IpAddr> = devices.iter().map(|d| d.ip).collect();
+        assert_eq!(left, [ip("10.0.0.8")]);
+        assert_eq!(apply_exclusions(&mut devices, &ExclusionSet::default()), 0);
+    }
+
+    #[test]
+    fn excluded_findings_detected_by_ip_and_mac_ip() {
+        let exclusions = ExclusionSet::parse(&owned(&["10.0.9.0/24"]), &[]).unwrap();
+        let mac_ips: HashSet<IpAddr> = HashSet::from([ip("10.0.0.6")]);
+        let by_cidr = basic_finding("ports", Severity::Low, ip("10.0.9.1"), 22);
+        let by_mac = basic_finding("ports", Severity::Low, ip("10.0.0.6"), 22);
+        let kept = basic_finding("ports", Severity::Low, ip("10.0.0.7"), 22);
+        let no_ip = Finding::new("network", "t", "d", Severity::Info);
+        let arp = Finding::new("arp", "t", "d", Severity::High).with_ip(ip("10.0.9.1"));
+        assert!(is_excluded_finding(&by_cidr, &exclusions, &mac_ips));
+        assert!(is_excluded_finding(&by_mac, &exclusions, &mac_ips));
+        assert!(!is_excluded_finding(&kept, &exclusions, &mac_ips));
+        assert!(!is_excluded_finding(&no_ip, &exclusions, &mac_ips));
+        assert!(!is_excluded_finding(&arp, &exclusions, &mac_ips));
+    }
+
+    fn phase2_ids(
+        ctx: &ScanContext,
+        exclusions: &ExclusionSet,
+        excluded_mac_ips: &HashSet<IpAddr>,
+    ) -> Vec<&'static str> {
+        let registry = ScannerRegistry::new();
+        let phase2: Vec<&dyn Scanner> = registry
+            .for_perspective(ctx.perspective)
+            .into_iter()
+            .filter(|s| !PHASE1_IDS.contains(&s.id()))
+            .collect();
+        filter_phase2(phase2, ctx, exclusions, excluded_mac_ips)
+            .iter()
+            .map(|s| s.id())
+            .collect()
+    }
+
+    #[test]
+    fn filter_phase2_skips_arp_fallback_when_all_devices_excluded() {
+        let mut ctx = ctx_with(None, Perspective::Unauthenticated);
+        ctx.config.excluded_devices = owned(&["10.0.0.5"]);
+        let exclusions = ctx.config.exclusions().unwrap();
+        let none = HashSet::new();
+
+        let ids = phase2_ids(&ctx, &exclusions, &none);
+        assert!(!ids.contains(&"credentials"), "{ids:?}");
+        assert!(!ids.contains(&"snmp"), "{ids:?}");
+        assert!(ids.contains(&"dns"), "{ids:?}");
+        assert!(ids.contains(&"router"), "{ids:?}");
+
+        let ids = phase2_ids(&ctx, &ExclusionSet::default(), &none);
+        assert!(ids.contains(&"credentials"), "{ids:?}");
+        assert!(ids.contains(&"snmp"), "{ids:?}");
+
+        ctx.discovered_devices.push(Device::new(ip("10.0.0.8")));
+        let ids = phase2_ids(&ctx, &exclusions, &none);
+        assert!(ids.contains(&"credentials"), "{ids:?}");
+    }
+
+    #[test]
+    fn filter_phase2_skips_router_when_gateway_excluded() {
+        let mut ctx = ctx_with(None, Perspective::Unauthenticated);
+        ctx.gateway = Some(ip("10.0.0.1"));
+        ctx.discovered_devices.push(Device::new(ip("10.0.0.8")));
+        let none = HashSet::new();
+
+        let by_ip = ExclusionSet::parse(&[], &owned(&["10.0.0.1"])).unwrap();
+        assert!(!phase2_ids(&ctx, &by_ip, &none).contains(&"router"));
+
+        let by_mac = HashSet::from([ip("10.0.0.1")]);
+        assert!(!phase2_ids(&ctx, &ExclusionSet::default(), &by_mac).contains(&"router"));
+
+        assert!(phase2_ids(&ctx, &ExclusionSet::default(), &none).contains(&"router"));
+    }
+
+    #[tokio::test]
+    async fn bounded_times_out_with_clear_error() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(())
+        };
+        let err = bounded(Some(Duration::from_millis(20)), slow)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "scan exceeded scan.timeout_seconds (0s); raise it or set 0 to disable"
+        );
+        assert!(bounded(None, async { Ok(7) }).await.is_ok_and(|v| v == 7));
+        assert!(
+            bounded(Some(Duration::from_secs(5)), async { Ok(7) })
+                .await
+                .is_ok_and(|v| v == 7)
+        );
     }
 
     #[test]

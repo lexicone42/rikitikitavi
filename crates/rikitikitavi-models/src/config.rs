@@ -1,5 +1,8 @@
+use crate::{Device, MacAddr};
+use ipnetwork::IpNetwork;
 use rikitikitavi_core::{NetworkMode, Perspective};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Full application configuration (deserialized from config.yaml).
@@ -50,6 +53,7 @@ pub struct ScanConfig {
     pub perspective: Perspective,
     pub network_mode: NetworkMode,
     pub intensity: ScanIntensity,
+    /// Whole-scan bound in seconds; 0 = unbounded.
     pub timeout_seconds: u64,
     pub parallelism: usize,
     pub excluded_networks: Vec<String>,
@@ -65,7 +69,7 @@ impl Default for ScanConfig {
             perspective: Perspective::default(),
             network_mode: NetworkMode::default(),
             intensity: ScanIntensity::Active,
-            timeout_seconds: 300,
+            timeout_seconds: 0,
             parallelism: 100,
             excluded_networks: Vec::new(),
             excluded_devices: Vec::new(),
@@ -75,6 +79,99 @@ impl Default for ScanConfig {
         }
     }
 }
+
+/// Upper bound for `ScanConfig::parallelism`.
+pub const MAX_PARALLELISM: usize = 4096;
+
+impl ScanConfig {
+    /// `parallelism` clamped to `1..=MAX_PARALLELISM`.
+    #[must_use]
+    pub const fn effective_parallelism(&self) -> usize {
+        if self.parallelism == 0 {
+            1
+        } else if self.parallelism > MAX_PARALLELISM {
+            MAX_PARALLELISM
+        } else {
+            self.parallelism
+        }
+    }
+
+    /// Parse `excluded_networks` and `excluded_devices`.
+    pub fn exclusions(&self) -> Result<ExclusionSet, ExclusionParseError> {
+        ExclusionSet::parse(&self.excluded_networks, &self.excluded_devices)
+    }
+}
+
+/// Parsed `excluded_networks` (CIDRs) and `excluded_devices` (IPs or MACs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExclusionSet {
+    networks: Vec<IpNetwork>,
+    ips: Vec<IpAddr>,
+    macs: Vec<MacAddr>,
+}
+
+impl ExclusionSet {
+    /// `networks` entries must be CIDRs; `devices` entries IPs or MACs.
+    pub fn parse(networks: &[String], devices: &[String]) -> Result<Self, ExclusionParseError> {
+        let mut set = Self::default();
+        for entry in networks {
+            let net = entry.trim().parse().map_err(|_| ExclusionParseError {
+                field: "excluded_networks",
+                entry: entry.clone(),
+            })?;
+            set.networks.push(net);
+        }
+        for entry in devices {
+            let token = entry.trim();
+            if let Ok(ip) = token.parse::<IpAddr>() {
+                set.ips.push(ip);
+            } else if let Ok(mac) = token.parse::<MacAddr>() {
+                set.macs.push(mac);
+            } else {
+                return Err(ExclusionParseError {
+                    field: "excluded_devices",
+                    entry: entry.clone(),
+                });
+            }
+        }
+        Ok(set)
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.networks.is_empty() && self.ips.is_empty() && self.macs.is_empty()
+    }
+
+    #[must_use]
+    pub fn excludes_ip(&self, ip: IpAddr) -> bool {
+        self.ips.contains(&ip) || self.networks.iter().any(|n| n.contains(ip))
+    }
+
+    #[must_use]
+    pub fn excludes_mac(&self, mac: MacAddr) -> bool {
+        self.macs.contains(&mac)
+    }
+
+    #[must_use]
+    pub fn excludes_device(&self, device: &Device) -> bool {
+        self.excludes_ip(device.ip) || device.mac.is_some_and(|m| self.excludes_mac(m))
+    }
+}
+
+/// An `excluded_networks` / `excluded_devices` entry that did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusionParseError {
+    pub field: &'static str,
+    pub entry: String,
+}
+
+impl std::fmt::Display for ExclusionParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "scan.{}: invalid entry `{}`", self.field, self.entry)
+    }
+}
+
+impl std::error::Error for ExclusionParseError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -238,7 +335,7 @@ mod tests {
     #[test]
     fn test_scan_config_defaults_sensible() {
         let config = ScanConfig::default();
-        assert!(config.timeout_seconds > 0);
+        assert_eq!(config.timeout_seconds, 0);
         assert!(config.parallelism > 0);
         assert!(config.attack_paths);
         assert!(config.modules.is_none());
@@ -381,6 +478,66 @@ mod tests {
         let yaml = "site: office\n";
         let config: UniFiControllerConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.site, "office");
+    }
+
+    fn owned(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn effective_parallelism_clamps() {
+        let with = |parallelism| ScanConfig {
+            parallelism,
+            ..ScanConfig::default()
+        };
+        assert_eq!(with(0).effective_parallelism(), 1);
+        assert_eq!(
+            with(MAX_PARALLELISM + 1).effective_parallelism(),
+            MAX_PARALLELISM
+        );
+        assert_eq!(with(64).effective_parallelism(), 64);
+    }
+
+    #[test]
+    fn exclusion_set_matches_ip_cidr_and_mac() {
+        let set = ExclusionSet::parse(
+            &owned(&["10.0.0.0/24", " 2001:db8::/32 "]),
+            &owned(&["192.168.1.5", "AA-BB-CC-DD-EE-FF"]),
+        )
+        .unwrap();
+        assert!(!set.is_empty());
+        assert!(set.excludes_ip("10.0.0.200".parse().unwrap()));
+        assert!(set.excludes_ip("2001:db8::1".parse().unwrap()));
+        assert!(!set.excludes_ip("10.0.1.1".parse().unwrap()));
+        assert!(set.excludes_ip("192.168.1.5".parse().unwrap()));
+        assert!(set.excludes_mac("aa:bb:cc:dd:ee:ff".parse().unwrap()));
+
+        let by_mac = Device::new("192.168.1.9".parse().unwrap()).with_mac("aabb.ccdd.eeff");
+        assert!(set.excludes_device(&by_mac));
+        let by_ip = Device::new("192.168.1.5".parse().unwrap());
+        assert!(set.excludes_device(&by_ip));
+        let kept = Device::new("192.168.1.6".parse().unwrap()).with_mac("00:11:22:33:44:55");
+        assert!(!set.excludes_device(&kept));
+    }
+
+    #[test]
+    fn exclusion_set_rejects_bad_entries() {
+        let err = ExclusionSet::parse(&owned(&["10.0.0.0/33"]), &[]).unwrap_err();
+        assert_eq!(err.field, "excluded_networks");
+        assert_eq!(err.entry, "10.0.0.0/33");
+        let err = ExclusionSet::parse(&[], &owned(&["printer"])).unwrap_err();
+        assert_eq!(err.field, "excluded_devices");
+        assert_eq!(
+            err.to_string(),
+            "scan.excluded_devices: invalid entry `printer`"
+        );
+    }
+
+    #[test]
+    fn exclusion_set_default_is_empty() {
+        let set = ScanConfig::default().exclusions().unwrap();
+        assert!(set.is_empty());
+        assert!(!set.excludes_ip("10.0.0.1".parse().unwrap()));
     }
 
     proptest! {

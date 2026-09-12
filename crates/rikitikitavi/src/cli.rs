@@ -38,7 +38,7 @@ pub enum Command {
     #[cfg(feature = "unifi")]
     Unifi(UniFiArgs),
 
-    /// AWS Security Lake commands.
+    /// AWS Security Lake commands. Not yet implemented; every subcommand exits non-zero.
     Aws(AwsArgs),
 
     /// List available scanner modules.
@@ -72,19 +72,19 @@ pub struct ScanArgs {
     #[arg(long, default_value = "unauthenticated")]
     pub perspective: PerspectiveArg,
 
-    /// Network access mode.
+    /// Network access mode. Not yet implemented: only `auto` is accepted.
     #[arg(long, default_value = "auto")]
     pub network: NetworkArg,
 
-    /// `WiFi` SSID (when --network wifi).
+    /// `WiFi` SSID. Not yet implemented; passing it is an error.
     #[arg(long)]
     pub ssid: Option<String>,
 
-    /// `WiFi` password.
+    /// `WiFi` password. Not yet implemented; passing it is an error.
     #[arg(long)]
     pub password: Option<String>,
 
-    /// Ethernet interface name.
+    /// Ethernet interface name. Not yet implemented; passing it is an error.
     #[arg(long)]
     pub interface: Option<String>,
 
@@ -105,6 +105,7 @@ pub struct ScanArgs {
     pub fail_on: FailOnArg,
 
     /// Suppress findings whose fingerprint is listed in this baseline file.
+    /// The file must exist and be readable.
     #[arg(long)]
     pub suppress: Option<PathBuf>,
 
@@ -113,6 +114,7 @@ pub struct ScanArgs {
     pub write_baseline: Option<PathBuf>,
 
     /// Flag discovered devices not listed in this known-devices file as new-device findings.
+    /// The file must exist and be readable.
     #[arg(long)]
     pub known_devices: Option<PathBuf>,
 
@@ -132,7 +134,7 @@ pub struct ScanArgs {
     #[arg(long)]
     pub aggressive: bool,
 
-    /// Upload results after scanning.
+    /// Upload results after scanning. Not yet implemented; passing it is an error.
     #[arg(long)]
     pub upload: bool,
 
@@ -152,7 +154,7 @@ pub struct ScanArgs {
     #[arg(long)]
     pub no_save: bool,
 
-    /// Scan with `UniFi` local API access (when running on `UniFi` device).
+    /// Scan with `UniFi` local API access. Not yet implemented; passing it is an error.
     #[cfg(feature = "unifi")]
     #[arg(long)]
     pub unifi_local: bool,
@@ -164,8 +166,8 @@ pub struct TuiArgs {
     #[arg(long)]
     pub watch: bool,
 
-    /// Scan interval in seconds (watch mode).
-    #[arg(long, default_value = "300")]
+    /// Scan interval in seconds (watch mode), minimum 5.
+    #[arg(long, default_value = "300", value_parser = clap::value_parser!(u64).range(5..))]
     pub interval: u64,
 
     /// TUI color theme.
@@ -334,8 +336,8 @@ pub struct MonitorArgs {
     #[arg(long)]
     pub interface: Option<String>,
 
-    /// Monitoring duration in seconds.
-    #[arg(long, default_value = "60")]
+    /// Monitoring duration in seconds, minimum 1.
+    #[arg(long, default_value = "60", value_parser = clap::value_parser!(u64).range(1..))]
     pub duration: u64,
 
     /// Known BSSID(s) to exclude from rogue AP detection (comma-separated).
@@ -418,4 +420,42 @@ pub enum ThemeArg {
     Light,
     Hacker,
     Accessible,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_interval_rejects_below_five() {
+        assert!(Cli::try_parse_from(["rikitikitavi", "tui", "--interval", "0"]).is_err());
+        assert!(Cli::try_parse_from(["rikitikitavi", "tui", "--interval", "4"]).is_err());
+        let cli = Cli::try_parse_from(["rikitikitavi", "tui", "--interval", "5"]).unwrap();
+        let Command::Tui(args) = cli.command else {
+            panic!("expected tui command");
+        };
+        assert_eq!(args.interval, 5);
+    }
+
+    #[cfg(feature = "monitor")]
+    #[test]
+    fn monitor_duration_rejects_zero() {
+        assert!(Cli::try_parse_from(["rikitikitavi", "monitor", "--duration", "0"]).is_err());
+        let cli = Cli::try_parse_from(["rikitikitavi", "monitor", "--duration", "1"]).unwrap();
+        let Command::Monitor(args) = cli.command else {
+            panic!("expected monitor command");
+        };
+        assert_eq!(args.duration, 1);
+    }
+
+    #[test]
+    fn scan_defaults_parse() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "scan"]).unwrap();
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        assert_eq!(args.fail_on, FailOnArg::Never);
+        assert!(matches!(args.network, NetworkArg::Auto));
+    }
 }

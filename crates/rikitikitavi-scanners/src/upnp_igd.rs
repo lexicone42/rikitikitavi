@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::Scanner;
+use crate::http_util::unauthenticated_probe_client;
 
 /// `UPnP` IGD port-forwarding exposure scanner.
 pub struct UpnpIgdScanner;
@@ -471,10 +472,8 @@ impl Scanner for UpnpIgdScanner {
             return Ok(findings);
         }
 
-        let Ok(client) = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(HTTP_TIMEOUT)
-            .build()
+        let Ok(client) =
+            unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::default())
         else {
             tracing::warn!("could not build HTTP client for UPnP IGD scan");
             return Ok(findings);

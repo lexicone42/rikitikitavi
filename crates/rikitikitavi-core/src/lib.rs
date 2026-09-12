@@ -1,4 +1,5 @@
 pub mod error;
+pub mod fs;
 pub mod types;
 
 pub use error::{RikitikitaviError, ScanError};
