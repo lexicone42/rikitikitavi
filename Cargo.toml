@@ -33,11 +33,11 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 
 # Networking
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "cookies"] }
 hickory-resolver = "0.26"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
+webpki-roots = "1"
 
 # AWS
 aws-config = "1"
