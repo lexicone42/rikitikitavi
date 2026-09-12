@@ -170,6 +170,13 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         discovered_devices: Vec::new(),
     };
 
+    // Selection errors (unknown --modules) surface before any network activity.
+    let registry = rikitikitavi_scanners::ScannerRegistry::new();
+    let selection = runner::plan_scanners(&registry, &ctx)?;
+    for note in selection_notices(&selection, perspective) {
+        eprintln!("{note}");
+    }
+
     if !args.quiet {
         eprintln!(
             "Note: only scan networks you own or are explicitly authorized to test. \
@@ -210,11 +217,6 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         }
     }
 
-    let registry = rikitikitavi_scanners::ScannerRegistry::new();
-    let selection = runner::plan_scanners(&registry, &ctx)?;
-    for note in selection_notices(&selection, perspective) {
-        eprintln!("{note}");
-    }
     if args.dry_run {
         println!("Would run {} scanners:", selection.scanners.len());
         for s in &selection.scanners {
@@ -311,7 +313,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         }
         println!("Results written to {}", output.display());
     } else if !args.quiet {
-        print_cli_report(&results);
+        tolerate_broken_pipe(print_cli_report(&results))?;
     }
 
     if let Some(prev) = previous {
@@ -558,8 +560,24 @@ fn device_identity_label(d: &rikitikitavi_models::Device) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
+/// A closed stdout (e.g. `| head`) ends output quietly.
+fn tolerate_broken_pipe(r: std::io::Result<()>) -> std::io::Result<()> {
+    match r {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn print_cli_report(results: &rikitikitavi_models::ScanResults) -> std::io::Result<()> {
     use rikitikitavi_core::Severity;
+    use std::io::Write;
+
+    let mut out = std::io::stdout().lock();
+    macro_rules! out {
+        () => { writeln!(out)?; };
+        ($($t:tt)*) => { writeln!(out, $($t)*)?; };
+    }
 
     let total = results.findings.len();
     let critical = results
@@ -590,27 +608,27 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
 
     let (grade, _) = rikitikitavi_analysis::risk_grade(critical, high, medium);
 
-    println!("Scan complete: {total} findings");
-    println!("Risk score: {:.0}/100 ({grade})", results.risk_score);
-    println!();
+    out!("Scan complete: {total} findings");
+    out!("Risk score: {:.0}/100 ({grade})", results.risk_score);
+    out!();
 
-    println!("  Severity breakdown:");
+    out!("  Severity breakdown:");
     if critical > 0 {
-        println!("    CRITICAL  {critical}");
+        out!("    CRITICAL  {critical}");
     }
     if high > 0 {
-        println!("    HIGH      {high}");
+        out!("    HIGH      {high}");
     }
     if medium > 0 {
-        println!("    MEDIUM    {medium}");
+        out!("    MEDIUM    {medium}");
     }
     if low > 0 {
-        println!("    LOW       {low}");
+        out!("    LOW       {low}");
     }
     if info > 0 {
-        println!("    INFO      {info}");
+        out!("    INFO      {info}");
     }
-    println!();
+    out!();
 
     let actionable: Vec<_> = results
         .findings
@@ -644,7 +662,7 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
                     .unwrap_or(Severity::Info);
                 std::cmp::Reverse((worst, fs.len()))
             });
-            println!("  Devices needing attention:");
+            out!("  Devices needing attention:");
             for (ip, fs) in &rows {
                 let ident = results
                     .devices
@@ -663,15 +681,15 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
                     }
                 }
                 let ip_str = ip.to_string();
-                println!("    {ip_str:<15}  {ident:<26}  {}", badge.trim_end());
+                out!("    {ip_str:<15}  {ident:<26}  {}", badge.trim_end());
             }
-            println!();
+            out!();
         }
     }
 
     if !actionable.is_empty() {
-        println!("  Actionable findings:");
-        println!();
+        out!("  Actionable findings:");
+        out!();
         for f in &actionable {
             let exploited = if f.is_kev {
                 "  ⚠ ACTIVELY EXPLOITED"
@@ -687,10 +705,10 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
             let epss = f
                 .epss
                 .map_or_else(String::new, |e| format!("  EPSS {:.0}%", e * 100.0));
-            println!("    [{:8}] {}{exploited}{conf}{epss}", f.severity, f.title);
-            println!("              {}", f.description);
+            out!("    [{:8}] {}{exploited}{conf}{epss}", f.severity, f.title);
+            out!("              {}", f.description);
             if let Some(ref evidence) = f.evidence {
-                println!("              Evidence: {evidence}");
+                out!("              Evidence: {evidence}");
             }
             if let Some(ref rem) = f.remediation
                 && !rem.steps.is_empty()
@@ -700,9 +718,9 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
                     .effort
                     .as_ref()
                     .map_or(String::new(), |e| format!(" ({e})"));
-                println!("              Fix: {fix}{effort}");
+                out!("              Fix: {fix}{effort}");
             }
-            println!();
+            out!();
         }
     }
 
@@ -713,35 +731,40 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         .collect();
 
     if !informational.is_empty() {
-        println!("  Informational ({}):", informational.len());
+        out!("  Informational ({}):", informational.len());
         for f in &informational {
-            println!("    [{:8}] {}", f.severity, f.title);
+            out!("    [{:8}] {}", f.severity, f.title);
         }
-        println!();
+        out!();
     }
 
     if !results.priority_actions.is_empty() {
-        println!("  Top {} Priority Actions:", results.priority_actions.len());
-        println!();
+        out!("  Top {} Priority Actions:", results.priority_actions.len());
+        out!();
         for action in &results.priority_actions {
             let effort = action
                 .effort
                 .as_deref()
                 .map_or(String::new(), |e| format!("  ({e})"));
-            println!(
+            out!(
                 "    #{} [{}] {}{}",
-                action.rank, action.severity, action.title, effort,
+                action.rank,
+                action.severity,
+                action.title,
+                effort,
             );
-            println!(
+            out!(
                 "       {} device(s), {} finding(s)",
-                action.affected_device_count, action.finding_count,
+                action.affected_device_count,
+                action.finding_count,
             );
             for (i, step) in action.steps.iter().enumerate() {
-                println!("       {}. {step}", i + 1);
+                out!("       {}. {step}", i + 1);
             }
-            println!();
+            out!();
         }
     }
+    Ok(())
 }
 
 fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) {
@@ -987,7 +1010,9 @@ fn cmd_report(args: &cli::ReportArgs, _app_config: &rikitikitavi_models::config:
                     results.findings.len(),
                 );
                 println!();
-                print_cli_report(&results);
+                if let Err(e) = tolerate_broken_pipe(print_cli_report(&results)) {
+                    eprintln!("{e}");
+                }
             }
             Ok(None) => {
                 println!("No saved scans found.");

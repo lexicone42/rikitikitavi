@@ -144,7 +144,31 @@ pub async fn discover_hosts(ctx: &mut ScanContext) -> Result<usize> {
     let exclusions = ctx.config.exclusions()?;
     ctx.discovered_devices = discover_network(ctx);
     apply_exclusions(&mut ctx.discovered_devices, &exclusions);
-    Ok(active_host_discovery(ctx, &exclusions).await)
+    let added = active_host_discovery(ctx, &exclusions).await;
+    if added > 0 {
+        // The sweep's SYNs populate the ARP cache; MAC-less sweep hosts pick their MACs up here.
+        let arp = rikitikitavi_network::read_arp_cache().unwrap_or_default();
+        let filled = fill_macs_from_arp(&mut ctx.discovered_devices, &arp);
+        tracing::info!(filled, "MACs filled from ARP cache after sweep");
+        apply_exclusions(&mut ctx.discovered_devices, &exclusions);
+    }
+    Ok(added)
+}
+
+/// Set `mac` on MAC-less devices whose IP has a parseable ARP entry. Returns the count filled.
+pub fn fill_macs_from_arp(devices: &mut [Device], arp: &[rikitikitavi_network::ArpEntry]) -> usize {
+    let mut filled = 0;
+    for dev in devices.iter_mut().filter(|d| d.mac.is_none()) {
+        let mac = arp
+            .iter()
+            .find(|e| e.ip == dev.ip)
+            .and_then(|e| e.mac.parse::<MacAddr>().ok());
+        if mac.is_some() {
+            dev.mac = mac;
+            filled += 1;
+        }
+    }
+    filled
 }
 
 /// ARP-cache IPs whose MAC is excluded.
@@ -1489,5 +1513,43 @@ mod tests {
             let deduped = deduplicate_findings(findings);
             assert!(deduped.len() <= original_len);
         }
+    }
+    #[test]
+    fn fill_macs_from_arp_only_fills_missing_parseable() {
+        use rikitikitavi_network::ArpEntry;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let mut devices = vec![
+            Device::new(ip("10.0.0.1")),
+            Device::new(ip("10.0.0.2")).with_mac("aa:aa:aa:aa:aa:aa"),
+            Device::new(ip("10.0.0.3")),
+            Device::new(ip("10.0.0.4")),
+        ];
+        let arp = vec![
+            ArpEntry {
+                ip: ip("10.0.0.1"),
+                mac: "bb:bb:bb:bb:bb:bb".to_owned(),
+                interface: "eth0".to_owned(),
+            },
+            ArpEntry {
+                ip: ip("10.0.0.2"),
+                mac: "cc:cc:cc:cc:cc:cc".to_owned(),
+                interface: "eth0".to_owned(),
+            },
+            ArpEntry {
+                ip: ip("10.0.0.3"),
+                mac: "(incomplete)".to_owned(),
+                interface: "eth0".to_owned(),
+            },
+        ];
+        assert_eq!(fill_macs_from_arp(&mut devices, &arp), 1);
+        assert_eq!(
+            devices[0].mac.map(|m| m.to_string()).as_deref(),
+            Some("bb:bb:bb:bb:bb:bb")
+        );
+        assert_eq!(
+            devices[1].mac.map(|m| m.to_string()).as_deref(),
+            Some("aa:aa:aa:aa:aa:aa")
+        );
+        assert!(devices[2].mac.is_none() && devices[3].mac.is_none());
     }
 }
