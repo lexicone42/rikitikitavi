@@ -596,6 +596,10 @@ cargo fmt --check
 # Supply chain audit
 cargo deny check
 
+# Fuzz the network-facing parsers (nightly + cargo-fuzz; see fuzz/README.md)
+cargo +nightly fuzz list
+cargo +nightly fuzz run dns_packet -- -max_total_time=60
+
 # Build optimized release
 cargo build --release
 

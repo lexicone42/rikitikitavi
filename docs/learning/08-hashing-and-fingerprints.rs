@@ -26,14 +26,26 @@
 //
 // ── THE HASH TRAIT ──────────────────────────────────────────────────────────
 //
-// Rust's `Hash` trait lets you feed values into a `Hasher`:
+// Rust's `Hash` trait lets you feed values into any `Hasher`:
 //
-//   use std::collections::hash_map::DefaultHasher;
 //   use std::hash::{Hash, Hasher};
+//
+//   /// FNV-1a 64: a fixed algorithm, so persisted fingerprints stay valid.
+//   struct Fnv1a64(u64);
+//
+//   impl Hasher for Fnv1a64 {
+//       fn finish(&self) -> u64 { self.0 }
+//       fn write(&mut self, bytes: &[u8]) {
+//           for &b in bytes {
+//               self.0 ^= u64::from(b);
+//               self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+//           }
+//       }
+//   }
 //
 //   impl Finding {
 //       pub fn fingerprint(&self) -> FindingFingerprint {
-//           let mut hasher = DefaultHasher::new();
+//           let mut hasher = Fnv1a64::new();
 //           self.scanner.hash(&mut hasher);
 //           self.title.hash(&mut hasher);
 //           self.affected_ip.hash(&mut hasher);
@@ -43,7 +55,9 @@
 //   }
 //
 // Key points:
-// - `DefaultHasher` is NOT cryptographic. It's fast and good for HashMaps.
+// - std's `DefaultHasher` (SipHash) is NOT guaranteed stable across Rust
+//   releases. Fingerprints are written to baseline/suppression files, so the
+//   code uses its own FNV-1a hasher, whose output never changes.
 // - `.hash(&mut hasher)` feeds bytes into the hasher's state.
 // - `.finish()` produces a u64 digest.
 // - `Option<T>` implements `Hash` if `T: Hash`, so `affected_ip: Option<IpAddr>`
@@ -98,16 +112,18 @@
 // ── DEVICE FINGERPRINTS: PREFERRING MAC OVER IP ─────────────────────────────
 //
 // Devices are trickier. DHCP means IPs change, but MACs don't (usually).
+// Device identity does not need a hash at all: an enum holds the identifying
+// value directly, and derived `Eq`/`Hash` make it usable as a map key.
+//
+//   pub enum DeviceFingerprint {
+//       Mac(MacAddr),
+//       Ip(IpAddr),
+//   }
 //
 //   impl Device {
 //       pub fn fingerprint(&self) -> DeviceFingerprint {
-//           let mut hasher = DefaultHasher::new();
-//           if let Some(mac) = &self.mac_address {
-//               mac.hash(&mut hasher);    // Prefer MAC
-//           } else {
-//               self.ip.hash(&mut hasher); // Fall back to IP
-//           }
-//           DeviceFingerprint(hasher.finish())
+//           self.mac
+//               .map_or(DeviceFingerprint::Ip(self.ip), DeviceFingerprint::Mac)
 //       }
 //   }
 //
@@ -154,7 +170,8 @@
 //
 // ── KEY TAKEAWAYS ───────────────────────────────────────────────────────────
 //
-// 1. The Hash trait + DefaultHasher give you fast, non-cryptographic hashing
+// 1. The Hash trait works with any Hasher; pick a fixed algorithm (FNV-1a)
+//    when digests are persisted, since DefaultHasher may change between releases
 // 2. Newtype pattern (struct Foo(u64)) adds type safety for free
 // 3. HashMap set operations (contains_key, difference) map naturally to
 //    scan comparison categories

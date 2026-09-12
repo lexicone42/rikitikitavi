@@ -1,0 +1,75 @@
+[package]
+name = "rikitikitavi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rikitikitavi-models = { path = "../crates/rikitikitavi-models" }
+rikitikitavi-network = { path = "../crates/rikitikitavi-network" }
+rikitikitavi-scanners = { path = "../crates/rikitikitavi-scanners" }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "dns_packet"
+path = "fuzz_targets/dns_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wifi_frame"
+path = "fuzz_targets/wifi_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_kex"
+path = "fuzz_targets/ssh_kex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "service_banners"
+path = "fuzz_targets/service_banners.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_headers"
+path = "fuzz_targets/http_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssdp_upnp"
+path = "fuzz_targets/ssdp_upnp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x509_der"
+path = "fuzz_targets/x509_der.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identifiers"
+path = "fuzz_targets/identifiers.rs"
+test = false
+doc = false
+bench = false
