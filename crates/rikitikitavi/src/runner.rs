@@ -10,10 +10,8 @@ use rikitikitavi_scanners::ScannerRegistry;
 use std::net::IpAddr;
 use std::time::Instant;
 
-/// Perform network discovery and populate the scan context with gateway,
-/// network CIDR, and discovered devices.
+/// Detect gateway and target network into `ctx`; return devices from the ARP cache.
 pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
-    // Detect gateway
     if ctx.gateway.is_none() {
         match rikitikitavi_network::detect_gateway() {
             Ok(Some(gw)) => {
@@ -29,7 +27,6 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
         }
     }
 
-    // Detect network CIDR
     if ctx.target_network.is_none() {
         match rikitikitavi_network::detect_network() {
             Ok(Some(net)) => {
@@ -45,13 +42,11 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
         }
     }
 
-    // Read ARP cache and build device list
     let arp_entries = rikitikitavi_network::read_arp_cache().unwrap_or_default();
     let mut devices: Vec<Device> = arp_entries
         .iter()
         .map(|entry| {
             let mut dev = Device::new(entry.ip).with_mac(&entry.mac);
-            // Tag the gateway device as Router
             if ctx.gateway == Some(entry.ip) {
                 dev = dev.with_device_type(DeviceType::Router);
             }
@@ -59,7 +54,6 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
         })
         .collect();
 
-    // Ensure the gateway is in the device list even if not in ARP cache
     if let Some(gw) = ctx.gateway
         && !devices.iter().any(|d| d.ip == gw)
     {
@@ -76,16 +70,8 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
     devices
 }
 
-/// Actively sweep the target network for live hosts and merge any newly found
-/// ones into `ctx.discovered_devices`.
-///
-/// Reading the ARP cache alone misses everything the machine has not recently
-/// talked to (a cold cache on a fresh boot is nearly empty), so without this a
-/// scan can report ~0 devices and look "clean." The sweep is a bounded,
-/// unprivileged TCP-connect probe. It is skipped in Passive mode (which is meant
-/// to be read-only) and when no IPv4 target network was detected.
-///
-/// Returns the number of hosts newly added by the sweep.
+/// TCP-connect sweep of the target network; merges new hosts into `ctx.discovered_devices`.
+/// Skipped at Passive intensity or without a target network. Returns the number of hosts added.
 pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
     use rikitikitavi_models::config::ScanIntensity;
 
@@ -115,12 +101,7 @@ pub async fn active_host_discovery(ctx: &mut ScanContext) -> usize {
     added
 }
 
-/// Run one scanner with a per-scanner timeout backstop.
-///
-/// Individual network I/O is already bounded by its own timeouts; this guards
-/// against a scanner that iterates an unexpectedly large target set (or is
-/// otherwise slow to return) stalling the entire run. The budget scales with the
-/// scanner's own estimate, clamped to a sane range.
+/// Run one scanner under a timeout of 4x its estimated duration, clamped to 60-600 s.
 async fn run_scanner_bounded(
     scanner: &dyn rikitikitavi_scanners::Scanner,
     ctx: &ScanContext,
@@ -145,22 +126,15 @@ async fn run_scanner_bounded(
         })
 }
 
-/// Orchestrate a full scan run across all applicable scanner modules.
-///
-/// The scan runs in two phases:
-/// - **Phase 1 (Discovery)**: network, ports, device scanners populate
-///   `discovered_devices` with IPs, open ports, and device types.
-/// - **Phase 2 (Deep Analysis)**: remaining scanners run with enriched context,
-///   adapting their checks based on what Phase 1 found.
+/// Run all applicable scanners in two phases: `network`, `ports`, `device` run first
+/// and populate `discovered_devices`; the remaining scanners then run concurrently.
 #[allow(clippy::too_many_lines)]
 pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     let start = Instant::now();
     let registry = ScannerRegistry::new();
 
     let scanners = ctx.config.modules.as_ref().map_or_else(
-        // Run all scanners for this perspective
         || registry.for_perspective(ctx.perspective),
-        // Only run specified modules
         |modules| {
             modules
                 .iter()
@@ -169,7 +143,6 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         },
     );
 
-    // Split scanners into Phase 1 (discovery) and Phase 2 (deep analysis)
     let phase1_ids: &[&str] = &["network", "ports", "device"];
     let (phase1, phase2): (Vec<_>, Vec<_>) = scanners
         .into_iter()
@@ -185,7 +158,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     let mut all_findings = Vec::new();
 
-    // ── Phase 1: Discovery ──────────────────────────────────────────
+    // Phase 1: discovery
     tracing::info!("Phase 1: Discovery");
     for scanner in &phase1 {
         tracing::info!(
@@ -213,24 +186,20 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
-    // ── Enrich context between phases ───────────────────────────────
-    // Build Device list from Phase 1 findings (group open ports by IP)
     enrich_devices_from_findings(ctx, &all_findings);
     tracing::info!(
         discovered_devices = ctx.discovered_devices.len(),
         "enriched context with discovered devices"
     );
 
-    // ── Phase 2: Deep Analysis (concurrent) ────────────────────────
-    // Collect all open ports discovered in Phase 1 for smart filtering
+    // Phase 2: deep analysis, concurrent
     let discovered_ports: std::collections::HashSet<u16> = ctx
         .discovered_devices
         .iter()
         .flat_map(|d| d.open_ports.iter().map(|p| p.port))
         .collect();
 
-    // Essential scanners that always run in Passive mode (they don't
-    // depend on open ports and check fundamental network hygiene).
+    // Scanners that run at Passive intensity even without matching open ports.
     let passive_essential: &[&str] = &[
         "credentials",
         "router",
@@ -245,7 +214,6 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         .into_iter()
         .filter(|scanner| {
             let ports = scanner.relevant_ports();
-            // If scanner declares relevant ports, skip if none were discovered
             if !ports.is_empty() && !ports.iter().any(|p| discovered_ports.contains(p)) {
                 tracing::debug!(
                     scanner = scanner.id(),
@@ -253,8 +221,6 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
                 );
                 return false;
             }
-            // In Passive mode, only run essential scanners + port-dependent
-            // scanners whose ports were found
             if ctx.config.intensity == rikitikitavi_models::config::ScanIntensity::Passive
                 && !passive_essential.contains(&scanner.id())
                 && ports.is_empty()
@@ -305,10 +271,8 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
-    // Enrich devices with hints from Phase 2 findings
     post_enrich_devices(&mut ctx.discovered_devices, &all_findings);
 
-    // Deduplicate findings from Phase 1 + Phase 2 overlap
     let pre_dedup = all_findings.len();
     let mut all_findings = deduplicate_findings(all_findings);
     if all_findings.len() < pre_dedup {
@@ -320,8 +284,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         );
     }
 
-    // Flag actively-exploited (CISA KEV) findings and escalate them before
-    // scoring, so "known exploited in the wild" drives the risk score and grade.
+    // KEV enrichment runs before scoring so escalated severities affect the risk score.
     let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
     if kev_count > 0 {
         tracing::info!(
@@ -330,8 +293,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         );
     }
 
-    // Best-effort EPSS enrichment: exploitation-probability for the CVEs we found.
-    // Offline-tolerant — an empty result just leaves findings without a score.
+    // EPSS lookup is best-effort; on failure findings keep `epss = None`.
     let all_cves: Vec<String> = all_findings
         .iter()
         .flat_map(|f| f.cve_ids.iter().cloned())
@@ -352,7 +314,6 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
-    // Generate attack paths if requested
     let attack_paths = if ctx.config.attack_paths {
         generate_attack_paths(&all_findings)
     } else {
@@ -372,15 +333,11 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         "scan complete"
     );
 
-    // Propagate identification across devices sharing the same MAC address
     propagate_mac_siblings(&mut ctx.discovered_devices);
 
-    // Deduplicate devices by IP, keeping the entry with the most metadata
     dedup_devices(&mut ctx.discovered_devices);
 
-    // Ensure gateway remains classified as Router after all enrichment.
-    // OUI hints may reclassify it (e.g. Ubiquiti → Switch), but the gateway
-    // is by definition a router — it routes packets between networks.
+    // Gateway is forced back to Router; OUI hints may have reclassified it.
     if let Some(gw_ip) = ctx.gateway {
         for device in &mut ctx.discovered_devices {
             if device.ip == gw_ip {
@@ -400,21 +357,14 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     })
 }
 
-/// Deduplicate findings that share the same `(affected_ip, affected_port)`.
+/// Deduplicate findings keyed by `(affected_ip, affected_port)`.
 ///
-/// When Phase 1 (ports) and Phase 2 (services, ssl, credentials, etc.) both
-/// report on the same IP:port, keep the finding with the highest detail score.
-/// Findings without both IP and port are never deduplicated.
-///
-/// Within the same scanner, multiple findings per (IP, port) are kept
-/// (e.g. ssl reports self-signed + excessive validity + cert details for one port).
-/// Across different scanners, dedup keeps the finding with the best detail score
-/// (e.g. ports + services + ssl all reporting something on port 443 → keep the
-/// most detailed one from the deeper scanner).
+/// Findings lacking IP or port are kept as-is. Per key, all findings from the scanner
+/// with the highest `detail_score` are kept; non-`ports` scanners get +1 to that score.
 fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::HashMap;
 
-    // Phase 1: Group by (IP, port, scanner) — keep all findings from the same scanner
+    // Group by (ip, port, scanner).
     let mut by_scanner: HashMap<(IpAddr, u16, String), Vec<Finding>> = HashMap::new();
     let mut unkeyed: Vec<Finding> = Vec::new();
 
@@ -427,8 +377,7 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
         }
     }
 
-    // Phase 2: For each (IP, port), pick the best scanner and keep all its findings.
-    // If multiple scanners report on the same port, keep the deepest one.
+    // Per (ip, port), keep only the best scanner's group.
     let mut by_port: HashMap<(IpAddr, u16), Vec<(String, Vec<Finding>)>> = HashMap::new();
     for ((ip, port, scanner), group) in by_scanner {
         by_port
@@ -440,16 +389,13 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     let mut result: Vec<Finding> = unkeyed;
     for (_key, scanner_groups) in by_port {
         if scanner_groups.len() == 1 {
-            // Only one scanner reported on this port — keep all its findings
             result.extend(scanner_groups.into_iter().flat_map(|(_, f)| f));
         } else {
-            // Multiple scanners on the same port — keep the best one
             let mut best_scanner = String::new();
             let mut best_score = 0_u32;
             for (scanner, group) in &scanner_groups {
                 let max_score = group.iter().map(detail_score).max().unwrap_or(0);
                 let is_ports = scanner == "ports";
-                // Prefer non-ports scanners (Phase 2 deeper analysis)
                 let adjusted = if is_ports { max_score } else { max_score + 1 };
                 if adjusted > best_score {
                     best_score = adjusted;
@@ -464,7 +410,6 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
         }
     }
 
-    // Re-sort by severity (descending) for consistent output
     result.sort_by_key(|f| std::cmp::Reverse(f.severity));
     result
 }
@@ -519,23 +464,17 @@ fn classify_by_ports(open_ports: &[u16]) -> Option<DeviceType> {
     None
 }
 
-/// Enrich `ctx.discovered_devices` from Phase 1 scan findings.
-///
-/// Groups findings by IP address and extracts open ports, services, and
-/// device metadata to build a rich device inventory that Phase 2 scanners
-/// can use for adaptive scanning. Also applies device-scanner hints and
-/// port-based classification.
+/// Add open ports (from `ports` findings) and vendor/type hints (from `device` findings)
+/// to `ctx.discovered_devices`, then classify still-Unknown devices by open ports.
 fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
     use std::collections::HashMap;
 
-    // Index existing devices by IP (from discover_network)
     let mut device_map: HashMap<IpAddr, &mut Device> = ctx
         .discovered_devices
         .iter_mut()
         .map(|d| (d.ip, d))
         .collect();
 
-    // Collect open ports from port-scanner findings
     for finding in findings {
         if finding.scanner == "ports" {
             let Some(ip) = finding.affected_ip else {
@@ -546,7 +485,7 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
             };
 
             if let Some(device) = device_map.get_mut(&ip) {
-                // Avoid duplicate port entries
+                // skip duplicate port entries
                 if !device.open_ports.iter().any(|p| p.port == port) {
                     device.open_ports.push(OpenPort {
                         port,
@@ -559,7 +498,6 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
             }
         }
 
-        // Apply device-scanner hints (OUI vendor + device_type)
         if finding.scanner == "device"
             && let (Some(ip), Some(hint)) = (finding.affected_ip, &finding.device_hint)
             && let Some(device) = device_map.get_mut(&ip)
@@ -578,7 +516,6 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
         }
     }
 
-    // Port-based classification for devices still Unknown
     for device in &mut ctx.discovered_devices {
         if device.device_type == DeviceType::Unknown && !device.open_ports.is_empty() {
             let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
@@ -589,35 +526,27 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
     }
 }
 
-/// Clean up a hostname from mDNS/UPnP discovery.
-///
-/// Strips `.local` suffix and rejects UUID-style hostnames that aren't
-/// human-readable (e.g. Chromecast device IDs).
+/// Strip a `.local` suffix; return `None` for empty or UUID-style hostnames.
 fn clean_hostname(raw: &str) -> Option<String> {
     let cleaned = raw.strip_suffix(".local").unwrap_or(raw).trim();
     if cleaned.is_empty() {
         return None;
     }
-    // Reject UUID-style hostnames (8-4-4-4-12 hex pattern)
     let hex_count = cleaned.chars().filter(char::is_ascii_hexdigit).count();
     let dash_count = cleaned.chars().filter(|c| *c == '-').count();
     let total = cleaned.len();
-    // If >80% hex digits + dashes and has 4+ dashes, it's a UUID
+    // UUID heuristic: 4+ dashes and >80% hex digits or dashes.
     if dash_count >= 4 && (hex_count + dash_count) * 100 / total > 80 {
         return None;
     }
     Some(cleaned.to_owned())
 }
 
-/// Merge `DeviceHint` data from Phase 2 findings into devices.
-///
-/// Uses priority-based merging: higher-priority sources overwrite lower ones.
-/// Priority (low → high): OUI (device scanner, priority=1), SSH banner (2),
-/// mDNS service (3), `UPnP` description (4).
+/// Merge `DeviceHint`s from findings into devices; higher priority overwrites lower.
+/// Priority: `device`/other = 1, `services` = 2, `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
 fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
     use std::collections::HashMap;
 
-    // Collect all hints by IP, with priority
     let mut hints_by_ip: HashMap<IpAddr, Vec<(u8, &DeviceHint)>> = HashMap::new();
 
     for finding in findings {
@@ -634,10 +563,9 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
         let priority = match finding.scanner.as_str() {
             "services" => 2,
             "mdns" => {
-                // UPnP findings (have vendor) get higher priority than plain mDNS
+                // `mdns` hints carrying a vendor come from UPnP.
                 if hint.vendor.is_some() { 4 } else { 3 }
             }
-            // "device" and any other scanner default to lowest priority
             _ => 1,
         };
 
@@ -654,7 +582,6 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
             continue;
         };
 
-        // Sort by priority (low first) so higher-priority overwrites
         let mut sorted: Vec<_> = hints.clone();
         sorted.sort_by_key(|(prio, _)| *prio);
 
@@ -693,12 +620,8 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
     }
 }
 
-/// Deduplicate devices by IP address.
-///
-/// When multiple entries share the same IP (e.g. from overlapping ARP
-/// cache snapshots), keep the one with the richest metadata: prefer
-/// entries with known `device_type`, then most open ports, then first
-/// occurrence.
+/// Deduplicate devices by IP. Per IP keep, in order of preference: known `device_type`,
+/// more open ports, a hostname, first occurrence.
 fn dedup_devices(devices: &mut Vec<Device>) {
     use std::collections::HashMap;
 
@@ -708,12 +631,12 @@ fn dedup_devices(devices: &mut Vec<Device>) {
             .and_modify(|prev| {
                 let prev_dev = &devices[*prev];
                 let new_is_better =
-                    // Prefer identified over unknown
+                    // known type beats Unknown
                     (device.device_type != DeviceType::Unknown && prev_dev.device_type == DeviceType::Unknown)
-                    // Prefer more open ports
+                    // then more open ports
                     || (device.device_type == prev_dev.device_type
                         && device.open_ports.len() > prev_dev.open_ports.len())
-                    // Prefer having a hostname
+                    // then having a hostname
                     || (device.device_type == prev_dev.device_type
                         && device.open_ports.len() == prev_dev.open_ports.len()
                         && device.hostname.is_some()
@@ -730,18 +653,12 @@ fn dedup_devices(devices: &mut Vec<Device>) {
     *devices = keep.into_iter().map(|i| devices[i].clone()).collect();
 }
 
-/// Propagate identification across devices that share the same MAC address.
-///
-/// When the same physical device appears at multiple IPs (DHCP lease change,
-/// dual-stack, etc.), one entry may have been identified while others remain
-/// unknown. This copies `device_type`, `vendor`, `hostname`, and `os_guess`
-/// from identified entries to their same-MAC siblings.
+/// Copy `device_type`, `vendor`, `hostname`, and `os_guess` between devices sharing a MAC
+/// (same host seen at several IPs). Only fills fields that are unset/Unknown.
 fn propagate_mac_siblings(devices: &mut [Device]) {
     use std::collections::HashMap;
 
-    // Collect best-known info per MAC. Keying by the canonical MacAddr (Copy)
-    // means the same physical address always merges, regardless of the textual
-    // form each scanner reported it in.
+    // Keyed by canonical `MacAddr` so textual MAC variants merge.
     let mut mac_info: HashMap<
         rikitikitavi_models::MacAddr,
         (DeviceType, Option<String>, Option<String>, Option<String>),
@@ -768,7 +685,6 @@ fn propagate_mac_siblings(devices: &mut [Device]) {
         }
     }
 
-    // Apply best-known info back to all devices with matching MAC
     for device in devices.iter_mut() {
         let Some(mac) = device.mac else {
             continue;

@@ -8,12 +8,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// Database security scanner — detects authentication-less database access.
-///
-/// Goes beyond simple port detection: attempts protocol-level handshakes
-/// to determine whether databases are accessible without credentials.
-/// Uses Phase 1 discovered devices to target only hosts with relevant
-/// open ports.
+/// Database scanner: protocol-level unauthenticated-access probes for Redis,
+/// `MongoDB`, `MySQL`, `Elasticsearch`, `Memcached`; advisory for `PostgreSQL`.
 pub struct DatabaseScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -29,10 +25,7 @@ const DATABASE_PORTS: &[(u16, &str)] = &[
     (11211, "Memcached"),
 ];
 
-/// Check if a `Redis` instance allows unauthenticated access.
-///
-/// Sends `PING` first. If the server responds with `+PONG` (no auth),
-/// follows up with `INFO server` to extract version, OS, and memory info.
+/// Send `PING`; on `+PONG`, follow up with `INFO server`.
 async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -40,7 +33,6 @@ async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
         .ok()?
         .ok()?;
 
-    // Send PING command
     tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"PING\r\n"))
         .await
         .ok()?
@@ -55,9 +47,7 @@ async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
     let response = String::from_utf8_lossy(&buf[..n]);
     let result = classify_redis_response(&response);
 
-    // If no auth required, try to get server info
     if matches!(result, RedisResult::NoAuth(_)) {
-        // Send INFO server command
         if tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"INFO server\r\n"))
             .await
             .ok()?
@@ -69,7 +59,6 @@ async fn check_redis_no_auth(ip: IpAddr, port: u16) -> Option<RedisResult> {
                 tokio::time::timeout(READ_TIMEOUT, stream.read(&mut info_buf)).await
                 && info_n > 0
             {
-                // Parse the RESP bulk string containing INFO output
                 let info = parse_resp_value(&info_buf[..info_n]).and_then(|(val, _)| match val {
                     RespValue::BulkString(s) => Some(parse_redis_info(&s)),
                     _ => None,
@@ -119,10 +108,7 @@ enum RespValue {
     Null,
 }
 
-/// Parse a single RESP value from the given bytes.
-///
-/// Returns the parsed value and the number of bytes consumed, or `None`
-/// if the data is incomplete or malformed.
+/// Parse one RESP value; returns `(value, bytes consumed)` or `None` if incomplete/malformed.
 fn parse_resp_value(data: &[u8]) -> Option<(RespValue, usize)> {
     if data.is_empty() {
         return None;
@@ -131,26 +117,22 @@ fn parse_resp_value(data: &[u8]) -> Option<(RespValue, usize)> {
     let rest = &data[1..];
 
     match prefix {
-        // Simple string: +OK\r\n
         b'+' => {
             let end = find_crlf(rest)?;
             let s = String::from_utf8_lossy(&rest[..end]).into_owned();
             Some((RespValue::SimpleString(s), 1 + end + 2))
         }
-        // Error: -ERR message\r\n
         b'-' => {
             let end = find_crlf(rest)?;
             let s = String::from_utf8_lossy(&rest[..end]).into_owned();
             Some((RespValue::Error(s), 1 + end + 2))
         }
-        // Integer: :1000\r\n
         b':' => {
             let end = find_crlf(rest)?;
             let s = std::str::from_utf8(&rest[..end]).ok()?;
             let val = s.parse::<i64>().ok()?;
             Some((RespValue::Integer(val), 1 + end + 2))
         }
-        // Bulk string: $6\r\nfoobar\r\n or $-1\r\n for null
         b'$' => {
             let len_end = find_crlf(rest)?;
             let len_str = std::str::from_utf8(&rest[..len_end]).ok()?;
@@ -159,9 +141,9 @@ fn parse_resp_value(data: &[u8]) -> Option<(RespValue, usize)> {
                 return Some((RespValue::Null, 1 + len_end + 2));
             }
             let len = usize::try_from(len).ok()?;
-            let data_start = len_end + 2; // past the \r\n after length
+            let data_start = len_end + 2;
             if rest.len() < data_start + len + 2 {
-                return None; // incomplete
+                return None;
             }
             let s = String::from_utf8_lossy(&rest[data_start..data_start + len]).into_owned();
             Some((RespValue::BulkString(s), 1 + data_start + len + 2))
@@ -175,10 +157,7 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
     data.windows(2).position(|w| w == b"\r\n")
 }
 
-/// Parse the `Redis` `INFO server` bulk string into structured fields.
-///
-/// The INFO response is a text block with `key:value` lines separated by `\n`,
-/// with section headers like `# Server`.
+/// Parse `INFO` output (`key:value` lines, `# Section` headers) into fields.
 fn parse_redis_info(bulk: &str) -> RedisInfo {
     let mut info = RedisInfo {
         version: None,
@@ -220,10 +199,7 @@ fn classify_redis_response(response: &str) -> RedisResult {
     }
 }
 
-/// Classify a `Redis` version for end-of-life status.
-///
-/// Redis versions below 7.0 are end-of-life and no longer receive
-/// security patches.
+/// True for `Redis` major version < 7 (EOL).
 fn classify_redis_version_eol(version: &str) -> bool {
     let parts: Vec<&str> = version.split('.').collect();
     if let Some(major_str) = parts.first()
@@ -234,10 +210,7 @@ fn classify_redis_version_eol(version: &str) -> bool {
     false
 }
 
-/// Check if a `MongoDB` instance allows unauthenticated access.
-///
-/// Sends a minimal `MongoDB` wire protocol `isMaster` command. If we get
-/// a valid BSON response without auth error, it's open.
+/// Connect to the `MongoDB` port and wait for unsolicited data; `Some(true)` if any arrives.
 async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -245,9 +218,7 @@ async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
         .ok()?
         .ok()?;
 
-    // Minimal MongoDB OP_MSG for { isMaster: 1, $db: "admin" }
-    // We use a simplified check: just connect and try to read any banner/response.
-    // MongoDB 3.6+ sends an isMaster-like response on connect.
+    // Nothing is sent; MongoDB does not emit a greeting, so this normally times out.
     let mut buf = vec![0u8; 512];
     let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
         .await
@@ -258,16 +229,10 @@ async fn check_mongodb_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
         return None;
     }
 
-    // If we got data back without sending auth, the server is responding
-    // without authentication. A properly secured MongoDB would either
-    // require TLS client certs or not respond to unauthenticated connections.
     Some(true)
 }
 
-/// Read and parse a `MySQL` Handshake v10 greeting packet.
-///
-/// Connects to the `MySQL` port and reads the server greeting, which
-/// contains the version string, capability flags, auth plugin, and more.
+/// Connect and parse the `MySQL` Handshake v10 greeting.
 async fn check_mysql_greeting(ip: IpAddr, port: u16) -> Option<MysqlGreeting> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -288,11 +253,7 @@ async fn check_mysql_greeting(ip: IpAddr, port: u16) -> Option<MysqlGreeting> {
     parse_mysql_greeting(&buf[..n])
 }
 
-/// Parsed `MySQL` Handshake v10 greeting packet.
-///
-/// Contains the security-relevant fields from the server greeting:
-/// version, connection ID, capability flags, character set, status flags,
-/// and the authentication plugin name (if `CLIENT_PLUGIN_AUTH` is set).
+/// Fields parsed from a `MySQL` Handshake v10 greeting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MysqlGreeting {
     pub version: String,
@@ -329,17 +290,14 @@ const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 /// [N] auth_plugin_name\0 (if CLIENT_PLUGIN_AUTH)
 /// ```
 fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
-    // Minimum: 4 header + 1 proto + 1 version char + 1 null = 7
     if packet.len() < 7 {
         return None;
     }
 
-    // Protocol version at byte 4
     if packet[4] != 10 {
         return None;
     }
 
-    // Version string starts at byte 5, null-terminated
     let version_start = 5;
     let null_pos = packet[version_start..].iter().position(|&b| b == 0)?;
     let version_end = version_start + null_pos;
@@ -348,7 +306,6 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
     // After version null: connection_id(4) + auth_data_1(8) + filler(1) = 13 bytes
     let post_version = version_end + 1;
     if packet.len() < post_version + 13 {
-        // Short packet — return version only with defaults
         return Some(MysqlGreeting {
             version,
             connection_id: 0,
@@ -366,7 +323,6 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
         packet[post_version + 3],
     ]);
 
-    // Skip auth_plugin_data_part1 (8 bytes) + filler (1 byte)
     let cap_lower_pos = post_version + 4 + 8 + 1;
     if packet.len() < cap_lower_pos + 2 {
         return Some(MysqlGreeting {
@@ -408,10 +364,8 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
 
     let auth_plugin_data_len = packet[cap_upper_pos + 2];
 
-    // Skip reserved (10 bytes)
     let mut cursor = cap_upper_pos + 2 + 1 + 10;
 
-    // Skip auth_plugin_data_part2 if CLIENT_SECURE_CONNECTION
     if capability_flags & CLIENT_SECURE_CONNECTION != 0 {
         // Length is max(13, auth_plugin_data_len) - 8
         let part2_len = if auth_plugin_data_len > 8 {
@@ -422,7 +376,6 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
         cursor += part2_len;
     }
 
-    // Read auth_plugin_name if CLIENT_PLUGIN_AUTH
     let auth_plugin = if capability_flags & CLIENT_PLUGIN_AUTH != 0 && cursor < packet.len() {
         packet[cursor..]
             .iter()
@@ -442,10 +395,7 @@ fn parse_mysql_greeting(packet: &[u8]) -> Option<MysqlGreeting> {
     })
 }
 
-/// Check if an `Elasticsearch` instance is accessible without authentication.
-///
-/// Sends a simple HTTP GET to the root endpoint. Open `Elasticsearch`
-/// instances return a JSON response with cluster information.
+/// `GET /` on the `Elasticsearch` port; true if the response carries cluster info.
 async fn check_elasticsearch_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -475,13 +425,10 @@ async fn check_elasticsearch_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
 
 /// Classify an `Elasticsearch` HTTP response.
 fn classify_elasticsearch_response(response: &str) -> bool {
-    // A 200 response with "cluster_name" or "tagline" indicates open Elasticsearch
     response.contains("200") && (response.contains("cluster_name") || response.contains("tagline"))
 }
 
-/// Check if a `Memcached` instance is accessible without authentication.
-///
-/// Sends the `version` command. If `Memcached` responds, it has no auth.
+/// Send `version`; true if `Memcached` answers `VERSION ...`.
 async fn check_memcached_no_auth(ip: IpAddr, port: u16) -> Option<bool> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -532,7 +479,6 @@ impl Scanner for DatabaseScanner {
         tracing::info!("running database security scan");
         let mut findings = Vec::new();
 
-        // Skip in Passive mode — database probes can be slow and intrusive
         if !ctx
             .config
             .intensity
@@ -542,9 +488,7 @@ impl Scanner for DatabaseScanner {
             return Ok(findings);
         }
 
-        // Collect targets: use discovered devices if available, else ARP cache
         let targets: Vec<(IpAddr, Vec<u16>)> = if ctx.discovered_devices.is_empty() {
-            // Fallback: check all ARP cache IPs for common database ports
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "database".to_owned(),
@@ -612,7 +556,6 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     if let Some(result) = check_redis_no_auth(*ip, port).await {
         match result {
             RedisResult::NoAuth(ref info) => {
-                // Build enriched description from server info
                 let detail = info.as_ref().map_or_else(String::new, |i| {
                     let mut parts = Vec::new();
                     if let Some(ref v) = i.version {
@@ -655,7 +598,6 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     )),
                 );
 
-                // EOL version finding
                 if let Some(ref version) = info.as_ref().and_then(|i| i.version.clone())
                     && classify_redis_version_eol(version)
                 {
@@ -727,7 +669,6 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     let ssl_supported = greeting.capability_flags & CLIENT_SSL != 0;
     let auth_plugin_label = greeting.auth_plugin.as_deref().unwrap_or("unknown");
 
-    // Version disclosure finding (always generated)
     let severity = classify_mysql_version(&greeting.version);
     let ssl_status = if ssl_supported {
         "SSL supported"
@@ -757,7 +698,6 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
         )),
     );
 
-    // SSL support finding
     if !ssl_supported {
         findings.push(
             Finding::new(
@@ -778,7 +718,6 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
         );
     }
 
-    // Auth plugin finding
     if let Some(ref plugin) = greeting.auth_plugin {
         match plugin.as_str() {
             "mysql_old_password" => {
@@ -817,7 +756,7 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     .with_service("MySQL"),
                 );
             }
-            _ => {} // caching_sha2_password and others — no finding needed
+            _ => {} // caching_sha2_password and others
         }
     }
 }
@@ -872,8 +811,7 @@ async fn check_memcached(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
 }
 
 fn check_postgresql_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
-    // PostgreSQL auth check requires a full protocol handshake with
-    // username, which is more invasive. We issue an advisory instead.
+    // Auth check would need a username handshake; advisory only.
     findings.push(
         Finding::new(
             "database",
@@ -896,29 +834,25 @@ fn check_postgresql_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>
     );
 }
 
-/// Classify a `MySQL` version string for severity.
-///
-/// Older or end-of-life versions get higher severity.
+/// Severity for a `MySQL` version string (EOL branches score higher).
 fn classify_mysql_version(version: &str) -> Severity {
-    // Extract major.minor version
     let parts: Vec<&str> = version.split('.').collect();
     if parts.len() >= 2
         && let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
     {
-        // MySQL 5.5 and below: end of life
+        // <= 5.5: EOL
         if major < 5 || (major == 5 && minor <= 5) {
             return Severity::High;
         }
-        // MySQL 5.6: end of life since Feb 2021
+        // 5.6: EOL Feb 2021
         if major == 5 && minor == 6 {
             return Severity::High;
         }
-        // MySQL 5.7: end of life since Oct 2023
+        // 5.7: EOL Oct 2023
         if major == 5 && minor == 7 {
             return Severity::Medium;
         }
     }
-    // MariaDB or current MySQL: just informational
     Severity::Low
 }
 

@@ -36,14 +36,13 @@ pub async fn scan_wifi_networks() -> Result<Vec<WifiNetwork>> {
 #[cfg(target_os = "macos")]
 #[allow(clippy::unnecessary_wraps)]
 fn scan_wifi_platform() -> Result<Vec<WifiNetwork>> {
-    // Primary: system_profiler (works on macOS Sequoia+, not deprecated)
     if let Some(networks) = try_system_profiler_scan() {
         if !networks.is_empty() {
             return Ok(networks);
         }
     }
 
-    // Fallback: deprecated airport utility (older macOS)
+    // Fallback: deprecated `airport` utility (pre-Sequoia macOS).
     tracing::debug!("system_profiler returned no networks, trying airport fallback");
     Ok(try_airport_scan().unwrap_or_default())
 }
@@ -82,20 +81,18 @@ fn try_airport_scan() -> Option<Vec<WifiNetwork>> {
 #[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_wraps)]
 fn scan_wifi_platform() -> Result<Vec<WifiNetwork>> {
-    // Linux: parse iwconfig for connected network, iwlist for scanning
     let output = std::process::Command::new("iwconfig").output();
     match output {
         Ok(out) if out.status.success() => {
             let contents = String::from_utf8_lossy(&out.stdout);
             let mut networks = parse_iwconfig_output(&contents);
 
-            // Also try iwlist scan (requires sudo but may already be cached)
+            // `iwlist scan` needs root but may return cached results.
             if let Ok(scan_out) = std::process::Command::new("iwlist").args(["scan"]).output()
                 && scan_out.status.success()
             {
                 let scan_contents = String::from_utf8_lossy(&scan_out.stdout);
                 let scanned = parse_iwlist_output(&scan_contents);
-                // Merge, avoiding duplicates by BSSID
                 for net in scanned {
                     if !networks.iter().any(|n| n.bssid == net.bssid) {
                         networks.push(net);
@@ -128,7 +125,6 @@ pub async fn current_wifi() -> Result<Option<WifiNetwork>> {
 #[cfg(target_os = "macos")]
 #[allow(clippy::unnecessary_wraps)]
 fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
-    // Use system_profiler — "Current Network Information" section
     if let Ok(output) = std::process::Command::new("system_profiler")
         .arg("SPAirPortDataType")
         .output()
@@ -142,7 +138,7 @@ fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
         }
     }
 
-    // Fallback: deprecated airport -I
+    // Fallback: deprecated `airport -I`.
     let airport =
         "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
     let output = std::process::Command::new(airport).arg("-I").output();
@@ -174,14 +170,9 @@ fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
     Ok(None)
 }
 
-// ─── macOS: system_profiler parser ──────────────────────────────────────────
-
-/// Parse `system_profiler SPAirPortDataType` output for all `WiFi` networks.
+/// Parse `system_profiler SPAirPortDataType` output; covers both the
+/// "Current Network Information:" and "Other Local Wi-Fi Networks:" sections.
 ///
-/// Returns networks from both "Current Network Information:" and
-/// "Other Local Wi-Fi Networks:" sections.
-///
-/// Format:
 /// ```text
 ///   Current Network Information:
 ///     MyNetwork:
@@ -200,7 +191,6 @@ fn current_wifi_platform() -> Result<Option<WifiNetwork>> {
 fn parse_system_profiler_wifi(contents: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
 
-    // Parse both sections
     if let Some(section) = extract_section(contents, "Current Network Information:") {
         networks.extend(parse_profiler_network_entries(&section, false));
     }
@@ -220,17 +210,14 @@ fn parse_system_profiler_current(contents: &str) -> Option<WifiNetwork> {
         .next()
 }
 
-/// Extract the text block for a named section from `system_profiler` output.
-///
-/// A section starts with the section heading (at some indentation level) and
-/// ends when a line at the same or lesser indentation appears.
+/// Lines under `heading` in `system_profiler` output, up to the next line at the
+/// heading's indentation or less.
 #[cfg(any(target_os = "macos", test))]
 fn extract_section(contents: &str, heading: &str) -> Option<String> {
     let mut lines = contents.lines();
     let mut section_indent = 0;
     let mut found = false;
 
-    // Find the heading line
     for line in &mut lines {
         if line.trim_start().starts_with(heading) {
             section_indent = line.len() - line.trim_start().len();
@@ -243,14 +230,12 @@ fn extract_section(contents: &str, heading: &str) -> Option<String> {
         return None;
     }
 
-    // Collect lines that belong to this section (indented deeper than heading)
     let mut section = String::new();
     for line in lines {
         if line.trim().is_empty() {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
-        // Stop when we hit a line at same or lesser indent (next section)
         if indent <= section_indent && !line.trim().is_empty() {
             break;
         }
@@ -265,11 +250,8 @@ fn extract_section(contents: &str, heading: &str) -> Option<String> {
     }
 }
 
-/// Parse network entries from a `system_profiler` section block.
-///
-/// Each network is a label line `  NetworkName:` followed by indented key-value
-/// pairs. We detect network boundaries by the indent level: a network name line
-/// is indented less than its property lines.
+/// Parse network entries from a `system_profiler` section: a `NetworkName:` line
+/// followed by more-indented `Key: value` lines.
 #[cfg(any(target_os = "macos", test))]
 #[allow(clippy::too_many_lines)]
 fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiNetwork> {
@@ -302,7 +284,7 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
                 wps_enabled: false,
                 hidden,
             });
-            let _ = noise; // noise available but not currently used
+            let _ = noise; // parsed, unused
             *channel = 0;
             *signal = 0;
             *noise = 0;
@@ -318,10 +300,8 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
         let indent = line.len() - line.trim_start().len();
         let trimmed = line.trim();
 
-        // A network name line ends with ':' and is NOT a key-value pair.
-        // Key-value pairs contain ': ' (colon-space). Network names just end with ':'.
+        // Name lines end with ':' and contain no ": "; key-value lines contain ": ".
         if trimmed.ends_with(':') && !trimmed.contains(": ") {
-            // Flush previous network
             flush(
                 &mut current_name,
                 &mut channel,
@@ -331,17 +311,15 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
                 &mut bssid,
                 &mut networks,
             );
-            // Strip trailing ':'
             let name = trimmed[..trimmed.len() - 1].to_owned();
             current_name = Some(name);
             name_indent = indent;
             continue;
         }
 
-        // Property lines must be indented deeper than the name
         if current_name.is_some() && indent > name_indent {
             if let Some(val) = trimmed.strip_prefix("Channel: ") {
-                // "6 (2GHz, 20MHz)" → parse the leading number
+                // "6 (2GHz, 20MHz)"
                 channel = val
                     .split(|c: char| !c.is_ascii_digit())
                     .next()
@@ -375,7 +353,6 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
         }
     }
 
-    // Flush last network
     flush(
         &mut current_name,
         &mut channel,
@@ -389,10 +366,8 @@ fn parse_profiler_network_entries(section: &str, _is_current: bool) -> Vec<WifiN
     networks
 }
 
-/// Classify `system_profiler` Security string into encryption type.
-///
-/// Examples: "WPA2 Personal", "WPA/WPA2 Personal", "WPA3 Personal",
-/// "WPA2 Enterprise", "WEP", "None", "Open"
+/// Classify a `system_profiler` Security string, e.g. "WPA2 Personal",
+/// "WPA/WPA2 Personal", "WPA3 Personal", "WPA2 Enterprise", "WEP", "None".
 #[cfg(any(target_os = "macos", test))]
 fn classify_profiler_security(security: &str) -> WifiEncryption {
     let upper = security.to_uppercase();
@@ -415,24 +390,18 @@ fn classify_profiler_security(security: &str) -> WifiEncryption {
     }
 }
 
-// ─── macOS: airport parser (fallback for older macOS) ───────────────────────
-
-/// Parse macOS `airport -s` tabular output.
-///
-/// Header:  `SSID  BSSID  RSSI  CHANNEL  HT  CC  SECURITY`
-/// The SSID column has variable width, so we parse by the fixed-width BSSID column.
+/// Parse macOS `airport -s` output. Header: `SSID  BSSID  RSSI  CHANNEL  HT  CC  SECURITY`;
+/// columns are located by header offsets since SSID width varies.
 #[cfg(any(target_os = "macos", test))]
 fn parse_airport_output(contents: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
     let mut lines = contents.lines();
 
-    // Find the header line to determine column positions
     let header = match lines.next() {
         Some(h) if h.contains("SSID") && h.contains("BSSID") => h,
         _ => return networks,
     };
 
-    // Use BSSID column position as anchor
     let Some(bssid_col) = header.find("BSSID") else {
         return networks;
     };
@@ -550,8 +519,6 @@ fn classify_airport_security(security: &str) -> WifiEncryption {
     }
 }
 
-// ─── Linux parsers ──────────────────────────────────────────────────────────
-
 /// Parse `iwconfig` output for the currently connected `WiFi` network.
 #[allow(clippy::similar_names)]
 fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
@@ -562,9 +529,8 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
     let mut current_signal = 0i32;
 
     for line in contents.lines() {
-        // New interface block: "wlan0  IEEE 802.11  ESSID:"NetworkName""
+        // Interface line: `wlan0  IEEE 802.11  ESSID:"NetworkName"`
         if line.contains("ESSID:") {
-            // Save previous if exists
             if let Some(ssid) = current_ssid.take() {
                 networks.push(WifiNetwork {
                     ssid,
@@ -572,7 +538,7 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
                     channel: frequency_to_channel(current_freq),
                     frequency_mhz: current_freq,
                     signal_strength_dbm: current_signal,
-                    encryption: WifiEncryption::Unknown, // iwconfig doesn't report this
+                    encryption: WifiEncryption::Unknown, // not reported by iwconfig
                     wps_enabled: false,
                     hidden: false,
                 });
@@ -591,7 +557,7 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
             current_signal = 0;
         }
 
-        // Access Point line: "Access Point: AA:BB:CC:DD:EE:FF"
+        // "Access Point: AA:BB:CC:DD:EE:FF"
         if let Some(idx) = line.find("Access Point:") {
             let rest = line[idx + 13..].trim();
             if rest != "Not-Associated" {
@@ -599,7 +565,7 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
             }
         }
 
-        // Frequency: "Frequency:2.437 GHz"
+        // "Frequency:2.437 GHz"
         if let Some(idx) = line.find("Frequency:") {
             let rest = &line[idx + 10..];
             if let Some(ghz) = rest
@@ -614,7 +580,7 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
             }
         }
 
-        // Signal level: "Signal level=-50 dBm"
+        // "Signal level=-50 dBm"
         if let Some(idx) = line.find("Signal level=") {
             let rest = &line[idx + 13..];
             let num_str: String = rest
@@ -625,7 +591,6 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
         }
     }
 
-    // Don't forget the last one
     if let Some(ssid) = current_ssid {
         networks.push(WifiNetwork {
             ssid,
@@ -656,7 +621,7 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
     for line in contents.lines() {
         let trimmed = line.trim();
 
-        // New cell: "Cell 01 - Address: AA:BB:CC:DD:EE:FF"
+        // "Cell 01 - Address: AA:BB:CC:DD:EE:FF"
         if trimmed.contains("Cell ") && trimmed.contains("Address:") {
             if in_cell && !bssid.is_empty() {
                 networks.push(WifiNetwork {
@@ -690,7 +655,7 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
         }
 
         if trimmed.contains("Encryption key:on") {
-            // At minimum WEP
+            // WEP unless a WPA line follows.
             if encryption == WifiEncryption::Open {
                 encryption = WifiEncryption::Wep;
             }
@@ -712,7 +677,6 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
         }
     }
 
-    // Last cell
     if in_cell && !bssid.is_empty() {
         networks.push(WifiNetwork {
             ssid,
@@ -728,8 +692,6 @@ fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
 
     networks
 }
-
-// ─── Utility ────────────────────────────────────────────────────────────────
 
 /// Convert a `WiFi` channel number to frequency in MHz.
 #[cfg(any(target_os = "macos", test))]

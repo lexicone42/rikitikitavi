@@ -12,14 +12,12 @@ use cli::{Cli, Command};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .init();
 
-    // Load configuration
     let app_config = config::load_config(cli.config.as_deref())?;
 
     match cli.command {
@@ -52,8 +50,7 @@ async fn main() -> Result<()> {
     }
 }
 
-/// List the `scan` flags that are accepted by the CLI but not yet wired into
-/// the scan, so they can be reported instead of silently ignored.
+/// `scan` flags that were set but are not yet wired into the scan.
 fn unimplemented_scan_flags(args: &cli::ScanArgs) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     if !matches!(args.network, cli::NetworkArg::Auto) {
@@ -84,9 +81,6 @@ async fn cmd_scan(
 ) -> Result<()> {
     use rikitikitavi_models::config::{PortRange, ScanIntensity, TOP_20_PORTS};
 
-    // Honesty: several flags are accepted but not yet wired. Warn rather than
-    // silently ignoring them, so a teammate never believes they targeted an
-    // interface/SSID or uploaded results when nothing happened.
     if !args.quiet {
         let ignored = unimplemented_scan_flags(&args);
         if !ignored.is_empty() {
@@ -97,9 +91,7 @@ async fn cmd_scan(
         }
     }
 
-    // Network discovery is implemented only for Linux and macOS; elsewhere the
-    // ARP/route layer returns empty, which would otherwise look like a clean
-    // network. Say so loudly rather than presenting an empty success.
+    // Network discovery is only implemented for Linux and macOS.
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if !args.quiet {
         eprintln!(
@@ -110,7 +102,7 @@ async fn cmd_scan(
 
     let perspective: rikitikitavi_core::Perspective = args.perspective.into();
 
-    // Map CLI flags to intensity (--quick and --aggressive are mutually exclusive)
+    // --quick takes precedence over --aggressive.
     let intensity = if args.quick {
         ScanIntensity::Passive
     } else if args.aggressive {
@@ -119,7 +111,6 @@ async fn cmd_scan(
         app_config.scan.intensity
     };
 
-    // Override port range based on intensity
     let port_scan_range = match intensity {
         ScanIntensity::Passive => PortRange::Custom(TOP_20_PORTS.to_vec()),
         ScanIntensity::Aggressive => PortRange::Extended,
@@ -144,10 +135,7 @@ async fn cmd_scan(
         discovered_devices: Vec::new(),
     };
 
-    // Perform network discovery to populate context
     if !args.quiet {
-        // Active scanning without authorization can be illegal and disruptive.
-        // Surface a one-line reminder at runtime (not just in SECURITY.md).
         eprintln!(
             "Note: only scan networks you own or are explicitly authorized to test. \
              Active/aggressive modes probe and (with --aggressive) attempt logins."
@@ -158,10 +146,7 @@ async fn cmd_scan(
     let devices = runner::discover_network(&mut ctx);
     ctx.discovered_devices = devices;
 
-    // The ARP cache alone is often nearly empty (cold cache / fresh boot). Active
-    // mode does a bounded TCP-connect sweep so a scan doesn't silently report ~0
-    // devices. Passive mode stays read-only and skips this. A dry run is a preview
-    // and must not touch the network, so it skips the sweep entirely.
+    // Dry run must not touch the network, so the sweep is skipped.
     let swept = if args.dry_run {
         0
     } else {
@@ -181,7 +166,6 @@ async fn cmd_scan(
         );
         println!();
 
-        // Never present a near-empty result as a clean network — say why.
         if ctx.discovered_devices.len() <= 1 {
             eprintln!(
                 "Warning: found {} host(s). If this looks too low, the ARP cache may be \
@@ -204,9 +188,7 @@ async fn cmd_scan(
 
     let mut results = runner::run_scan(&mut ctx).await?;
 
-    // ── New-device detection ────────────────────────────────────────
-    // "A device I don't recognize joined my network" is the #1 question a
-    // non-expert has. Flag any discovered device absent from the known set.
+    // New-device detection
     if let Some(path) = args.write_known_devices.as_ref() {
         match write_known_devices_file(path, &results.devices) {
             Ok(n) if !args.quiet => println!("Wrote {n} known device(s) to {}", path.display()),
@@ -246,7 +228,7 @@ async fn cmd_scan(
         }
     }
 
-    // ── History: load previous before saving current ────────────────
+    // Load the previous scan before saving the current one.
     let history = rikitikitavi_analysis::ScanHistory::new();
     let previous = if args.compare_previous {
         history
@@ -256,7 +238,6 @@ async fn cmd_scan(
         None
     };
 
-    // Auto-save unless --no-save
     if !args.no_save
         && let Some(ref h) = history
     {
@@ -272,9 +253,7 @@ async fn cmd_scan(
         }
     }
 
-    // ── Baseline / suppression ──────────────────────────────────────
-    // History (saved above) always keeps the FULL scan; suppression only
-    // affects what is displayed, exported, and gated on by --fail-on.
+    // Suppression is applied after the history save, so history keeps the full scan.
     if let Some(path) = args.write_baseline.as_ref() {
         match write_baseline_file(path, &results.findings) {
             Ok(n) if !args.quiet => {
@@ -316,13 +295,11 @@ async fn cmd_scan(
         print_cli_report(&results);
     }
 
-    // ── Print comparison if requested ───────────────────────────────
     if let Some(prev) = previous {
         let diff = rikitikitavi_analysis::diff_scan_results(&prev, &results);
         print_comparison_report(&diff);
     }
 
-    // ── Severity-gated exit code for cron/CI self-audits ─────────────
     if let Some(threshold) = fail_on_threshold(args.fail_on) {
         let breach = results
             .findings
@@ -340,8 +317,8 @@ async fn cmd_scan(
     Ok(())
 }
 
-/// Write each finding's fingerprint to a baseline file (one per line, with the
-/// title as a trailing comment). Deduplicated. Returns the count written.
+/// Write deduplicated fingerprints to `path`, one per line with the title as a `#`
+/// comment. Returns the count written.
 fn write_baseline_file(
     path: &std::path::Path,
     findings: &[rikitikitavi_models::Finding],
@@ -364,9 +341,8 @@ fn write_baseline_file(
     Ok(seen.len())
 }
 
-/// Load a suppression/baseline file into a set of fingerprints. Each line is a
-/// hex fingerprint optionally followed by a `#` comment; blank lines and
-/// comment-only lines are ignored, and unparseable tokens are skipped.
+/// Parse a baseline file: one hex fingerprint per line, `#` starts a comment,
+/// unparseable tokens are skipped.
 fn load_suppressions(
     path: &std::path::Path,
 ) -> std::io::Result<std::collections::HashSet<rikitikitavi_models::FindingFingerprint>> {
@@ -385,8 +361,7 @@ fn load_suppressions(
     Ok(set)
 }
 
-/// A device's stable identifier for the known-devices set: its MAC when known
-/// (survives DHCP address changes), otherwise its IP.
+/// Known-devices identifier: MAC if known, otherwise IP.
 fn device_identifier(d: &rikitikitavi_models::Device) -> String {
     d.mac.map_or_else(|| d.ip.to_string(), |m| m.to_string())
 }
@@ -450,8 +425,7 @@ fn load_known_devices(
     Ok(set)
 }
 
-/// Map the `--fail-on` argument to the minimum [`Severity`] that should trigger a
-/// non-zero exit, or `None` when failing is disabled.
+/// Minimum `Severity` that triggers a non-zero exit for `--fail-on`; `None` disables.
 const fn fail_on_threshold(arg: cli::FailOnArg) -> Option<rikitikitavi_core::Severity> {
     use rikitikitavi_core::Severity;
     match arg {
@@ -465,8 +439,7 @@ const fn fail_on_threshold(arg: cli::FailOnArg) -> Option<rikitikitavi_core::Sev
 }
 
 #[allow(clippy::too_many_lines)]
-/// Compact identity label for a device in the grouped report, e.g. "HP (Printer)",
-/// "myhost (Router)", "(Camera)", or "" when nothing is known.
+/// Device label such as `"HP (Printer)"`, `"(Camera)"`, or empty when nothing is known.
 fn device_identity_label(d: &rikitikitavi_models::Device) -> String {
     use rikitikitavi_models::DeviceType;
     let name = d.vendor.as_deref().or(d.hostname.as_deref());
@@ -511,12 +484,10 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
 
     let (grade, _) = rikitikitavi_analysis::risk_grade(critical, high, medium);
 
-    // ── Header ──────────────────────────────────────────────────
     println!("Scan complete: {total} findings");
     println!("Risk score: {:.0}/100 ({grade})", results.risk_score);
     println!();
 
-    // ── Severity breakdown ──────────────────────────────────────
     println!("  Severity breakdown:");
     if critical > 0 {
         println!("    CRITICAL  {critical}");
@@ -535,7 +506,6 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
     }
     println!();
 
-    // ── Actionable findings (Critical/High/Medium) with detail ─
     let actionable: Vec<_> = results
         .findings
         .iter()
@@ -547,11 +517,7 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         })
         .collect();
 
-    // ── Devices needing attention (grouped by device) ───────────
-    // A flat list of 200 findings is hard for a non-expert to act on; this
-    // groups the actionable ones by device so the worst offenders stand out.
-    // Network-wide findings without an IP (DNS, exposure) appear only in the
-    // detailed list below.
+    // Actionable findings grouped by IP; findings without an IP appear only in the list below.
     {
         use std::collections::BTreeMap;
         use std::fmt::Write as _;
@@ -611,7 +577,7 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
                 rikitikitavi_core::Confidence::Inferred => "  ~ inferred",
                 rikitikitavi_core::Confidence::Probable => "",
             };
-            // EPSS: probability of exploitation in the next 30 days (when known).
+            // EPSS: probability of exploitation within 30 days.
             let epss = f
                 .epss
                 .map_or_else(String::new, |e| format!("  EPSS {:.0}%", e * 100.0));
@@ -634,7 +600,6 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         }
     }
 
-    // ── Informational (Low/Info) — compact list ─────────────────
     let informational: Vec<_> = results
         .findings
         .iter()
@@ -649,7 +614,6 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) {
         println!();
     }
 
-    // ── Priority actions ────────────────────────────────────────
     if !results.priority_actions.is_empty() {
         println!("  Top {} Priority Actions:", results.priority_actions.len());
         println!();
@@ -753,13 +717,11 @@ async fn cmd_tui(
 
     let mut app = rikitikitavi_tui::App::new(tui_config);
 
-    // Load previous scan for comparison
     let history = rikitikitavi_analysis::ScanHistory::new();
     let previous_results = history
         .as_ref()
         .and_then(|h| h.load_latest().ok().flatten());
 
-    // Perform initial scan before entering TUI
     let perspective = rikitikitavi_core::Perspective::Authenticated;
     let scan_config = rikitikitavi_models::config::ScanConfig {
         perspective,
@@ -786,12 +748,10 @@ async fn cmd_tui(
 
     match runner::run_scan(&mut ctx).await {
         Ok(results) => {
-            // Compute diff against previous scan
             if let Some(ref prev) = previous_results {
                 let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
                 app.set_scan_diff(diff);
             }
-            // Save to history
             if let Some(ref h) = history
                 && let Err(e) = h.save(&results)
             {
@@ -807,7 +767,6 @@ async fn cmd_tui(
     app.scanning = false;
     app.scan_progress = 1.0;
 
-    // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(
@@ -818,19 +777,14 @@ async fn cmd_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Channel for background re-scan results
     let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel::<rikitikitavi_models::ScanResults>(1);
 
-    // Main loop
     loop {
-        // Check for completed background scan
         if let Ok(results) = scan_rx.try_recv() {
-            // Compute diff: compare new results against the previous scan
             if let Some(ref prev) = app.results {
                 let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
                 app.set_scan_diff(diff);
             }
-            // Save to history
             if let Some(ref h) = history
                 && let Err(e) = h.save(&results)
             {
@@ -858,7 +812,6 @@ async fn cmd_tui(
                 false
             };
             if rescan_requested {
-                // Spawn background re-scan
                 let tx = scan_tx.clone();
                 let rescan_config = scan_config.clone();
                 tokio::spawn(async move {
@@ -884,7 +837,6 @@ async fn cmd_tui(
         }
     }
 
-    // Restore terminal
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -943,7 +895,6 @@ async fn cmd_unifi(
             insecure,
             output,
         } => {
-            // Opt into insecure TLS via either the CLI flag or the config file.
             let insecure = insecure
                 || app_config
                     .unifi
@@ -1000,7 +951,6 @@ async fn cmd_unifi_scan(
 ) -> Result<()> {
     use rikitikitavi_unifi::UniFiClient;
 
-    // Determine controller URL
     let url = if local {
         if let Some(env) = rikitikitavi_unifi::UniFiEnvironment::detect() {
             println!("Detected UniFi device: {:?}", env.device_type);
@@ -1021,7 +971,6 @@ async fn cmd_unifi_scan(
 
     let mut client = UniFiClient::connect(&url, site, insecure)?;
 
-    // Authenticate
     if let Some(tok) = token {
         client.login_token(&tok).await?;
         println!("Authenticated with API token.");
@@ -1036,7 +985,6 @@ async fn cmd_unifi_scan(
 
     let mut all_findings = Vec::new();
 
-    // Audit WLANs
     match client.get_wlans().await {
         Ok(wlans) => {
             println!("WLANs: {} configured", wlans.len());
@@ -1051,7 +999,6 @@ async fn cmd_unifi_scan(
         Err(e) => println!("  Failed to fetch WLANs: {e}"),
     }
 
-    // Audit firewall rules
     match client.get_firewall_rules().await {
         Ok(rules) => {
             println!("\nFirewall rules: {} configured", rules.len());
@@ -1065,7 +1012,6 @@ async fn cmd_unifi_scan(
         Err(e) => println!("  Failed to fetch firewall rules: {e}"),
     }
 
-    // List devices and firmware
     match client.get_devices().await {
         Ok(devices) => {
             println!("\nAdopted devices: {}", devices.len());
@@ -1081,7 +1027,6 @@ async fn cmd_unifi_scan(
         Err(e) => println!("  Failed to fetch devices: {e}"),
     }
 
-    // IDS/IPS events
     match client.get_ids_events(100).await {
         Ok(events) => {
             if events.is_empty() {
@@ -1093,14 +1038,12 @@ async fn cmd_unifi_scan(
         Err(e) => println!("  Failed to fetch IDS events: {e}"),
     }
 
-    // Summary
     println!("\n--- UniFi Security Audit ---");
     println!("Findings: {}", all_findings.len());
     for f in &all_findings {
         println!("  [{:8}] {}", f.severity, f.title);
     }
 
-    // Export if requested
     if let Some(path) = output {
         let results = rikitikitavi_models::ScanResults {
             findings: all_findings,
@@ -1175,8 +1118,6 @@ fn cmd_config(
             println!("Configuration is valid.");
         }
         cli::ConfigCommand::Show => {
-            // `config show` output is routinely pasted into tickets/chat, and the
-            // help text promises redaction — scrub secrets before display.
             let yaml = serde_yaml_ng::to_string(&redacted_for_display(app_config))?;
             println!("{yaml}");
         }
@@ -1184,9 +1125,7 @@ fn cmd_config(
     Ok(())
 }
 
-/// Return a copy of the config with every secret replaced by a redaction marker,
-/// for safe display via `config show`. `None` fields are left untouched so the
-/// output still shows which credentials are unset.
+/// Copy of the config with each present secret replaced by `***REDACTED***`; `None` stays `None`.
 fn redacted_for_display(
     cfg: &rikitikitavi_models::config::AppConfig,
 ) -> rikitikitavi_models::config::AppConfig {
@@ -1230,7 +1169,6 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
     println!("====================");
     println!();
 
-    // ── Detect or use specified interface ────────────────────────
     let interface = if let Some(ref iface) = args.interface {
         iface.clone()
     } else {
@@ -1239,7 +1177,6 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
     };
     println!("Interface: {interface}");
 
-    // ── Check capability ────────────────────────────────────────
     match wifi_monitor::detect_capability() {
         wifi_monitor::MonitorCapability::Supported { ref phy, .. } => {
             println!("Monitor mode: supported (phy: {phy})");
@@ -1256,7 +1193,6 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         }
     }
 
-    // ── macOS warning ───────────────────────────────────────────
     if cfg!(target_os = "macos") && !args.yes {
         println!();
         println!("WARNING: On macOS, enabling monitor mode will disconnect your WiFi.");
@@ -1272,13 +1208,11 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         }
     }
 
-    // ── Set up monitor mode ─────────────────────────────────────
     println!();
     println!("Setting up monitor mode...");
     let session = wifi_monitor::setup_monitor(&interface)?;
     println!("Monitor interface: {}", session.monitor_interface);
 
-    // ── Run capture ─────────────────────────────────────────────
     let duration = std::time::Duration::from_secs(args.duration);
     println!();
     println!(
@@ -1304,18 +1238,15 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
     );
     println!();
 
-    // ── Parse known BSSIDs ──────────────────────────────────────
     let known_bssids: HashSet<_> = args
         .known_bssids
         .iter()
         .filter_map(|s| rikitikitavi_network::wifi_frames::parse_mac(s))
         .collect();
 
-    // ── Analyse ─────────────────────────────────────────────────
     let findings =
         passive_wifi::analyse_results(&results, &known_bssids, args.home_ssid.as_deref());
 
-    // ── Print report ────────────────────────────────────────────
     if findings.is_empty() {
         println!("No findings.");
     } else {
@@ -1331,7 +1262,6 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         }
     }
 
-    // ── Save to history if requested ────────────────────────────
     if args.save {
         let scan_results = rikitikitavi_models::ScanResults {
             findings,
@@ -1366,7 +1296,6 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
             }
         }
     } else if let Some(ref output) = args.output {
-        // Even without --save, write to output file if specified
         let scan_results = rikitikitavi_models::ScanResults {
             findings,
             risk_score: 0.0,
@@ -1391,7 +1320,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         println!("Results written to {}", output.display());
     }
 
-    // MonitorSession Drop will clean up the monitor interface
+    // `MonitorSession::drop` tears down the monitor interface.
     drop(session);
     println!("Monitor mode cleaned up.");
 
@@ -1414,7 +1343,6 @@ fn cmd_version(verbose: bool) {
 }
 
 fn rustc_version() -> &'static str {
-    // This is set at compile time by the build script or default
     option_env!("RUSTC_VERSION").unwrap_or("unknown")
 }
 

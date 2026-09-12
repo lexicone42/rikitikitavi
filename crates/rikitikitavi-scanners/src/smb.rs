@@ -8,17 +8,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// SMB security scanner — detects `SMBv1`, null sessions, and insecure shares.
-///
-/// Probes port 445 on discovered devices to check for:
-/// - `SMBv1` support (vulnerable to `EternalBlue` / `WannaCry`)
-/// - Null session access (anonymous enumeration)
-/// - `NetBIOS` over TCP (port 139) exposure
-///
-/// To reduce false positives, the scanner:
-/// - Validates the `SMBv1` negotiate response (dialect index, security mode)
-/// - Also performs an `SMBv2` negotiate to distinguish legacy-only vs backward-compat
-/// - Adjusts severity based on whether `SMBv2`+ is also available
+/// SMB scanner on port 445: `SMBv1` negotiate (dialect index validated),
+/// `SMBv2` negotiate, anonymous session setup, and `NetBIOS` (139) reachability.
 pub struct SmbScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -39,16 +30,11 @@ struct SmbV1NegotiateDetails {
     capabilities: u32,
 }
 
-/// SMB negotiate protocol request for `SMBv1`.
-///
-/// This is a minimal SMB1 negotiate packet that only offers the
-/// `NT LM 0.12` dialect. If the server responds with a valid
-/// negotiate response using `SMBv1`, the server supports `SMBv1`.
+/// Build an `SMBv1` NEGOTIATE request offering only the `NT LM 0.12` dialect.
 fn build_smb1_negotiate() -> Vec<u8> {
     // NetBIOS Session header (4 bytes) + SMB Header (32 bytes) + Negotiate payload
     let dialect = b"\x02NT LM 0.12\x00";
 
-    // SMB1 header
     let mut smb_header = vec![
         0xFF, b'S', b'M', b'B', // Protocol ID: \xFFSMB
         0x72, // Command: Negotiate (0x72)
@@ -64,7 +50,6 @@ fn build_smb1_negotiate() -> Vec<u8> {
         0x00, 0x00, // MID
     ];
 
-    // Negotiate request body
     let word_count: u8 = 0;
     #[allow(clippy::cast_possible_truncation)]
     let byte_count = dialect.len() as u16;
@@ -73,7 +58,6 @@ fn build_smb1_negotiate() -> Vec<u8> {
     smb_header.extend_from_slice(&byte_count.to_le_bytes());
     smb_header.extend_from_slice(dialect);
 
-    // NetBIOS session header (length of SMB data)
     #[allow(clippy::cast_possible_truncation)]
     let smb_len = smb_header.len() as u32;
     let mut packet = Vec::with_capacity(4 + smb_header.len());
@@ -135,17 +119,13 @@ struct SmbV1Info {
     extended_security: bool,
 }
 
-/// Classify an SMB negotiate response to determine protocol version.
-/// For `SMBv1` responses, also parse negotiate details to validate the dialect
-/// was actually accepted (reducing false positives from servers that respond
-/// with `SMBv1` framing but reject the offered dialect).
+/// Classify a negotiate response by magic (`\xFFSMB` v1, `\xFESMB` v2+);
+/// v1 responses are parsed for dialect acceptance.
 fn classify_smb_response(response: &[u8]) -> SmbVersion {
-    // Skip NetBIOS header (4 bytes), check SMB magic
     if response.len() < 8 {
         return SmbVersion::Unknown;
     }
 
-    // Check for SMBv1 magic: \xFFSMB
     if response[4] == 0xFF && &response[5..8] == b"SMB" {
         let details = parse_smbv1_negotiate_details(response);
         return SmbVersion::V1(SmbV1Info {
@@ -155,7 +135,6 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
         });
     }
 
-    // Check for SMBv2 magic: \xFESMB
     if response[4] == 0xFE && &response[5..8] == b"SMB" {
         return SmbVersion::V2Plus;
     }
@@ -171,7 +150,6 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
 /// - Byte 39: `SecurityMode` (bit 0 = signing supported, bit 1 = signing required)
 /// - Bytes 44-47: `Capabilities` (LE u32, bit 31 = extended security)
 fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
-    // Default: assume dialect not accepted
     let mut details = SmbV1NegotiateDetails {
         dialect_accepted: false,
         signing_required: false,
@@ -180,43 +158,33 @@ fn parse_smbv1_negotiate_details(response: &[u8]) -> SmbV1NegotiateDetails {
         capabilities: 0,
     };
 
-    // Need at least past the WordCount + DialectIndex (offset 38)
     if response.len() < 39 {
         return details;
     }
 
     let word_count = response[36];
-    // NT LM 0.12 response should have WordCount = 17 (or 13 for older)
     if word_count == 0 {
-        // WordCount 0 means error / no dialect accepted
         return details;
     }
 
-    // DialectIndex at offset 37-38 (little-endian)
     let dialect_index = u16::from_le_bytes([response[37], response[38]]);
-    // 0xFFFF means no dialect was accepted
     details.dialect_accepted = dialect_index != 0xFFFF;
 
-    // SecurityMode at offset 39 (if available)
     if response.len() > 39 {
         details.security_mode = response[39];
-        // Bit 1 (0x02) = signing required
         details.signing_required = details.security_mode & 0x02 != 0;
     }
 
-    // Capabilities at offset 44-47 (if available)
     if response.len() >= 48 {
         details.capabilities =
             u32::from_le_bytes([response[44], response[45], response[46], response[47]]);
-        // Bit 31 (0x8000_0000) = CAP_EXTENDED_SECURITY
         details.extended_security = details.capabilities & 0x8000_0000 != 0;
     }
 
     details
 }
 
-/// Check if a host also supports `SMBv2`+ by sending an `SMBv2` negotiate.
-/// Returns true if the server responds with a valid `SMBv2` negotiate response.
+/// True if the host answers an `SMBv2` NEGOTIATE with `\xFESMB` framing.
 async fn check_smbv2_support(ip: IpAddr, port: u16) -> bool {
     let addr = SocketAddr::new(ip, port);
     let Ok(Ok(mut stream)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
@@ -237,7 +205,6 @@ async fn check_smbv2_support(ip: IpAddr, port: u16) -> bool {
         return false;
     };
 
-    // Valid SMBv2 response: at least 8 bytes, with \xFESMB magic
     n >= 8 && buf[4] == 0xFE && &buf[5..8] == b"SMB"
 }
 
@@ -250,7 +217,7 @@ fn build_smb2_negotiate() -> Vec<u8> {
         0x00, 0x00, // Credit Charge: 0
         0x00, 0x00, 0x00, 0x00, // Status: SUCCESS
         0x00, 0x00, // Command: NEGOTIATE (0x0000)
-        0x00, 0x00, // Credit Request: 1
+        0x00, 0x00, // Credit Request: 0
         0x00, 0x00, 0x00, 0x00, // Flags
         0x00, 0x00, 0x00, 0x00, // Next Command
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Message ID
@@ -261,7 +228,6 @@ fn build_smb2_negotiate() -> Vec<u8> {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Signature (second half)
     ];
 
-    // Negotiate request body
     let negotiate_body = vec![
         0x24, 0x00, // StructureSize: 36
         0x02, 0x00, // DialectCount: 2
@@ -278,7 +244,6 @@ fn build_smb2_negotiate() -> Vec<u8> {
 
     smb2_header.extend_from_slice(&negotiate_body);
 
-    // NetBIOS session header
     #[allow(clippy::cast_possible_truncation)]
     let smb_len = smb2_header.len() as u32;
     let mut packet = Vec::with_capacity(4 + smb2_header.len());
@@ -310,7 +275,6 @@ fn build_smb2_session_setup_anonymous() -> Vec<u8> {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
 
-    // Session Setup request body with empty security buffer (anonymous)
     let session_body = vec![
         0x19, 0x00, // StructureSize: 25
         0x00, // Flags: 0
@@ -324,7 +288,6 @@ fn build_smb2_session_setup_anonymous() -> Vec<u8> {
 
     smb2_header.extend_from_slice(&session_body);
 
-    // NetBIOS session header
     #[allow(clippy::cast_possible_truncation)]
     let smb_len = smb2_header.len() as u32;
     let mut packet = Vec::with_capacity(4 + smb2_header.len());
@@ -348,9 +311,7 @@ struct NullSessionResult {
     session_id: Option<u64>,
 }
 
-/// Attempt an anonymous `SMBv2` session setup (null session).
-/// Returns session result with session ID evidence on success,
-/// or `None` if we couldn't connect or parse the response.
+/// `SMBv2` NEGOTIATE then `SESSION_SETUP` with an empty security buffer (null session).
 async fn check_null_session(ip: IpAddr, port: u16) -> Option<NullSessionResult> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -358,7 +319,6 @@ async fn check_null_session(ip: IpAddr, port: u16) -> Option<NullSessionResult> 
         .ok()?
         .ok()?;
 
-    // Step 1: Send SMBv2 NEGOTIATE
     let negotiate = build_smb2_negotiate();
     tokio::time::timeout(READ_TIMEOUT, stream.write_all(&negotiate))
         .await
@@ -371,12 +331,10 @@ async fn check_null_session(ip: IpAddr, port: u16) -> Option<NullSessionResult> 
         .ok()?
         .ok()?;
 
-    // Verify we got an SMBv2 response
     if n < 12 || buf[4] != 0xFE || &buf[5..8] != b"SMB" {
         return None;
     }
 
-    // Step 2: Send SESSION_SETUP with empty credentials
     let session_setup = build_smb2_session_setup_anonymous();
     tokio::time::timeout(READ_TIMEOUT, stream.write_all(&session_setup))
         .await
@@ -393,11 +351,11 @@ async fn check_null_session(ip: IpAddr, port: u16) -> Option<NullSessionResult> 
         return None;
     }
 
-    // Extract NT Status from bytes 12-15 (little-endian)
+    // NT status: packet bytes 12-15 LE
     let nt_status = u32::from_le_bytes([resp[12], resp[13], resp[14], resp[15]]);
     let allowed = nt_status == STATUS_SUCCESS;
 
-    // Extract Session ID from SMBv2 header bytes 44-51 (packet offset 48-55)
+    // SessionId: header bytes 44-51 = packet bytes 48-55 LE
     let session_id = if allowed && n2 >= 56 {
         Some(u64::from_le_bytes([
             resp[48], resp[49], resp[50], resp[51], resp[52], resp[53], resp[54], resp[55],
@@ -459,9 +417,7 @@ impl Scanner for SmbScanner {
         tracing::info!("running SMB security scan");
         let mut findings = Vec::new();
 
-        // Collect targets with port 445 or 139 open
         let targets: Vec<IpAddr> = if ctx.discovered_devices.is_empty() {
-            // Fallback: probe all ARP cache IPs
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "smb".to_owned(),
@@ -484,20 +440,14 @@ impl Scanner for SmbScanner {
         tracing::info!(target_count = targets.len(), "checking SMB security");
 
         for &ip in &targets {
-            // Check for SMBv1 support
             if let Some(version) = check_smbv1(ip, 445).await {
                 match version {
                     SmbVersion::V1(ref info) => {
                         if info.dialect_accepted {
-                            // Confirmed SMBv1 support — now check if SMBv2+ is also available
                             let also_v2 = check_smbv2_support(ip, 445).await;
                             let details = format_smbv1_details(info);
 
                             if also_v2 {
-                                // Server supports both SMBv1 and SMBv2+.
-                                // SMBv1 is likely enabled for backward compatibility.
-                                // Still a risk (downgrade attacks possible) but lower
-                                // severity than a legacy-only SMBv1 system.
                                 findings.push(
                                     Finding::new(
                                         "smb",
@@ -526,7 +476,6 @@ impl Scanner for SmbScanner {
                                     ),
                                 );
                             } else {
-                                // Server only supports SMBv1 — legacy system, most dangerous
                                 findings.push(
                                     Finding::new(
                                         "smb",
@@ -554,11 +503,8 @@ impl Scanner for SmbScanner {
                                 );
                             }
                         } else {
-                            // Server responded with SMBv1 framing but rejected the dialect.
-                            // This is NOT a confirmed SMBv1 vulnerability — the server
-                            // understood the SMBv1 protocol frame but chose not to accept
-                            // our offered dialect. Commonly seen on modern Windows that
-                            // still processes SMBv1 frames to redirect to SMBv2.
+                            // SMBv1 framing but dialect rejected: modern servers answer
+                            // SMBv1 negotiate only to steer clients to SMBv2.
                             tracing::debug!(
                                 ip = %ip,
                                 "SMBv1 response received but dialect rejected — not vulnerable"
@@ -617,7 +563,6 @@ impl Scanner for SmbScanner {
                 }
             }
 
-            // Check for anonymous/null session access
             if let Some(result) = check_null_session(ip, 445).await
                 && result.allowed
             {
@@ -647,7 +592,6 @@ impl Scanner for SmbScanner {
                 findings.push(finding);
             }
 
-            // Check NetBIOS on port 139
             if check_netbios(ip).await {
                 findings.push(
                     Finding::new(

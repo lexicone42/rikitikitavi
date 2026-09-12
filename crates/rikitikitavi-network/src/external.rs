@@ -4,9 +4,7 @@ use std::time::Duration;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Determine the public/external IP address by querying well-known services.
-///
-/// Tries multiple providers in sequence, returning the first successful result.
+/// Public IP address; providers are tried in sequence, first success wins.
 pub async fn get_public_ip() -> Result<IpAddr> {
     tracing::debug!("detecting public IP");
 
@@ -59,11 +57,9 @@ pub enum NatType {
     Unknown,
 }
 
-/// Detect NAT type using STUN.
-#[allow(clippy::unused_async)] // Will use await once STUN is implemented
+/// Detect NAT type via STUN. Not implemented; always returns `NatType::Unknown`.
+#[allow(clippy::unused_async)]
 pub async fn detect_nat_type() -> Result<NatType> {
-    // STUN-based NAT detection requires UDP sockets and is complex.
-    // Left as a future enhancement.
     tracing::debug!("detecting NAT type (not yet implemented)");
     Ok(NatType::Unknown)
 }

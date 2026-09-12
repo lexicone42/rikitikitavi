@@ -59,12 +59,9 @@ impl ScanDiff {
     }
 }
 
-/// Diff two scan results using fingerprint-based comparison.
-///
-/// Findings are matched by `(scanner, title, affected_ip, affected_port)`.
-/// Devices are matched by MAC address (preferred) or IP.
+/// Diffs two scan results. Findings match by [`FindingFingerprint`]; devices by
+/// [`Device::fingerprint`] (MAC, else IP). Output order is unspecified.
 pub fn diff_scan_results(old: &ScanResults, new: &ScanResults) -> ScanDiff {
-    // ── Finding diff ────────────────────────────────────────────────
     let old_map: HashMap<FindingFingerprint, &Finding> =
         old.findings.iter().map(|f| (f.fingerprint(), f)).collect();
 
@@ -97,7 +94,6 @@ pub fn diff_scan_results(old: &ScanResults, new: &ScanResults) -> ScanDiff {
         .map(|(_, f)| (*f).clone())
         .collect();
 
-    // ── Device diff ─────────────────────────────────────────────────
     let old_device_map: HashMap<_, &Device> =
         old.devices.iter().map(|d| (d.fingerprint(), d)).collect();
 
@@ -373,12 +369,11 @@ mod tests {
             let new = make_results(new_findings.clone(), vec![]);
             let diff = diff_scan_results(&old, &new);
 
-            // Every new finding is accounted for in some category
+            // Each distinct new fingerprint lands in exactly one category.
             let accounted = diff.new_findings.len()
                 + diff.unchanged_findings.len()
                 + diff.severity_changes.len();
 
-            // The number of unique fingerprints in new determines the total
             let unique_new: std::collections::HashSet<_> = new_findings
                 .iter()
                 .map(rikitikitavi_models::Finding::fingerprint)

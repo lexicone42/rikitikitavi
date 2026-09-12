@@ -4,11 +4,8 @@ use rikitikitavi_models::finding::Finding;
 use rikitikitavi_core::Severity;
 use uuid::Uuid;
 
-/// Generate attack paths by chaining related findings into plausible attack
-/// scenarios an adversary could follow.
-///
-/// Groups findings by device IP and identifies multi-step attack chains
-/// such as credential exploitation → lateral movement → data exfiltration.
+/// Builds attack paths from four fixed finding patterns (see inline labels).
+/// Paths 1–3 match findings network-wide; path 4 is per device IP.
 #[allow(clippy::too_many_lines)]
 pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
     use std::collections::HashMap;
@@ -16,7 +13,6 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
     tracing::info!(findings_count = findings.len(), "generating attack paths");
     let mut paths = Vec::new();
 
-    // Group findings by affected IP
     let mut by_ip: HashMap<std::net::IpAddr, Vec<&Finding>> = HashMap::new();
     for f in findings {
         if let Some(ip) = f.affected_ip {
@@ -24,7 +20,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
         }
     }
 
-    // ── Path 1: Default Credentials → Network Compromise ────────────
+    // Path 1: critical credentials finding + any other High+ finding.
     let critical_creds = findings
         .iter()
         .find(|f| f.severity == Severity::Critical && f.scanner == "credentials");
@@ -63,7 +59,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
         });
     }
 
-    // ── Path 2: Telnet/FTP → Default Credentials → Lateral Movement ─
+    // Path 2: Telnet (23) + SMB (445), optionally preceded by anonymous FTP.
     let telnet = findings
         .iter()
         .find(|f| f.scanner == "ports" && f.affected_port == Some(23));
@@ -104,7 +100,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
             },
         ];
 
-        // If there's also anonymous FTP, prepend it
+        // Prepend anonymous FTP step if present.
         if let Some(ftp) = findings.iter().find(|f| {
             f.scanner == "credentials" && f.title.to_lowercase().contains("anonymous ftp")
         }) {
@@ -120,7 +116,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
                 },
             );
             step_findings.push(ftp.id);
-            // Re-number orders
+            // Renumber steps from 1.
             for (i, step) in steps.iter_mut().enumerate() {
                 step.order = u32::try_from(i + 1).unwrap_or(0);
             }
@@ -138,7 +134,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
         });
     }
 
-    // ── Path 3: Self-signed cert → credential interception ──────────
+    // Path 3: self-signed cert + admin-interface finding.
     let self_signed = findings
         .iter()
         .find(|f| f.scanner == "ssl" && f.title.to_lowercase().contains("self-signed"));
@@ -180,7 +176,7 @@ pub fn generate_attack_paths(findings: &[Finding]) -> Vec<AttackPath> {
         });
     }
 
-    // ── Path 4: High-value targets (devices with 3+ findings) ───────
+    // Path 4: any device with 3+ Medium+ findings.
     for (ip, ip_findings) in &by_ip {
         let high_plus: Vec<&&Finding> = ip_findings
             .iter()

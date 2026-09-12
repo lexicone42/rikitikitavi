@@ -18,8 +18,7 @@ pub enum Screen {
     DeviceDetail,
 }
 
-/// Clickable regions recorded during the last render pass.
-/// Used by the mouse handler to map click coordinates to actions.
+/// Clickable regions recorded by the last render pass, consumed by `handle_mouse`.
 #[derive(Debug, Default)]
 pub struct HitRegions {
     /// Footer tab buttons: (area, screen to switch to).
@@ -92,19 +91,19 @@ pub struct App {
     pub scan_status: String,
     pub should_quit: bool,
     pub status_message: Option<String>,
-    /// Clickable regions from the last render — used by `handle_mouse`.
+    /// Clickable regions from the last render.
     pub hit_regions: HitRegions,
     /// Severity filter for findings display.
     pub severity_filter: SeverityFilter,
-    /// Stateful table state for findings list (tracks scroll offset + selection).
+    /// Findings table scroll offset + selection.
     pub findings_table_state: TableState,
-    /// Stateful table state for device lists (dashboard / network map).
+    /// Device list scroll offset + selection (dashboard / network map).
     pub devices_table_state: TableState,
-    /// Animation tick counter — incremented each event loop iteration (~100ms).
+    /// Incremented each event-loop iteration (~100ms).
     pub tick: u64,
     /// Diff against previous scan (set after comparison).
     pub scan_diff: Option<ScanDiff>,
-    /// Pre-computed diff status for each finding fingerprint (O(1) lookup).
+    /// Diff status per finding fingerprint, built by `set_scan_diff`.
     diff_status_cache: HashMap<FindingFingerprint, DiffStatus>,
 }
 
@@ -136,8 +135,7 @@ impl App {
         }
     }
 
-    /// Handle keyboard input and update state.
-    /// Returns true if a re-scan was requested.
+    /// Handle a key; returns true if a re-scan was requested.
     pub fn handle_key(&mut self, key: crossterm::event::KeyCode) -> bool {
         use crossterm::event::KeyCode;
 
@@ -159,7 +157,6 @@ impl App {
                     SeverityFilter::ActionableOnly => SeverityFilter::All,
                     SeverityFilter::All => SeverityFilter::ActionableOnly,
                 };
-                // Reset selection when filter changes
                 self.selected_finding_index = 0;
                 self.findings_table_state.select(Some(0));
                 *self.findings_table_state.offset_mut() = 0;
@@ -189,8 +186,7 @@ impl App {
         false
     }
 
-    /// Handle mouse input and update state.
-    /// Returns true if a re-scan was requested (e.g. clicking a "Scan" button).
+    /// Handle a mouse event; returns true if a re-scan was requested.
     pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -199,7 +195,6 @@ impl App {
                 let col = event.column;
                 let row = event.row;
 
-                // Check footer tab clicks
                 for &(area, screen) in &self.hit_regions.footer_tabs {
                     if area.contains((col, row).into()) {
                         self.screen = screen;
@@ -207,7 +202,6 @@ impl App {
                     }
                 }
 
-                // Check list area clicks (select row)
                 if let Some(list_area) = self.hit_regions.list_area
                     && list_area.contains((col, row).into())
                 {
@@ -218,7 +212,7 @@ impl App {
 
                     match self.screen {
                         Screen::Findings => {
-                            // Account for scroll offset — visible row 0 = offset
+                            // Visible row 0 is the table's scroll offset.
                             let offset = self.findings_table_state.offset();
                             let idx = offset + visual_row;
                             let max = self.filtered_findings().len().saturating_sub(1);
@@ -242,12 +236,11 @@ impl App {
                 }
             }
 
-            // Double-click enters detail
+            // Right click enters detail
             MouseEventKind::Down(MouseButton::Right) => {
                 self.enter_detail();
             }
 
-            // Scroll wheel = move selection
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
 
@@ -256,7 +249,7 @@ impl App {
         false
     }
 
-    /// Cycle to the next screen tab (Left arrow / Shift+Tab).
+    /// Previous screen tab (Left arrow / Shift+Tab). `DeviceDetail` does not cycle.
     const fn prev_screen(&mut self) {
         self.screen = match self.screen {
             Screen::Dashboard => Screen::TopActions,
@@ -264,11 +257,11 @@ impl App {
             Screen::Findings => Screen::NetworkMap,
             Screen::AttackPaths => Screen::Findings,
             Screen::TopActions => Screen::AttackPaths,
-            Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
+            Screen::DeviceDetail => Screen::DeviceDetail,
         };
     }
 
-    /// Cycle to the next screen tab (Right arrow / Tab).
+    /// Next screen tab (Right arrow / Tab). `DeviceDetail` does not cycle.
     const fn next_screen(&mut self) {
         self.screen = match self.screen {
             Screen::Dashboard => Screen::NetworkMap,
@@ -276,7 +269,7 @@ impl App {
             Screen::Findings => Screen::AttackPaths,
             Screen::AttackPaths => Screen::TopActions,
             Screen::TopActions => Screen::Dashboard,
-            Screen::DeviceDetail => Screen::DeviceDetail, // Don't cycle out of detail
+            Screen::DeviceDetail => Screen::DeviceDetail,
         };
     }
 
@@ -367,13 +360,12 @@ impl App {
         }
     }
 
-    /// Get current findings (convenience accessor).
+    /// All findings, or empty when no results.
     pub fn findings(&self) -> &[Finding] {
         self.results.as_ref().map_or(&[], |r| r.findings.as_slice())
     }
 
-    /// Get findings filtered and sorted by severity (Critical first).
-    /// In `ActionableOnly` mode, excludes Low and Info findings.
+    /// Findings after the severity filter, sorted Critical first.
     pub fn filtered_findings(&self) -> Vec<&Finding> {
         let mut filtered: Vec<&Finding> = self
             .findings()
@@ -388,17 +380,16 @@ impl App {
                 SeverityFilter::All => true,
             })
             .collect();
-        // Sort by severity descending (Critical first since Ord is Info < ... < Critical)
         filtered.sort_by_key(|f| std::cmp::Reverse(f.severity));
         filtered
     }
 
-    /// Get current devices (convenience accessor).
+    /// All devices, or empty when no results.
     pub fn devices(&self) -> &[Device] {
         self.results.as_ref().map_or(&[], |r| r.devices.as_slice())
     }
 
-    /// Set the scan diff and pre-compute per-finding status for O(1) render lookups.
+    /// Store the diff and rebuild the per-finding status cache.
     pub fn set_scan_diff(&mut self, diff: ScanDiff) {
         let mut cache = HashMap::new();
         for f in &diff.new_findings {
@@ -414,7 +405,7 @@ impl App {
         self.scan_diff = Some(diff);
     }
 
-    /// Get the diff status for a specific finding (O(1) cached lookup).
+    /// Diff status of `finding`, if a diff is loaded and the finding appears in it.
     pub fn finding_diff_status(&self, finding: &Finding) -> Option<DiffStatus> {
         self.diff_status_cache.get(&finding.fingerprint()).copied()
     }

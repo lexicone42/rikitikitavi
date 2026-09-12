@@ -22,8 +22,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let has_diff = app.scan_diff.is_some();
 
-    // Build all owned data from filtered findings, then drop the borrow.
-    // This lets us mutably borrow `app.findings_table_state` for the stateful render.
+    // Build owned data first so `app.findings_table_state` can be borrowed mutably below.
     let (rows, scroll_info, detail_text) = {
         let filtered = app.filtered_findings();
         let filtered_count = filtered.len();
@@ -63,7 +62,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         .add_modifier(Modifier::BOLD),
                 ))];
 
-                // DIFF badge column (only when comparison data is available)
                 if has_diff {
                     let diff_cell = match app.finding_diff_status(f) {
                         Some(DiffStatus::New) => Span::styled(
@@ -107,7 +105,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             })
             .collect();
 
-        // Build detail pane content (all owned Strings, no borrows retained)
         let detail_text = filtered.get(app.selected_finding_index).map_or_else(
             || {
                 vec![
@@ -144,7 +141,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     )),
                 ];
 
-                // Metadata line: CWE + Device + Port
                 let mut meta_spans = Vec::new();
                 if let Some(ip) = f.affected_ip {
                     meta_spans.push(Span::styled(
@@ -180,7 +176,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     lines.push(Line::from(meta_spans));
                 }
 
-                // Diff status in detail pane
                 if has_diff {
                     let status_text = match app.finding_diff_status(f) {
                         Some(DiffStatus::New) => Some(("Status: New finding", palette.accent)),
@@ -200,7 +195,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     }
                 }
 
-                // Show evidence if present
                 if let Some(evidence) = &f.evidence {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
@@ -210,7 +204,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     )));
                 }
 
-                // Show remediation if present
                 if let Some(remediation) = &f.remediation {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
@@ -244,7 +237,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
         (rows, scroll_info, detail_text)
     };
-    // `filtered` is now dropped — safe to mutably borrow app.findings_table_state
 
     let mut header_cells = vec![Line::from(Span::styled("SEV", palette.header_style))];
     let mut widths: Vec<Constraint> = vec![Constraint::Length(8)];
@@ -283,12 +275,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .border_type(ratatui::widgets::BorderType::Rounded),
         );
     let table_area = chunks[0];
-    // Sync TableState selection before render so the widget auto-scrolls
+    // Selection must be set before render for the table to auto-scroll.
     app.findings_table_state
         .select(Some(app.selected_finding_index));
     frame.render_stateful_widget(table, table_area, &mut app.findings_table_state);
 
-    // Detail pane for selected finding
     let detail = Paragraph::new(detail_text).block(
         Block::default()
             .title(Span::styled(
@@ -303,7 +294,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(detail, chunks[1]);
 
-    // Footer with filter toggle hint
     let filter_hint = match app.severity_filter {
         SeverityFilter::ActionableOnly => "[L]ow/Info: hidden",
         SeverityFilter::All => "[L]ow/Info: shown",
@@ -337,8 +327,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(footer, chunks[2]);
 
-    // Record the table as a clickable list area (after borrows are dropped)
-    // Border (1) + header row (1) = 2 rows before data
+    // Rows above the first data row: border (1) + header (1).
     app.hit_regions.list_area = Some(table_area);
     app.hit_regions.list_header_offset = 2;
 }

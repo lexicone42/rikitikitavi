@@ -9,8 +9,7 @@ use std::net::IpAddr;
 
 use crate::Scanner;
 
-/// DNS security scanner — checks DNS configuration, DNSSEC validation,
-/// and common misconfigurations.
+/// DNS security scanner — DNS configuration, DNSSEC validation, and email records.
 pub struct DnsScanner;
 
 /// Parse `/etc/resolv.conf` to extract configured nameservers.
@@ -125,8 +124,8 @@ fn read_nameservers() -> Vec<IpAddr> {
 
 /// Build a Tokio DNS resolver targeting the given nameservers.
 ///
-/// Uses a 5-second timeout, a single attempt, and leaves DNSSEC validation
-/// disabled locally so scanners can observe what the upstream resolver does.
+/// 5-second timeout, one attempt, local DNSSEC validation off (to observe the
+/// upstream resolver's behaviour).
 fn build_resolver(nameservers: &[IpAddr]) -> Option<TokioResolver> {
     let servers = nameservers
         .iter()
@@ -158,8 +157,6 @@ async fn check_dnssec_validation(nameservers: &[IpAddr]) -> Option<bool> {
         return None;
     }
 
-    // Build a resolver using the system's nameservers. DNSSEC validation stays
-    // disabled locally so we can observe what the upstream resolver does.
     let resolver = build_resolver(nameservers)?;
     resolver.lookup_ip("dnssec-failed.org.").await.map_or(
         // Lookup failed (SERVFAIL) = DNSSEC validation IS enforced
@@ -257,12 +254,10 @@ async fn check_dns_cross_validation(nameservers: &[IpAddr], findings: &mut Vec<F
         return;
     }
 
-    // Resolve using configured DNS
     let Some(local_resolver) = build_resolver(nameservers) else {
         return;
     };
 
-    // Resolve using Cloudflare 1.1.1.1
     let Some(cf_resolver) = build_resolver(&[cloudflare]) else {
         return;
     };
@@ -312,7 +307,7 @@ pub fn classify_spf(record: &str) -> Option<Finding> {
         return None;
     }
 
-    // SPF with "+all" allows anyone to send mail — very bad
+    // "+all" permits any IP to send mail for the domain.
     if lower.contains("+all") {
         return Some(
             Finding::new(
@@ -329,7 +324,7 @@ pub fn classify_spf(record: &str) -> Option<Finding> {
         );
     }
 
-    // "~all" (softfail) is weak but common
+    // "~all" is softfail.
     if lower.contains("~all") {
         return Some(Finding::new(
             "dns",
@@ -342,7 +337,7 @@ pub fn classify_spf(record: &str) -> Option<Finding> {
         ));
     }
 
-    // "-all" is good
+    // "-all" (hardfail).
     Some(Finding::new(
         "dns",
         "SPF record configured",

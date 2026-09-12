@@ -1,22 +1,11 @@
 //! Container / orchestration management-plane exposure scanner.
 //!
-//! The homelab segment's highest-value exposures are unauthenticated
-//! container and orchestration control planes: an open Docker Engine API or
-//! kubelet is equivalent to unauthenticated root on the host — a top
-//! cryptojacking and host-takeover vector. This scanner performs pure,
-//! non-destructive **detection** probes (read-only `GET`s that send no
-//! credentials) against hosts that already have the relevant management port
-//! open. It never brute-forces credentials and never mutates state.
-//!
-//! Detected surfaces:
-//! - Docker Engine API on **2375** (plaintext HTTP): `GET /version`. A Docker
-//!   version JSON body proves the API answers without authentication.
-//! - Docker on **2376** (TLS): meant to use mutual-TLS client-cert auth. We do
-//!   not implement mTLS; we only note that a TLS Docker endpoint exists.
-//! - Kubelet on **10250** (HTTPS): `GET /pods`. A `PodList` response proves the
-//!   kubelet read API answers anonymously.
-//! - Kubernetes API server on **6443** (HTTPS): anonymous `GET /version`. A
-//!   version JSON body proves the API server answers unauthenticated requests.
+//! Credential-free read-only `GET` probes against hosts with the relevant port
+//! open. Never brute-forces credentials or mutates state. Detected surfaces:
+//! - Docker Engine API on 2375 (HTTP): `GET /version` returning a version body.
+//! - Docker on 2376 (TLS): mTLS is not implemented; only notes the endpoint exists.
+//! - Kubelet on 10250 (HTTPS): `GET /pods` returning a `PodList`.
+//! - Kubernetes API server on 6443 (HTTPS): anonymous `GET /version`.
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
@@ -34,8 +23,7 @@ pub struct MgmtPlaneScanner;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Cap on management-API response bodies. These endpoints return small JSON
-/// documents; 256 KiB is ample while bounding a hostile or broken device.
+/// Cap on management-API response bodies.
 const BODY_CAP: usize = 256 * 1024;
 
 /// Management-plane ports and their service labels.
@@ -68,11 +56,8 @@ struct K8sVersion {
 
 /// Extract a string-valued JSON field (`"key":"value"`) from a body.
 ///
-/// Deliberately minimal: it scans for the first `"key"` token, then the next
-/// `:` and the quoted value that follows. It does not handle escaped quotes
-/// inside values, which is fine for the short, well-formed identifier fields
-/// (versions, OS names, architectures) we read from these APIs. Returns a
-/// borrow into `body`.
+/// Minimal: finds the first `"key"`, then the next `:` and quoted value. Does not
+/// handle escaped quotes inside values. Returns a borrow into `body`.
 fn json_str_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{key}\"");
     let key_idx = body.find(&needle)?;
@@ -86,9 +71,7 @@ fn json_str_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 
 /// Classify a Docker Engine `GET /version` response body.
 ///
-/// A genuine Docker `/version` document carries both an `ApiVersion` and an
-/// `Os` field. Presence of both — returned to an unauthenticated request —
-/// demonstrates the Engine API is exposed without authentication.
+/// Requires both `ApiVersion` and `Os` fields to identify a Docker document.
 fn classify_docker_version(body: &str) -> Option<DockerVersion> {
     if !(body.contains("\"ApiVersion\"") && body.contains("\"Os\"")) {
         return None;
@@ -101,10 +84,9 @@ fn classify_docker_version(body: &str) -> Option<DockerVersion> {
     })
 }
 
-/// Classify a Kubernetes API server / kubelet `GET /version` response body.
+/// Classify a Kubernetes `GET /version` response body.
 ///
-/// The `/version` document reports `major`, `minor`, and a `gitVersion`. We
-/// require `gitVersion` plus `major` to avoid matching unrelated JSON.
+/// Requires both `gitVersion` and `major` to avoid matching unrelated JSON.
 fn classify_k8s_version(body: &str) -> Option<K8sVersion> {
     if !(body.contains("\"gitVersion\"") && body.contains("\"major\"")) {
         return None;
@@ -117,12 +99,7 @@ fn classify_k8s_version(body: &str) -> Option<K8sVersion> {
     })
 }
 
-/// Classify a kubelet `GET /pods` response body.
-///
-/// The kubelet read API returns a `PodList` object (`kind: "PodList"`) with an
-/// `items` array. Receiving it from an unauthenticated request demonstrates the
-/// kubelet API is anonymously accessible — exposing running workloads, mounted
-/// secrets paths, and (through other verbs) command execution in containers.
+/// Classify a kubelet `GET /pods` response body as a `PodList`.
 fn classify_kubelet_pods(body: &str) -> bool {
     body.contains("\"PodList\"") || (body.contains("\"kind\"") && body.contains("\"items\""))
 }
@@ -131,12 +108,8 @@ fn classify_kubelet_pods(body: &str) -> bool {
 
 /// Build a reqwest client for management-plane detection probes.
 ///
-/// `danger_accept_invalid_certs(true)` is an **intentional** TLS-verification
-/// bypass: kubelet and the Kubernetes API server present self-signed or
-/// cluster-CA certificates that a scanner has no trust anchor for, and we are
-/// only issuing credential-free read GETs for detection — exactly like the
-/// `UniFi` scanner's unauthenticated probe. No secret is ever transmitted, so the
-/// lack of certificate validation carries no confidentiality risk here.
+/// TLS validation intentionally disabled: unauthenticated detection GETs only,
+/// no credentials sent; kubelet/API-server present untrusted self-signed certs.
 fn detection_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -321,9 +294,7 @@ async fn check_docker_tls(ip: IpAddr, port: u16, out: &mut Vec<Finding>) {
     if !tcp_reachable(ip, port).await {
         return;
     }
-    // We do not perform the mutual-TLS handshake, so we cannot confirm whether
-    // client-certificate auth is actually enforced — hence Probable, and only
-    // informational severity.
+    // No mTLS handshake is performed, so auth enforcement is unconfirmed (Probable).
     out.push(
         Finding::new(
             "mgmt-plane",
@@ -447,8 +418,7 @@ impl Scanner for MgmtPlaneScanner {
         tracing::info!("running management-plane exposure scan");
         let mut findings = Vec::new();
 
-        // These probes actively connect to control-plane APIs; skip in the
-        // lightest (Passive) intensity, mirroring the database scanner.
+        // Skip below Active intensity — these actively connect to control-plane APIs.
         if !ctx
             .config
             .intensity
@@ -458,9 +428,8 @@ impl Scanner for MgmtPlaneScanner {
             return Ok(findings);
         }
 
-        // Target only hosts with a relevant management port open. Prefer
-        // Phase 1 discovered devices; fall back to the ARP cache (probing all
-        // management ports) when discovery has not run.
+        // Target hosts with a management port open; fall back to the ARP cache
+        // (probing all management ports) when discovery is empty.
         let targets: Vec<(IpAddr, Vec<u16>)> = if ctx.discovered_devices.is_empty() {
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {

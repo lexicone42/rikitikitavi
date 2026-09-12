@@ -52,7 +52,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         for action in actions {
             let sev_color = palette.severity_color(action.severity);
 
-            // ── Action header ────────────────────────────────────
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
@@ -69,7 +68,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 ),
             ]));
 
-            // ── Stats line ───────────────────────────────────────
             let effort_str = action
                 .effort
                 .as_deref()
@@ -89,7 +87,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 ),
             ]));
 
-            // ── Remediation steps ────────────────────────────────
             if !action.steps.is_empty() {
                 for (i, step) in action.steps.iter().enumerate() {
                     let connector = if i == action.steps.len() - 1 {

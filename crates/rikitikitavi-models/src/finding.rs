@@ -11,11 +11,8 @@ const fn default_confidence() -> Confidence {
     Confidence::Probable
 }
 
-/// Semantic identity of a finding — same problem on same target.
-///
-/// Uses `(scanner, title, affected_ip, affected_port)` to identify "the same
-/// issue" across scan runs. Deliberately excludes description, severity, and
-/// service — those can change without it being a "different" finding.
+/// Finding identity across scan runs: hash of `(scanner, title, affected_ip, affected_port)`.
+/// Description, severity and service are excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FindingFingerprint(u64);
 
@@ -28,8 +25,7 @@ impl FindingFingerprint {
 }
 
 impl std::fmt::Display for FindingFingerprint {
-    /// Renders as fixed-width lowercase hex, e.g. `01a2b3c4d5e6f708`, so it can
-    /// be copied into a suppression/baseline file.
+    /// 16-char lowercase hex, e.g. `01a2b3c4d5e6f708` (baseline/suppression file form).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x}", self.0)
     }
@@ -38,8 +34,7 @@ impl std::fmt::Display for FindingFingerprint {
 impl std::str::FromStr for FindingFingerprint {
     type Err = std::num::ParseIntError;
 
-    /// Parses the hex form produced by [`Display`](std::fmt::Display), with an
-    /// optional `0x` prefix.
+    /// Parses the [`Display`](std::fmt::Display) hex form; `0x` prefix optional.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         let hex = s.strip_prefix("0x").unwrap_or(s);
@@ -60,9 +55,7 @@ pub struct Finding {
     pub description: String,
     /// Severity level.
     pub severity: Severity,
-    /// How strongly the finding is evidenced (demonstrated vs inferred).
-    /// Defaults to `Probable`; scanners set `Confirmed` when they actually
-    /// demonstrate the issue and `Inferred` for pure heuristics.
+    /// Evidence strength; defaults to `Probable`.
     #[serde(default = "default_confidence")]
     pub confidence: Confidence,
     /// Affected device IP (if applicable).
@@ -81,12 +74,10 @@ pub struct Finding {
     pub cwe_id: Option<String>,
     /// CVE IDs if applicable.
     pub cve_ids: Vec<String>,
-    /// Whether any associated CVE is in the CISA Known Exploited Vulnerabilities
-    /// catalog — i.e. actively exploited in the wild. Set during enrichment.
+    /// Any CVE is in the CISA KEV catalog. Set during enrichment.
     #[serde(default)]
     pub is_kev: bool,
-    /// EPSS probability (0.0–1.0) that any associated CVE will be exploited in
-    /// the next 30 days, if known. Set during enrichment.
+    /// Highest EPSS 30-day exploitation probability (0.0–1.0) among the CVEs. Set during enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epss: Option<f64>,
     /// External references.
@@ -207,8 +198,7 @@ impl Finding {
         self
     }
 
-    /// Compute a fingerprint that identifies "the same problem on the same
-    /// target" across scan runs.
+    /// Hash of `(scanner, title, affected_ip, affected_port)`.
     pub fn fingerprint(&self) -> FindingFingerprint {
         let mut hasher = DefaultHasher::new();
         self.scanner.hash(&mut hasher);
@@ -225,8 +215,7 @@ impl Finding {
         if s.len() <= 256 {
             self.evidence = Some(s);
         } else {
-            // Find the last char boundary at or before byte 256 (MSRV-safe
-            // alternative to `str::floor_char_boundary`).
+            // Last char boundary at or before byte 256 (`floor_char_boundary` is above MSRV).
             let mut end = 256;
             while end > 0 && !s.is_char_boundary(end) {
                 end -= 1;
@@ -295,7 +284,7 @@ mod tests {
             FindingFingerprint::from_str(&format!("0x{hex}")).unwrap(),
             fp
         );
-        // Same identity fields => same fingerprint => baseline stays stable.
+        // Deterministic for the same identity fields.
         assert_eq!(f.fingerprint(), f.fingerprint());
     }
 
@@ -372,8 +361,7 @@ mod tests {
             .with_ip("10.0.0.1".parse().unwrap())
             .with_port(22)
             .with_service("SSH");
-        // Same (scanner, title, ip, port) → same fingerprint despite
-        // different description, severity, and service.
+        // Description, severity and service do not affect the fingerprint.
         assert_eq!(f1.fingerprint(), f2.fingerprint());
     }
 

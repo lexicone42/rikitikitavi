@@ -1,14 +1,6 @@
-//! EPSS (Exploit Prediction Scoring System) lookup.
-//!
-//! EPSS gives the probability (0.0–1.0) that a CVE will be exploited in the next
-//! 30 days. Combined with the embedded CISA KEV catalog (which says what *is*
-//! being exploited now), it lets the report rank a wall of CVEs by real-world
-//! exploitation likelihood rather than theoretical CVSS.
-//!
-//! The scores change daily and cover ~280k CVEs, so unlike KEV they are not
-//! embedded — they are fetched on demand from FIRST.org's free, keyless API for
-//! only the handful of CVEs a scan actually turned up. The lookup is
-//! best-effort: it never fails a scan, returning an empty map when offline.
+//! EPSS (Exploit Prediction Scoring System) lookup via the FIRST.org API.
+//! Scores are fetched on demand for the CVEs a scan produced, not embedded.
+//! Best-effort: any failure yields an empty map.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -30,11 +22,8 @@ struct EpssEntry {
     epss: String,
 }
 
-/// Look up EPSS exploitation-probability scores for a set of CVE IDs.
-///
-/// Returns a map of CVE ID → probability in `0.0..=1.0`. Best-effort: an empty
-/// map is returned when the list is empty, the network is unavailable, or the
-/// response cannot be parsed — a scan must keep working offline.
+/// EPSS scores for `cves` as CVE ID → probability in `0.0..=1.0`.
+/// Returns an empty map on empty input, network failure, or parse failure.
 pub async fn fetch_epss_scores(cves: &[String]) -> HashMap<String, f64> {
     let mut out = HashMap::new();
     if cves.is_empty() {

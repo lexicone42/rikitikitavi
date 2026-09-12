@@ -22,9 +22,7 @@ pub struct UpnpDeviceInfo {
     pub device_type: Option<String>,
 }
 
-/// Extract the text content between simple XML tags (non-recursive).
-///
-/// Looks for `<tag>content</tag>` and returns `content`.
+/// Text between the first `<tag>` and following `</tag>` (non-recursive).
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -67,10 +65,8 @@ fn upnp_type_to_device_type(urn: &str) -> DeviceType {
     }
 }
 
-/// Override `UPnP`-derived device type when the manufacturer is a known
-/// vendor whose primary product category differs from their `UPnP` role.
-/// For example, Synology NAS devices advertise as `MediaServer` (DLNA)
-/// but should be classified as NAS.
+/// Manufacturer/model overrides for the `UPnP` device type (e.g. Synology
+/// advertises `MediaServer` but is classified NAS).
 fn manufacturer_override_device_type(
     manufacturer: &str,
     model: &str,
@@ -90,7 +86,6 @@ fn manufacturer_override_device_type(
         return DeviceType::IoT;
     }
 
-    // Model-based classification when UPnP type is ambiguous
     if upnp_type == DeviceType::Unknown {
         let model_lower = model.to_lowercase();
         if model_lower.contains("tv") || model_lower.contains("android tv") {
@@ -109,7 +104,6 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
     let manufacturer = info.manufacturer.as_deref().unwrap_or("unknown");
     let model = info.model_name.as_deref().unwrap_or("unknown");
 
-    // Detailed device info finding
     let mut desc_parts = vec![format!("UPnP device at {ip} ({location})")];
     desc_parts.push(format!(
         "Name: {name}, Manufacturer: {manufacturer}, Model: {model}"
@@ -153,7 +147,6 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
         .with_device_hint(hint),
     );
 
-    // Serial number exposure is a privacy concern
     if info.serial_number.is_some() {
         findings.push(
             Finding::new(
@@ -178,6 +171,7 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
 
 /// Fetch a `UPnP` device description XML from a LOCATION URL.
 async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
+    // TLS validation disabled: unauthenticated probe, no credentials sent.
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
@@ -185,11 +179,10 @@ async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
         .ok()?;
 
     let resp = client.get(location).send().await.ok()?;
-    // Cap the body: UPnP device descriptions come from untrusted LAN devices.
+    // Body read is capped (untrusted device).
     let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
     let info = parse_upnp_device_xml(&body);
 
-    // Only return if we actually got useful data
     if info.friendly_name.is_some() || info.manufacturer.is_some() || info.model_name.is_some() {
         Some(info)
     } else {
@@ -197,16 +190,14 @@ async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
     }
 }
 
-/// mDNS/SSDP discovery scanner — discovers services advertised via
-/// multicast DNS and UPnP/SSDP on the local network.
+/// mDNS/SSDP discovery scanner; fetches `UPnP` device descriptions in Active mode.
 pub struct MdnsScanner;
 
 /// SSDP multicast address and port.
 const SSDP_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(239, 255, 255, 250), 1900);
 
-/// Parse an SSDP M-SEARCH response to extract service info.
+/// Parse an SSDP M-SEARCH response (`LOCATION`, `SERVER`, `ST` headers).
 ///
-/// Typical SSDP response:
 /// ```text
 /// HTTP/1.1 200 OK
 /// CACHE-CONTROL: max-age=1800
@@ -231,7 +222,6 @@ pub fn parse_ssdp_response(response: &str) -> Option<SsdpService> {
         }
     }
 
-    // Need at least a location or server to be useful
     if location.is_none() && server.is_none() {
         return None;
     }
@@ -256,7 +246,6 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     let server_info = service.server.as_deref().unwrap_or("unknown");
     let svc_type = service.service_type.as_deref().unwrap_or("unknown");
 
-    // UPnP on a router is particularly risky
     let severity = if svc_type.contains("InternetGatewayDevice") {
         Severity::Medium
     } else {
@@ -302,7 +291,6 @@ async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
         }
     };
 
-    // Set receive timeout
     let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
 
     let search = "M-SEARCH * HTTP/1.1\r\n\
@@ -318,7 +306,6 @@ async fn discover_ssdp() -> Vec<(IpAddr, SsdpService)> {
         return results;
     }
 
-    // Collect responses for a few seconds
     let mut buf = [0u8; 2048];
     while let Ok((n, addr)) = socket.recv_from(&mut buf) {
         let response = String::from_utf8_lossy(&buf[..n]);
@@ -339,21 +326,18 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
     let ip = service.ip;
     let svc_type = &service.service_type;
 
-    // Build a display name
     let display_name = if service.name.is_empty() {
         service.hostname.clone()
     } else {
         service.name.clone()
     };
 
-    // TXT metadata summary
     let txt_summary = if service.txt_records.is_empty() {
         String::new()
     } else {
         format!(" TXT: [{}]", service.txt_records.join(", "))
     };
 
-    // Base finding for every discovered service
     let base_desc = format!(
         "mDNS service '{display_name}' of type {svc_type} on {ip}:{port} \
          (hostname: {hostname}).{txt_summary} \
@@ -363,14 +347,12 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         hostname = service.hostname,
     );
 
-    // Hostname for building per-branch hints (avoids cloning)
     let hint_hostname: Option<&str> = if service.hostname.is_empty() {
         None
     } else {
         Some(&service.hostname)
     };
 
-    // Classify by service type
     if svc_type.contains("_ssh._tcp") {
         let mut finding = Finding::new(
             "mdns",
@@ -547,7 +529,6 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else {
-        // Generic mDNS service
         let mut finding = Finding::new(
             "mdns",
             &format!(
@@ -591,11 +572,9 @@ impl Scanner for MdnsScanner {
         tracing::info!("running mDNS/SSDP discovery scan");
         let mut findings = Vec::new();
 
-        // SSDP discovery
         let ssdp_results = discover_ssdp().await;
         tracing::info!(ssdp_count = ssdp_results.len(), "SSDP discovery complete");
 
-        // Deduplicate SSDP service findings by (IP, service_type)
         let mut seen_ssdp_services: HashSet<(IpAddr, String)> = HashSet::new();
         for (ip, service) in &ssdp_results {
             let svc_type = service
@@ -608,9 +587,7 @@ impl Scanner for MdnsScanner {
             }
         }
 
-        // Group SSDP responses by (IP, LOCATION) for UPnP device description
-        // fetching — same device advertising multiple service URNs should only
-        // produce one info finding and one serial-number finding.
+        // One description fetch per (IP, LOCATION).
         if ctx
             .config
             .intensity
@@ -638,7 +615,6 @@ impl Scanner for MdnsScanner {
             }
         }
 
-        // mDNS discovery — proper DNS packet parsing via network crate
         match rikitikitavi_network::discover_services(3).await {
             Ok(mdns_services) => {
                 tracing::info!(mdns_count = mdns_services.len(), "mDNS discovery complete");

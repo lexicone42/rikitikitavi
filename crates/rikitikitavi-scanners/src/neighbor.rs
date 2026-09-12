@@ -4,7 +4,7 @@ use rikitikitavi_models::{Finding, ScanContext};
 
 use crate::Scanner;
 
-/// Neighbor/proximity scanner — passive `WiFi` monitoring, probe requests, Bluetooth.
+/// Neighbor/proximity scanner. Stub: returns no findings.
 pub struct NeighborScanner;
 
 #[async_trait]
@@ -24,7 +24,7 @@ impl Scanner for NeighborScanner {
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running neighbor/proximity scan");
         let _ = ctx;
-        // TODO: Passive WiFi monitoring, probe capture, WPS vuln, deauth testing, Bluetooth
+        // TODO: passive WiFi capture, WPS, deauth, Bluetooth
         Ok(Vec::new())
     }
 

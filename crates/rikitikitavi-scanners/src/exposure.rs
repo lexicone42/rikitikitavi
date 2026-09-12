@@ -7,8 +7,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// External exposure scanner — public IP detection, port forwarding checks,
-/// NAT detection.
+/// External exposure scanner: public IP, NAT detection, port-forward probes with
+/// hairpin-NAT disambiguation.
 pub struct ExposureScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,14 +24,12 @@ async fn check_port_forwarded(public_ip: IpAddr, port: u16) -> bool {
         .is_ok_and(|r| r.is_ok())
 }
 
-/// Determine if the local network is behind NAT by comparing the gateway
-/// IP to the public IP.
+/// Behind NAT iff the gateway IP differs from the public IP.
 fn is_behind_nat(gateway: Option<IpAddr>, public_ip: IpAddr) -> bool {
     gateway != Some(public_ip)
 }
 
-/// Read the first few bytes from a TCP connection to get a banner fingerprint.
-/// Returns `None` if the connection or read fails.
+/// Read up to 256 bytes from a TCP connection; sends a `HEAD` request first on HTTP ports.
 async fn grab_banner(ip: IpAddr, port: u16) -> Option<Vec<u8>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -41,7 +39,6 @@ async fn grab_banner(ip: IpAddr, port: u16) -> Option<Vec<u8>> {
         .ok()?
         .ok()?;
 
-    // For HTTP ports, send a minimal request to elicit a response
     if matches!(port, 80 | 443 | 8080) {
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
@@ -63,17 +60,14 @@ async fn grab_banner(ip: IpAddr, port: u16) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Detect hairpin NAT by comparing banners from the public IP and an internal
-/// device on the same port. If any internal device returns an identical banner,
-/// the public IP connection is likely hairpin NAT, not true external exposure.
+/// Hairpin NAT check: true if any internal device returns a banner identical to
+/// the public IP's on the same port.
 async fn is_hairpin_nat(public_ip: IpAddr, port: u16, internal_devices: &[IpAddr]) -> bool {
-    // Grab banner from public IP
     let public_banner = match grab_banner(public_ip, port).await {
         Some(b) if !b.is_empty() => b,
         _ => return false,
     };
 
-    // Check if any internal device has the same banner on this port
     for &internal_ip in internal_devices {
         if let Some(internal_banner) = grab_banner(internal_ip, port).await
             && !internal_banner.is_empty()
@@ -127,7 +121,6 @@ impl Scanner for ExposureScanner {
         tracing::info!("running external exposure scan");
         let mut findings = Vec::new();
 
-        // Detect public IP
         let public_ip = match rikitikitavi_network::get_public_ip().await {
             Ok(ip) => {
                 findings.push(Finding::new(
@@ -155,7 +148,6 @@ impl Scanner for ExposureScanner {
             }
         };
 
-        // NAT detection
         let behind_nat = is_behind_nat(ctx.gateway, public_ip);
         if behind_nat {
             findings.push(Finding::new(
@@ -187,7 +179,6 @@ impl Scanner for ExposureScanner {
             );
         }
 
-        // Collect internal IPs with open ports for hairpin NAT detection
         let internal_ips_with_ports: Vec<(IpAddr, Vec<u16>)> = ctx
             .discovered_devices
             .iter()
@@ -198,14 +189,11 @@ impl Scanner for ExposureScanner {
             })
             .collect();
 
-        // Check for port forwarding by connecting to our own public IP
         tracing::info!("checking for port forwarding on public IP {public_ip}");
         for &port in EXPOSURE_PORTS {
             if check_port_forwarded(public_ip, port).await {
                 let service = exposure_service_name(port);
 
-                // Hairpin NAT detection: check if an internal device responds
-                // identically on the same port
                 let candidates: Vec<IpAddr> = internal_ips_with_ports
                     .iter()
                     .filter(|(_, ports)| ports.contains(&port))
@@ -216,7 +204,6 @@ impl Scanner for ExposureScanner {
                     && !candidates.is_empty()
                     && is_hairpin_nat(public_ip, port, &candidates).await
                 {
-                    // Hairpin NAT detected — downgrade to Info
                     findings.push(
                         Finding::new(
                             "exposure",
@@ -234,7 +221,6 @@ impl Scanner for ExposureScanner {
                         .with_service(service),
                     );
                 } else {
-                    // Genuine port forwarding
                     findings.push(
                         Finding::new(
                             "exposure",

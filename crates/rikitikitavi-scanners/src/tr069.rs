@@ -1,17 +1,9 @@
 //! TR-069 / CWMP management-plane LAN-exposure scanner.
 //!
-//! TR-069 (CPE WAN Management Protocol, CWMP) is how an ISP's Auto
-//! Configuration Server (ACS) remotely provisions customer routers. The CWMP
-//! "connection request" listener conventionally runs on TCP 7547 and is meant
-//! to face **only** the ISP's WAN side. A 7547 listener answering on the LAN is
-//! a real, actionable exposure: it is a repeated mass-compromise vector
-//! (the November 2016 Mirai/TR-064 outbreak abused 7547 on millions of CPEs)
-//! and continues to yield router RCEs — e.g. `CVE-2025-9961` (TP-Link CWMP
-//! stack overflow) and `CVE-2024-51138` (`DrayTek` Vigor).
-//!
-//! This scanner is pure detection: it performs an unauthenticated HTTP probe of
-//! an already-open 7547 port and classifies the response. It never attempts
-//! credential brute-forcing or any state-changing CWMP RPC.
+//! The CWMP connection-request listener (TCP 7547) should face only the ISP's
+//! WAN side; a LAN-reachable 7547 listener is an exposure. Pure detection: an
+//! unauthenticated HTTP probe of an already-open 7547 port, classified. No
+//! credential brute-forcing or state-changing CWMP RPC.
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
@@ -24,26 +16,20 @@ use crate::Scanner;
 
 /// TR-069 / CWMP LAN-exposure scanner.
 ///
-/// Flags hosts whose CWMP connection-request listener (TCP 7547) is reachable
-/// from the LAN, which should never be the case on a correctly firewalled
-/// customer router.
+/// Flags hosts whose CWMP connection-request listener (TCP 7547) is LAN-reachable.
 pub struct Tr069Scanner;
 
 /// Conventional CWMP connection-request port.
 const TR069_PORT: u16 = 7547;
 
-/// Bound every HTTP phase of the probe. CWMP responses are tiny; a few seconds
-/// is ample and keeps a hostile or dead host from stalling the scan.
+/// Timeout bounding every HTTP phase of the probe.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// Body read cap. A CWMP fault/`GetRPCMethods` document or a `401` challenge
-/// page is a few hundred bytes; 64 `KiB` is generous while bounding a hostile
-/// device that streams forever.
+/// Body read cap.
 const BODY_CAP: usize = 64 * 1024;
 
-/// Case-insensitive tokens that, when seen in the `WWW-Authenticate`, `Server`,
-/// or body of a 7547 response, positively identify a CWMP endpoint (as opposed
-/// to some unrelated HTTP service that merely happens to bind 7547).
+/// Case-insensitive tokens that identify a CWMP endpoint when seen in the
+/// `WWW-Authenticate`, `Server`, or body of a 7547 response.
 const CWMP_TOKENS: &[&str] = &[
     "cwmp",
     "tr-069",
@@ -56,10 +42,7 @@ const CWMP_TOKENS: &[&str] = &[
     "connection_request",
 ];
 
-/// Relevant fields extracted from a 7547 HTTP response for classification.
-///
-/// Kept as a plain data struct (no I/O) so the classifier can be unit-tested
-/// against synthetic responses without a live device.
+/// Fields extracted from a 7547 HTTP response for classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Tr069Response {
     /// HTTP status code (e.g. `401` for the typical Basic-auth challenge).
@@ -149,8 +132,7 @@ fn header_string(resp: &reqwest::Response, name: &str) -> Option<String> {
 /// the body upgrades the result to [`Tr069Signal::CwmpConfirmed`]; otherwise any
 /// HTTP response is [`Tr069Signal::HttpServer`].
 fn classify_tr069_response(resp: &Tr069Response) -> Tr069Signal {
-    // Only scan a bounded prefix of the body: signatures appear early, and this
-    // keeps the (lossy already) string cheap to lowercase.
+    // Scan a bounded body prefix; signatures appear early.
     let body_prefix: String = resp.body.chars().take(8192).collect();
     let haystack = format!(
         "{} {} {}",
@@ -167,11 +149,8 @@ fn classify_tr069_response(resp: &Tr069Response) -> Tr069Signal {
     }
 }
 
-/// Map an identifiable router vendor (from OUI vendor and/or `Server` header)
-/// to the known CWMP/7547 CVEs for that vendor.
-///
-/// Returns an empty vec when the vendor is not recognised — the finding stays
-/// general in that case rather than attaching a CVE that may not apply.
+/// Map a router vendor (from OUI vendor and/or `Server` header) to known
+/// CWMP/7547 CVEs; empty when the vendor is not recognised.
 fn cve_ids_for_vendor(hay: &str) -> Vec<String> {
     let h = hay.to_ascii_lowercase();
     let mut cves = Vec::new();
@@ -314,7 +293,7 @@ impl Scanner for Tr069Scanner {
         tracing::info!("running TR-069/CWMP exposure scan");
         let mut findings = Vec::new();
 
-        // Skip in quick/passive mode — this issues an active HTTP probe.
+        // Skip below Active intensity — this issues an active HTTP probe.
         if !ctx
             .config
             .intensity

@@ -10,19 +10,14 @@ use crate::Scanner;
 
 /// Printer exposure scanner — detects unauthenticated printer control surfaces.
 ///
-/// Two exposure classes are checked, both purely by observation (no credential
-/// brute-forcing, no print jobs, no destructive commands):
-///
-/// * `CUPS`/`IPP` on TCP 631 — an HTTP `GET /` reveals the `Server` header. A
-///   `CUPS x.y` banner is correlated with the September 2024 unauthenticated
-///   `RCE` chain (`cups-browsed`/`foomatic`), which is `CVSS ~9.9`.
-/// * Raw `JetDirect`/`PDL` on TCP 9100 — an open port is itself an
-///   unauthenticated raw print/control channel (`PJL`/`PostScript`). We
-///   optionally send a bounded, non-destructive `@PJL INFO ID` to fingerprint
+/// Observation only (no credential brute-forcing, no print jobs):
+/// * `CUPS`/`IPP` on TCP 631 — `GET /` reads the `Server` header; a `CUPS`
+///   banner is correlated with the September 2024 unauthenticated `RCE` chain.
+/// * Raw `JetDirect`/`PDL` on TCP 9100 — the open port is itself an
+///   unauthenticated print/control channel; a bounded `@PJL INFO ID` fingerprints
 ///   the model.
 ///
-/// Like [`crate::database::DatabaseScanner`] it only targets hosts whose Phase 1
-/// port scan actually found the relevant port open.
+/// Only targets hosts Phase 1 found with the relevant port open.
 pub struct PrinterScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -36,11 +31,6 @@ const IPP_PORT: u16 = 631;
 const RAW_PRINT_PORT: u16 = 9100;
 
 /// The four September-2024 `OpenPrinting` `CUPS` unauthenticated-RCE CVEs.
-///
-/// Chained, an attacker on the LAN reaches remote command execution when a
-/// print job is dispatched to an attacker-controlled `IPP` printer. Kept as a
-/// set so the `KEV`/`EPSS` enrichment layer can flag whichever are actively
-/// exploited.
 const CUPS_RCE_CVES: &[&str] = &[
     "CVE-2024-47076",
     "CVE-2024-47175",
@@ -52,9 +42,8 @@ const CUPS_RCE_CVES: &[&str] = &[
 /// number → authentication bypass).
 const BROTHER_DEFAULT_PW_CVES: &[&str] = &["CVE-2024-51977", "CVE-2024-51978"];
 
-/// Non-destructive `PJL` model query, wrapped in the standard `UEL` (Universal
-/// Exit Language) prologue so line-printer daemons parse it. `INFO ID` only
-/// reads the model string — it never changes device state.
+/// `PJL` model query, wrapped in the standard `UEL` prologue. `INFO ID` reads
+/// the model string only; it does not change device state.
 const PJL_INFO_ID: &[u8] = b"\x1b%-12345X@PJL INFO ID\r\n";
 
 // ── Pure classification / parsing logic (unit-tested below) ─────────────
@@ -68,13 +57,12 @@ struct CupsInfo {
 
 /// Classify an HTTP `Server` header as `CUPS`, extracting the version if present.
 ///
-/// `CUPS` advertises itself as `CUPS/2.4.7 IPP/2.1` (and historically as
-/// `CUPS 1.x`). Returns `Some` only when the header actually identifies `CUPS`;
-/// the inner `version` is `None` when no numeric version follows the token.
+/// Matches forms like `CUPS/2.4.7 IPP/2.1` or `CUPS 1.x`; `version` is `None`
+/// when no numeric version follows the token.
 fn classify_cups_server(server: &str) -> Option<CupsInfo> {
     let lower = server.to_ascii_lowercase();
     let idx = lower.find("cups")?;
-    // Skip the "cups" token and any separator ('/' or spaces) before the version.
+    // Skip the "cups" token and any '/' or space separator before the version.
     let rest = server[idx + "cups".len()..].trim_start_matches(['/', ' ']);
     let version: String = rest
         .chars()
@@ -90,9 +78,7 @@ fn classify_cups_server(server: &str) -> Option<CupsInfo> {
 
 /// Parse the model string from a raw `@PJL INFO ID` response.
 ///
-/// A typical reply echoes the command then returns a quoted model, e.g.
-/// `@PJL INFO ID\r\n"Brother HL-L2350DW series"\r\n\x0c`. We skip echoed `@PJL`
-/// lines and return the first meaningful line with surrounding quotes stripped.
+/// Skips echoed `@PJL` lines; returns the first meaningful line, quotes stripped.
 fn parse_pjl_id(banner: &str) -> Option<String> {
     for line in banner.lines() {
         let line = line.trim();
@@ -298,7 +284,6 @@ async fn probe_ipp_http(ip: IpAddr, port: u16) -> Option<IppHttpProbe> {
 
     let brother_header = server.as_deref().is_some_and(looks_like_brother);
 
-    // Bounded body read — the device is untrusted and could stream endlessly.
     let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
     let brother = brother_header || looks_like_brother(&body);
 
@@ -393,7 +378,7 @@ impl Scanner for PrinterScanner {
         tracing::info!("running printer exposure scan");
         let mut findings = Vec::new();
 
-        // Skip in Passive/quick mode — active probes are unnecessary there.
+        // Skip below Active intensity.
         if !ctx
             .config
             .intensity

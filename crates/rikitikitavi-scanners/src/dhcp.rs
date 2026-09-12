@@ -7,14 +7,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// DHCP security scanner — detects rogue DHCP servers and DHCP-related risks.
-///
-/// Since we operate without raw sockets (safe Rust only), this scanner uses
-/// indirect detection methods:
-/// - Checks for hosts with DHCP server ports open (67/UDP via 68/TCP proxy check)
-/// - Cross-references against the known gateway to identify rogue servers
-/// - Checks for multiple devices advertising DHCP-related services
-/// - Verifies DHCP lease configuration via network interface data
+/// DHCP scanner: non-gateway hosts with DHCP-related TCP ports open, APIPA
+/// addresses, interfaces without a gateway. No raw sockets; UDP is not probed.
 pub struct DhcpScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -28,17 +22,13 @@ const DHCP_RELATED_PORTS: &[u16] = &[
     4011, // PXE/DHCP proxy
 ];
 
-/// Analyze network interfaces for DHCP configuration issues.
-///
-/// Checks if the current host's network configuration shows signs of
-/// DHCP-related problems.
+/// Flag interfaces without a gateway and APIPA addresses.
 fn analyze_interface_config(
     interfaces: &[InterfaceInfo],
     gateway: Option<IpAddr>,
 ) -> Vec<DhcpAnomaly> {
     let mut anomalies = Vec::new();
 
-    // Check for interfaces with no gateway (possible DHCP failure)
     for iface in interfaces {
         if iface.has_ip && !iface.has_gateway && !iface.is_loopback {
             anomalies.push(DhcpAnomaly::NoGateway {
@@ -47,14 +37,12 @@ fn analyze_interface_config(
         }
     }
 
-    // Check if gateway is in a suspicious range (APIPA = DHCP failure)
     if let Some(gw) = gateway
         && is_apipa_address(gw)
     {
         anomalies.push(DhcpAnomaly::ApipaGateway { gateway: gw });
     }
 
-    // Check for APIPA addresses on interfaces (DHCP failure indicator)
     for iface in interfaces {
         if let Some(ip) = iface.ip
             && is_apipa_address(ip)
@@ -70,10 +58,7 @@ fn analyze_interface_config(
     anomalies
 }
 
-/// Check if an IP is in the APIPA range (169.254.0.0/16).
-///
-/// APIPA addresses indicate DHCP failure — the OS assigned a link-local
-/// address because no DHCP server responded.
+/// True for 169.254.0.0/16 (APIPA, self-assigned when DHCP fails).
 const fn is_apipa_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -196,9 +181,7 @@ impl Scanner for DhcpScanner {
         tracing::info!("running DHCP security scan");
         let mut findings = Vec::new();
 
-        // ── Check for rogue DHCP servers via discovered devices ─────
         if ctx.discovered_devices.is_empty() {
-            // Fallback: probe DHCP ports on all ARP cache hosts
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "dhcp".to_owned(),
@@ -206,12 +189,11 @@ impl Scanner for DhcpScanner {
                 })?;
 
             for entry in &arp_entries {
-                // Skip gateway
                 if ctx.gateway == Some(entry.ip) {
                     continue;
                 }
 
-                // Quick TCP probe on DHCP ports (we can't do UDP without raw sockets)
+                // TCP connect only; UDP is not probed.
                 for &port in DHCP_RELATED_PORTS {
                     let addr = SocketAddr::new(entry.ip, port);
                     if tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -227,12 +209,10 @@ impl Scanner for DhcpScanner {
             }
         } else {
             for device in &ctx.discovered_devices {
-                // Skip the gateway — it's supposed to run DHCP
                 if ctx.gateway == Some(device.ip) {
                     continue;
                 }
 
-                // Check if any non-gateway device has DHCP ports open
                 for port_entry in &device.open_ports {
                     if DHCP_RELATED_PORTS.contains(&port_entry.port) {
                         findings.push(anomaly_to_finding(&DhcpAnomaly::RogueDhcpServer {
@@ -244,7 +224,6 @@ impl Scanner for DhcpScanner {
             }
         }
 
-        // ── Check interface configuration for DHCP issues ───────────
         let interfaces = gather_interface_info();
         let config_anomalies = analyze_interface_config(&interfaces, ctx.gateway);
         for anomaly in &config_anomalies {
@@ -265,7 +244,6 @@ impl Scanner for DhcpScanner {
 
 /// Gather network interface information from the system.
 fn gather_interface_info() -> Vec<InterfaceInfo> {
-    // Try to get interfaces from the network crate
     let Ok(interfaces) = rikitikitavi_network::list_interfaces() else {
         return Vec::new();
     };
@@ -276,7 +254,7 @@ fn gather_interface_info() -> Vec<InterfaceInfo> {
             name: iface.name.clone(),
             ip: iface.ip,
             has_ip: iface.ip.is_some(),
-            has_gateway: false, // We can't easily determine per-interface gateway
+            has_gateway: false, // per-interface gateway not available from list_interfaces()
             is_loopback: iface.is_loopback,
         })
         .collect()

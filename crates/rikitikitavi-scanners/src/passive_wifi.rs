@@ -1,7 +1,5 @@
-//! Passive `WiFi` monitoring — capture and analyse 802.11 management frames.
-//!
-//! Puts the `WiFi` interface into monitor mode, captures management frames for a
-//! configurable duration, then analyses the captured data to produce security findings.
+//! Passive `WiFi` monitoring: capture 802.11 management frames via pcap for a
+//! fixed duration and derive findings (weak encryption, deauth floods, rogue APs, probes).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -13,16 +11,10 @@ use rikitikitavi_network::wifi_frames::{
     ProbeRequestFrame,
 };
 
-// ── Scanner ID ──────────────────────────────────────────────────────────
-
 const SCANNER_ID: &str = "passive_wifi";
-
-// ── Thresholds ──────────────────────────────────────────────────────────
 
 /// Number of deauth/disassoc frames from the same source that constitutes a flood.
 const DEAUTH_FLOOD_THRESHOLD: usize = 10;
-
-// ── Capture results ─────────────────────────────────────────────────────
 
 /// Accumulated results from a passive `WiFi` capture session.
 #[derive(Debug, Default)]
@@ -41,11 +33,7 @@ pub struct MonitorResults {
     pub frame_count: u64,
 }
 
-// ── pcap capture ────────────────────────────────────────────────────────
-
-/// Run a passive capture on the given monitor interface for `duration`.
-///
-/// The interface must already be in monitor mode (via [`wifi_monitor::setup_monitor`]).
+/// Capture management frames on `interface` (must already be in monitor mode) for `duration`.
 ///
 /// # Errors
 ///
@@ -56,8 +44,8 @@ pub fn capture_frames(interface: &str, duration: Duration) -> anyhow::Result<Mon
 
     let device = Device::from(interface);
     let mut cap = Capture::from_device(device)?
-        .timeout(1000) // 1-second read timeout for responsiveness
-        .snaplen(512) // Management frames are small; 512 bytes is plenty
+        .timeout(1000) // ms
+        .snaplen(512) // management frames only
         .open()?;
 
     // BPF filter: only management frames (type 0)
@@ -119,17 +107,11 @@ fn accumulate_frame(results: &mut MonitorResults, frame: FrameType) {
         FrameType::Disassoc(d) => {
             results.disassoc_events.push(d);
         }
-        // Probe responses tracked indirectly through beacons; Other frames ignored.
         FrameType::ProbeResponse(_) | FrameType::Other => {}
     }
 }
 
-// ── Analysis → Findings ─────────────────────────────────────────────────
-
-/// Analyse captured monitor results and generate security findings.
-///
-/// `known_bssids` is a set of expected AP MAC addresses (e.g. your own APs).
-/// `home_ssid` is the expected SSID of your home network (for rogue AP detection).
+/// Derive findings from capture results. `known_bssids` and `home_ssid` drive rogue-AP detection.
 #[allow(clippy::too_many_lines)]
 pub fn analyse_results<S: ::std::hash::BuildHasher>(
     results: &MonitorResults,
@@ -138,7 +120,6 @@ pub fn analyse_results<S: ::std::hash::BuildHasher>(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // ── Capture summary (always) ────────────────────────────────────
     findings.push(
         Finding::new(
             SCANNER_ID,
@@ -162,22 +143,18 @@ pub fn analyse_results<S: ::std::hash::BuildHasher>(
         )),
     );
 
-    // ── Open/WEP networks ───────────────────────────────────────────
     detect_weak_encryption(&results.beacons, &mut findings);
 
-    // ── Deauth/disassoc flood detection ─────────────────────────────
     detect_deauth_flood(
         &results.deauth_events,
         &results.disassoc_events,
         &mut findings,
     );
 
-    // ── Rogue AP detection ──────────────────────────────────────────
     if let Some(ssid) = home_ssid {
         detect_rogue_aps(&results.beacons, known_bssids, ssid, &mut findings);
     }
 
-    // ── Device tracking / privacy analysis ──────────────────────────
     detect_device_tracking(&results.probe_requests, &mut findings);
 
     findings
@@ -235,7 +212,6 @@ fn detect_deauth_flood(
     disassocs: &[DisassocFrame],
     findings: &mut Vec<Finding>,
 ) {
-    // Count events per source MAC
     let mut source_counts: HashMap<MacAddress, usize> = HashMap::new();
     for d in deauths {
         *source_counts.entry(d.source).or_insert(0) += 1;
@@ -266,7 +242,7 @@ fn detect_deauth_flood(
     }
 }
 
-/// Detect rogue APs broadcasting your home SSID with unknown BSSIDs.
+/// Detect APs broadcasting `home_ssid` from a BSSID not in `known_bssids`.
 fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
     beacons: &HashMap<MacAddress, BeaconFrame>,
     known_bssids: &HashSet<MacAddress, S>,
@@ -305,15 +281,13 @@ fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
     }
 }
 
-/// Detect device tracking via probe requests and MAC address analysis.
+/// Directed probe requests (SSID leak) and non-randomized source MACs.
 fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Finding>) {
-    // Group probes by source MAC
     let mut by_mac: HashMap<MacAddress, Vec<&ProbeRequestFrame>> = HashMap::new();
     for pr in probes {
         by_mac.entry(pr.source_mac).or_default().push(pr);
     }
 
-    // Directed probes (privacy leak — reveals networks the device remembers)
     let mut directed_ssids: HashSet<String> = HashSet::new();
     let mut directed_macs: HashSet<MacAddress> = HashSet::new();
 
@@ -356,7 +330,6 @@ fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Findi
         );
     }
 
-    // MAC randomization check
     let mut non_random_macs: Vec<MacAddress> = Vec::new();
     for (mac, reqs) in &by_mac {
         if reqs.len() >= 2 && !wifi_frames::is_locally_administered(mac) {
@@ -389,8 +362,6 @@ fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Findi
         );
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

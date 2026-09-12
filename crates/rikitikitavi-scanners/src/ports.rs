@@ -472,11 +472,8 @@ impl Scanner for PortScanner {
             .intensity
             .at_least(rikitikitavi_models::config::ScanIntensity::Active);
 
-        // Probe every (host, port) pair with bounded concurrency. `buffer_unordered`
-        // keeps at most `parallelism` probes in flight at once — unlike spawning one
-        // task per pair up front, which on a `--ports full` scan of a populated
-        // subnet would allocate millions of parked tasks and exhaust memory. The
-        // pair list is a small, bounded allocation by comparison.
+        // Bounded concurrency: `buffer_unordered` keeps at most `parallelism`
+        // probes in flight, bounding memory on large (host, port) sweeps.
         let pairs: Vec<(IpAddr, u16)> = targets
             .iter()
             .flat_map(|&ip| ports.iter().map(move |&port| (ip, port)))

@@ -14,7 +14,7 @@ pub fn export_html(results: &ScanResults, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Escape a string for safe inclusion in HTML content.
+/// Escape `&`, `<`, `>`, `"`, `'` for HTML text and attribute contexts.
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -41,11 +41,11 @@ const fn severity_class(severity: Severity) -> &'static str {
     }
 }
 
+/// Render the self-contained HTML report.
 #[allow(clippy::too_many_lines)]
 pub fn render_html_report(results: &ScanResults) -> String {
     let mut html = String::with_capacity(16384);
 
-    // Count findings by severity
     let critical = results
         .findings
         .iter()
@@ -74,7 +74,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
 
     let (grade_label, grade_color) = rikitikitavi_analysis::risk_grade(critical, high, medium);
 
-    // ── HTML head + CSS ──────────────────────────────────────────────
+    // Head + CSS
     html.push_str(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -173,7 +173,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
 <body>
 "#);
 
-    // ── Executive Summary ────────────────────────────────────────────
+    // Summary header + severity badges
     let _ = write!(
         html,
         r#"<div class="header">
@@ -205,7 +205,6 @@ pub fn render_html_report(results: &ScanResults) -> String {
     }
     html.push_str("</div>\n");
 
-    // Critical + High bullet list
     let urgent: Vec<_> = results
         .findings
         .iter()
@@ -229,7 +228,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
         html.push_str("</ul>\n");
     }
 
-    // ── Top 5 Priority Actions ────────────────────────────────────────
+    // Priority actions
     if !results.priority_actions.is_empty() {
         html.push_str("<h2>Top 5 Priority Actions</h2>\n");
         for action in &results.priority_actions {
@@ -269,7 +268,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
         }
     }
 
-    // ── Findings by Severity ─────────────────────────────────────────
+    // Findings grouped by severity; Critical/High sections start expanded
     html.push_str("<h2>Findings by Severity</h2>\n");
 
     for &(sev, label) in &[
@@ -389,12 +388,11 @@ pub fn render_html_report(results: &ScanResults) -> String {
         html.push_str("</details>\n");
     }
 
-    // ── Device Inventory ─────────────────────────────────────────────
+    // Device inventory, most findings first
     if !results.devices.is_empty() {
         html.push_str("<h2>Device Inventory</h2>\n");
         html.push_str("<table><tr><th>IP</th><th>MAC</th><th>Vendor</th><th>Type</th><th>Open Ports</th></tr>\n");
 
-        // Sort by finding count per device (most-affected first)
         let mut devices = results.devices.clone();
         devices.sort_by(|a, b| {
             let a_findings = results
@@ -427,7 +425,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
         html.push_str("</table>\n");
     }
 
-    // ── Attack Paths ─────────────────────────────────────────────────
+    // Attack paths
     if !results.attack_paths.is_empty() {
         html.push_str("<h2>Attack Paths</h2>\n");
         for path in &results.attack_paths {
@@ -462,7 +460,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
         }
     }
 
-    // ── Footer ───────────────────────────────────────────────────────
+    // Footer
     let _ = write!(
         html,
         r#"<div class="footer">

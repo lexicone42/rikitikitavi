@@ -10,16 +10,9 @@ use crate::Scanner;
 
 /// MQTT broker anonymous-access scanner.
 ///
-/// MQTT is the workhorse pub/sub protocol of consumer and industrial `IoT`.
-/// A broker that accepts anonymous CONNECTs lets anyone on the LAN subscribe
-/// to every topic (sensor readings, camera events, lock state) and publish
-/// forged control messages. This scanner performs a single, non-destructive
-/// MQTT v3.1.1 CONNECT/CONNACK exchange to determine whether the broker
-/// requires authentication. It never subscribes or publishes.
-///
-/// Like [`crate::database::DatabaseScanner`], it only probes hosts that Phase 1
-/// discovered with the relevant port open — it never blindly connects to every
-/// host on the network.
+/// Performs one MQTT v3.1.1 CONNECT/CONNACK exchange to test whether the broker
+/// requires authentication. Never subscribes or publishes; only probes hosts
+/// Phase 1 found with an MQTT port open.
 pub struct MqttScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -28,8 +21,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Plaintext MQTT and MQTT-over-TLS ports.
 const MQTT_PORTS: &[u16] = &[1883, 8883];
 
-/// Client identifier sent in the CONNECT probe. Short, benign, and identifies
-/// the scan in broker logs so operators can see what connected.
+/// Client identifier sent in the CONNECT probe.
 const MQTT_CLIENT_ID: &str = "rikitikitavi-scan";
 
 /// Verdict from classifying an MQTT CONNACK packet.
@@ -49,8 +41,7 @@ enum ConnackVerdict {
 
 /// Encode a value as an MQTT "remaining length" variable byte integer.
 ///
-/// MQTT encodes lengths in 1–4 bytes, 7 bits per byte, with the high bit of
-/// each byte signalling continuation. Values up to `268_435_455` are legal.
+/// 1–4 bytes, 7 bits each, high bit signals continuation; max `268_435_455`.
 fn encode_remaining_length(mut len: usize, out: &mut Vec<u8>) {
     loop {
         let mut byte = u8::try_from(len % 128).unwrap_or(0);
@@ -189,8 +180,7 @@ impl Scanner for MqttScanner {
         tracing::info!("running MQTT broker security scan");
         let mut findings = Vec::new();
 
-        // Skip in Passive mode — an application-layer handshake is more than a
-        // quick scan should do.
+        // Skip below Active intensity — this performs an application-layer handshake.
         if !ctx
             .config
             .intensity
@@ -200,9 +190,7 @@ impl Scanner for MqttScanner {
             return Ok(findings);
         }
 
-        // Only target hosts Phase 1 found with an MQTT port actually open. We
-        // never blindly connect to every host, so if no port scan has run we
-        // have nothing to probe.
+        // Only target hosts Phase 1 found with an MQTT port open.
         let targets: Vec<(IpAddr, Vec<u16>)> = ctx
             .discovered_devices
             .iter()
@@ -277,8 +265,6 @@ async fn check_mqtt_plain(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     ),
                     Severity::High,
                 )
-                // The broker actually accepted our unauthenticated CONNECT —
-                // this is demonstrated, not inferred.
                 .with_confidence(rikitikitavi_core::Confidence::Confirmed)
                 .with_ip(*ip)
                 .with_port(port)
@@ -302,16 +288,13 @@ async fn check_mqtt_plain(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     ),
                     Severity::Info,
                 )
-                // We observed the rejection directly.
                 .with_confidence(rikitikitavi_core::Confidence::Confirmed)
                 .with_ip(*ip)
                 .with_port(port)
                 .with_service("MQTT"),
             );
         }
-        // Identifier rejected / server unavailable / other: the broker is up but
-        // the outcome does not demonstrate anonymous access, so we stay silent to
-        // avoid noisy or misleading findings.
+        // Non-auth refusal codes do not demonstrate anonymous access; stay silent.
         ConnackVerdict::Refused(code) => {
             tracing::debug!(
                 ip = %ip,
@@ -329,9 +312,8 @@ async fn check_mqtt_plain(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
 
 /// Emit an informational finding for an MQTT-over-TLS broker (8883).
 ///
-/// We deliberately do not perform the TLS handshake here — [`crate::ssl::SslScanner`]
-/// covers certificate and protocol posture. This is a lightweight presence note
-/// based on the open port, so its confidence is `Probable`.
+/// No TLS handshake is performed here ([`crate::ssl::SslScanner`] covers TLS
+/// posture); this is a port-open presence note, so confidence is `Probable`.
 fn check_mqtt_tls_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     findings.push(
         Finding::new(
@@ -346,8 +328,6 @@ fn check_mqtt_tls_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) 
             ),
             Severity::Info,
         )
-        // Port-open inference plus the well-known service assignment — not a
-        // completed handshake.
         .with_confidence(rikitikitavi_core::Confidence::Probable)
         .with_ip(*ip)
         .with_port(port)

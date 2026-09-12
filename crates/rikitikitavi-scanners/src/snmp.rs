@@ -9,34 +9,19 @@ use crate::ports::udp_probe;
 
 /// SNMP default community-string scanner.
 ///
-/// SNMP (Simple Network Management Protocol) speaks UDP/161, which the TCP
-/// connect port scan cannot see. A device that answers a v2c `GetRequest` for
-/// the community string `public` leaks its entire inventory MIB (hostname, OS,
-/// interfaces, ARP/routing tables, running processes) to anyone on the LAN; a
-/// device that answers to `private` typically also grants **write** access,
-/// letting an attacker reconfigure interfaces, reboot the device, or repoint
-/// routes. Default and guessable community strings on printers, switches,
-/// cameras, and consumer routers are a perennial, actively-exploited weakness.
-///
-/// Unlike the TCP-gated scanners (e.g. [`crate::database::DatabaseScanner`]),
-/// this one probes every discovered device directly on UDP/161 rather than
-/// gating on an open TCP port — the port scan simply never reports it. The
-/// probe is pure detection: a single read-only `GET` of `sysDescr.0`. It never
-/// writes, never brute-forces beyond the two canonical default communities, and
-/// never alters device state.
+/// Sends a read-only v2c `GET` of `sysDescr.0` on UDP/161 with the two canonical
+/// default communities (`public`, `private`). SNMP is UDP-only, so this probes
+/// every discovered device directly rather than gating on an open TCP port.
 pub struct SnmpScanner;
 
 /// SNMP agent port.
 const SNMP_PORT: u16 = 161;
 
-/// Per-datagram timeout. SNMP is UDP, so a lost packet just looks like silence;
-/// a couple of seconds is plenty on a LAN without dragging the scan out.
+/// Per-datagram timeout.
 const SNMP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The community strings we test — the two canonical defaults only. Kept
-/// deliberately tiny: this is default-credential *detection*, not brute force.
-/// Order matters: `public` (read-only) is tried before `private` (read-write),
-/// and we stop at the first that answers.
+/// Community strings tried, in order; probing stops at the first that answers.
+/// `public` (read-only) precedes `private` (read-write).
 const DEFAULT_COMMUNITIES: &[&str] = &["public", "private"];
 
 /// BER object identifier for `sysDescr.0` (`1.3.6.1.2.1.1.1.0`).
@@ -316,7 +301,6 @@ struct SnmpHit {
 async fn probe_snmp(ip: IpAddr) -> Option<SnmpHit> {
     let addr = SocketAddr::new(ip, SNMP_PORT);
     for (idx, &community) in DEFAULT_COMMUNITIES.iter().enumerate() {
-        // A distinct, benign request-id per attempt aids correlation in logs.
         let request_id = 0x7269_0000 | u32::try_from(idx).unwrap_or(0);
         let packet = build_get_request(community, request_id);
         let Some(reply) = udp_probe(addr, &packet, SNMP_TIMEOUT).await else {
@@ -386,14 +370,12 @@ fn finding_for_hit(ip: IpAddr, hit: &SnmpHit) -> Finding {
          device takeover. {remediation}"
     );
 
-    // Evidence: exactly what proves the finding.
     let evidence = sys_descr.map_or_else(
         || format!("GetResponse (0xA2) to community \"{community}\""),
         |d| format!("GetResponse (0xA2) to community \"{community}\"; sysDescr=\"{d}\""),
     );
 
     let mut finding = Finding::new("snmp", &title, &description, severity)
-        // A valid GetResponse to our unauthenticated GET is direct proof.
         .with_confidence(rikitikitavi_core::Confidence::Confirmed)
         .with_ip(ip)
         .with_port(SNMP_PORT)
@@ -434,7 +416,7 @@ impl Scanner for SnmpScanner {
         tracing::info!("running SNMP default-community scan");
         let mut findings = Vec::new();
 
-        // Skip in Passive/quick mode — this sends application-layer probes.
+        // Skip below Active intensity — this sends application-layer probes.
         if !ctx
             .config
             .intensity
@@ -444,9 +426,8 @@ impl Scanner for SnmpScanner {
             return Ok(findings);
         }
 
-        // SNMP is UDP/161, which the TCP port scan never reports, so we cannot
-        // gate on an open TCP port. Probe every discovered device directly;
-        // fall back to the ARP cache if Phase 1 discovery has not run.
+        // UDP/161 is invisible to the TCP port scan: probe every discovered
+        // device directly, falling back to the ARP cache when discovery is empty.
         let targets: Vec<IpAddr> = if ctx.discovered_devices.is_empty() {
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {

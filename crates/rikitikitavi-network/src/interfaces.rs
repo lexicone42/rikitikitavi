@@ -14,8 +14,6 @@ pub struct NetworkInterface {
     pub is_loopback: bool,
 }
 
-// ─── Linux implementation ───────────────────────────────────────────────────
-
 /// A parsed route entry from `/proc/net/route`.
 #[derive(Debug, Clone)]
 struct RouteEntry {
@@ -29,7 +27,7 @@ struct RouteEntry {
 fn parse_hex_ip(hex: &str) -> Result<Ipv4Addr> {
     let val =
         u32::from_str_radix(hex.trim(), 16).with_context(|| format!("invalid hex IP: {hex}"))?;
-    // /proc/net/route stores IPs in native (little-endian on x86) byte order
+    // `/proc/net/route` stores IPs in native (little-endian) byte order.
     Ok(Ipv4Addr::from(val.to_be()))
 }
 
@@ -56,7 +54,7 @@ fn parse_proc_route(contents: &str) -> Vec<RouteEntry> {
         .collect()
 }
 
-/// Internal: parse gateway from Linux route table text.
+/// Default gateway from `/proc/net/route` text.
 fn detect_gateway_from_proc(contents: &str) -> Option<IpAddr> {
     let routes = parse_proc_route(contents);
     routes
@@ -65,7 +63,7 @@ fn detect_gateway_from_proc(contents: &str) -> Option<IpAddr> {
         .map(|r| IpAddr::V4(r.gateway))
 }
 
-/// Internal: parse network CIDR from Linux route table text.
+/// LAN CIDR of the default-route interface from `/proc/net/route` text.
 fn detect_network_from_proc(contents: &str) -> Option<IpNetwork> {
     let routes = parse_proc_route(contents);
     let default_iface = routes
@@ -86,7 +84,7 @@ fn detect_network_from_proc(contents: &str) -> Option<IpNetwork> {
         })
 }
 
-/// Internal: parse default interface from Linux route table text.
+/// Default-route interface name from `/proc/net/route` text.
 fn detect_default_interface_from_proc(contents: &str) -> Option<String> {
     let routes = parse_proc_route(contents);
     routes
@@ -103,8 +101,6 @@ fn mask_to_prefix(mask: Ipv4Addr) -> u8 {
     let prefix = bits.count_ones() as u8;
     prefix
 }
-
-// ─── macOS implementation ───────────────────────────────────────────────────
 
 /// Parse gateway from macOS `route -n get default` output.
 #[cfg(any(target_os = "macos", test))]
@@ -136,8 +132,7 @@ fn detect_default_interface_from_macos_route(contents: &str) -> Option<String> {
     None
 }
 
-/// Parse network info from macOS `ifconfig <iface>` output.
-/// Returns (ip, netmask) if found.
+/// `(ip, netmask)` from macOS `ifconfig <iface>` output.
 #[cfg(any(target_os = "macos", test))]
 fn parse_macos_ifconfig_iface(contents: &str) -> Option<(IpAddr, IpAddr)> {
     for line in contents.lines() {
@@ -176,9 +171,8 @@ fn parse_macos_ifconfig_all(contents: &str) -> Vec<NetworkInterface> {
     let mut current_loopback = false;
 
     for line in contents.lines() {
-        // New interface block starts with "en0: flags=..."
+        // Interface header line: "en0: flags=..."
         if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(": flags=") {
-            // Save previous interface
             if let Some(name) = current_name.take() {
                 interfaces.push(NetworkInterface {
                     name,
@@ -221,7 +215,6 @@ fn parse_macos_ifconfig_all(contents: &str) -> Vec<NetworkInterface> {
         }
     }
 
-    // Don't forget the last interface
     if let Some(name) = current_name {
         interfaces.push(NetworkInterface {
             name,
@@ -235,8 +228,6 @@ fn parse_macos_ifconfig_all(contents: &str) -> Vec<NetworkInterface> {
 
     interfaces
 }
-
-// ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Detect the default gateway IP address.
 pub fn detect_gateway() -> Result<Option<IpAddr>> {
@@ -308,13 +299,11 @@ fn detect_network_platform() -> Result<Option<IpNetwork>> {
 
 #[cfg(target_os = "macos")]
 fn detect_network_platform() -> Result<Option<IpNetwork>> {
-    // First get the default interface
     let iface = match detect_default_interface()? {
         Some(iface) => iface,
         None => return Ok(None),
     };
 
-    // Then get IP/netmask from ifconfig for that interface
     let output = std::process::Command::new("ifconfig").arg(&iface).output();
     match output {
         Ok(out) if out.status.success() => {
@@ -322,7 +311,6 @@ fn detect_network_platform() -> Result<Option<IpNetwork>> {
             if let Some((ip, mask)) = parse_macos_ifconfig_iface(&contents) {
                 if let IpAddr::V4(mask_v4) = mask {
                     let prefix = mask_to_prefix(mask_v4);
-                    // Compute network address by masking the IP
                     if let IpAddr::V4(ip_v4) = ip {
                         let net_bits = u32::from(ip_v4) & u32::from(mask_v4);
                         let net_addr = IpAddr::V4(Ipv4Addr::from(net_bits));
@@ -408,7 +396,7 @@ fn list_interfaces_platform() -> Result<Vec<NetworkInterface>> {
         let is_up =
             read_sysfs_file(&entry.path().join("operstate")).is_some_and(|s| s.trim() == "up");
 
-        // Type 772 = loopback in Linux
+        // ARPHRD_LOOPBACK = 772
         let if_type = read_sysfs_file(&entry.path().join("type"))
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(0);
@@ -452,7 +440,7 @@ fn list_interfaces_platform() -> Result<Vec<NetworkInterface>> {
     Ok(Vec::new())
 }
 
-/// Read a sysfs file, returning its content as a string.
+/// Contents of a sysfs file, if readable.
 #[cfg(target_os = "linux")]
 fn read_sysfs_file(path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path).ok()

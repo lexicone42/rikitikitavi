@@ -5,18 +5,14 @@ use std::path::PathBuf;
 /// Maximum number of scan history files to retain.
 const MAX_HISTORY: usize = 10;
 
-/// Persistent scan history stored as timestamped JSON files.
-///
-/// Default location: `~/.local/share/rikitikitavi/scans/` (XDG data dir).
-/// Each scan is saved as `scan-YYYYMMDD-HHMMSS.json`, sorted chronologically
-/// by filename. Oldest scans beyond `MAX_HISTORY` are pruned automatically.
+/// Scan history as `scan-YYYYMMDD-HHMMSS.json` files under the XDG data dir
+/// (`~/.local/share/rikitikitavi/scans/`); ordered by filename, pruned to `MAX_HISTORY`.
 pub struct ScanHistory {
     data_dir: PathBuf,
 }
 
 impl ScanHistory {
-    /// Create a history store in the XDG data directory.
-    /// Returns `None` if the platform has no data directory.
+    /// History store in the XDG data directory; `None` if the platform has none.
     pub fn new() -> Option<Self> {
         let dir = dirs::data_dir()?.join("rikitikitavi/scans");
         Some(Self { data_dir: dir })
@@ -137,7 +133,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let history = ScanHistory::with_dir(dir.path().to_path_buf());
 
-        // Save 3 scans with different timestamps
+        // Three scans, distinct timestamps.
         for i in 0..3 {
             let mut results = sample_results();
             results.scanned_at =
@@ -163,7 +159,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let history = ScanHistory::with_dir(dir.path().to_path_buf());
 
-        // Save 12 scans (exceeds MAX_HISTORY of 10)
+        // 12 scans > MAX_HISTORY.
         for i in 0..12 {
             let mut results = sample_results();
             results.scanned_at =
@@ -176,7 +172,7 @@ mod tests {
         let scans = history.list_scans().unwrap();
         assert_eq!(scans.len(), MAX_HISTORY);
 
-        // The oldest 2 should have been pruned — first remaining is Jan 3
+        // Oldest two pruned; first remaining is Jan 3.
         let first_name = scans[0].file_name().unwrap().to_str().unwrap();
         assert!(
             first_name.contains("20260103"),

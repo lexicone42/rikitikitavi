@@ -991,9 +991,8 @@ impl Scanner for CredentialScanner {
                     use rikitikitavi_models::config::ScanIntensity;
                     // Non-destructive banner/prompt capture is allowed at Active.
                     let is_active = ctx.config.intensity.at_least(ScanIntensity::Active);
-                    // Actively guessing default passwords can lock accounts and trip
-                    // an IDS, so it is gated behind Aggressive (explicit --aggressive),
-                    // not the Active default. Detection/flagging below still runs.
+                    // Default-password guessing can lock accounts / trip an IDS, so it
+                    // is gated behind Aggressive; detection/flagging below still runs.
                     let attempt_login = ctx.config.intensity.at_least(ScanIntensity::Aggressive);
 
                     let login_result = if attempt_login {
@@ -1016,7 +1015,6 @@ impl Scanner for CredentialScanner {
                                 ),
                                 Severity::Critical,
                             )
-                            // A login actually succeeded — this is demonstrated.
                             .with_confidence(rikitikitavi_core::Confidence::Confirmed)
                             .with_ip(ip)
                             .with_port(23)

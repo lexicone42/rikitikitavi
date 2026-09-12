@@ -12,7 +12,6 @@ pub fn load_config(path: Option<&Path>) -> Result<AppConfig> {
         tracing::info!(path = %p.display(), "loaded configuration");
         Ok(config)
     } else {
-        // Try default locations
         for candidate in &["config.yaml", "config.yml", "/etc/rikitikitavi/config.yaml"] {
             let p = Path::new(candidate);
             if p.exists() {

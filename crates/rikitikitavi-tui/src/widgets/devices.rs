@@ -86,7 +86,6 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                 detail_line("  Type", &type_str, &palette),
             ];
 
-            // Open ports section
             lines.push(Line::from(""));
             if device.open_ports.is_empty() {
                 lines.push(Line::from(Span::styled(

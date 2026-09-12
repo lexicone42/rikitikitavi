@@ -1,14 +1,6 @@
-//! A canonical MAC-address newtype.
-//!
-//! Scanners report MAC addresses in whatever format their data source uses —
-//! `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF`, `aabb.ccdd.eeff`, bare hex, mixed
-//! case. Storing those raw strings means the *same physical address* can hash
-//! and compare differently depending on which scanner saw it, which silently
-//! splits one device into two across scan runs and breaks same-MAC enrichment.
-//!
-//! [`MacAddr`] parses all of those forms into six octets, so a given address
-//! always compares, hashes, and serializes identically. That is what makes
-//! cross-run device fingerprinting stable.
+//! Canonical MAC-address newtype.
+//! Parses colon, hyphen, dotted and bare-hex forms (any case) into six octets,
+//! so equal addresses compare, hash and serialize identically.
 
 use std::fmt;
 use std::str::FromStr;
@@ -50,16 +42,13 @@ impl MacAddr {
         matches!(self.0, [0, 0, 0, 0, 0, 0])
     }
 
-    /// Whether the group bit (LSB of the first octet) is set — a multicast
-    /// address rather than a real host.
+    /// Group bit (LSB of octet 0) set: multicast address.
     #[must_use]
     pub const fn is_multicast(&self) -> bool {
         self.0[0] & 0x01 != 0
     }
 
-    /// Whether the locally-administered bit is set — i.e. a randomized/private
-    /// MAC rather than a globally-unique vendor-assigned one. Such addresses
-    /// have no meaningful OUI vendor.
+    /// Locally-administered bit (0x02 of octet 0) set: randomized MAC, no OUI vendor.
     #[must_use]
     pub const fn is_locally_administered(&self) -> bool {
         self.0[0] & 0x02 != 0
@@ -82,7 +71,7 @@ impl FromStr for MacAddr {
     type Err = ParseMacError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Strip the common separators, then expect exactly 12 hex nibbles.
+        // Strip separators; require exactly 12 hex nibbles.
         let hex: String = s
             .chars()
             .filter(|c| !matches!(c, ':' | '-' | '.' | ' '))
@@ -112,8 +101,7 @@ impl fmt::Display for MacAddr {
 
 impl Serialize for MacAddr {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Serialize as the canonical string, so JSON/CSV/OCSF output is
-        // unchanged from when this was a `String` field.
+        // Canonical `aa:bb:cc:dd:ee:ff` string.
         serializer.collect_str(self)
     }
 }
@@ -137,7 +125,7 @@ mod tests {
 
     #[test]
     fn normalizes_across_formats_and_case() {
-        // Every one of these is the SAME physical address — the whole point.
+        // All forms of one address.
         let forms = [
             "AA:BB:CC:DD:EE:FF",
             "aa-bb-cc-dd-ee-ff",
@@ -149,7 +137,7 @@ mod tests {
         for m in &parsed {
             assert_eq!(*m, parsed[0], "all textual forms must parse equal");
         }
-        // ...and render to one canonical lowercase form.
+        // Canonical lowercase rendering.
         assert_eq!(parsed[0].to_string(), "aa:bb:cc:dd:ee:ff");
     }
 
@@ -202,8 +190,7 @@ mod tests {
 
     #[test]
     fn detects_locally_administered_randomized_macs() {
-        // Real vendor OUIs have the locally-administered bit (0x02 of octet 0)
-        // clear — they must still resolve to a vendor.
+        // Vendor OUIs: bit clear.
         assert!(
             !"a4:83:e7:1a:2b:3c"
                 .parse::<MacAddr>()
@@ -216,7 +203,7 @@ mod tests {
                 .unwrap()
                 .is_locally_administered()
         ); // Ubiquiti
-        // Randomized MACs (bit set) have no meaningful vendor.
+        // Randomized MACs: bit set.
         assert!(
             "aa:bb:cc:dd:ee:ff"
                 .parse::<MacAddr>()

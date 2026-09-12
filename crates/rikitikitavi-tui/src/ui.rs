@@ -3,9 +3,8 @@ use ratatui::Frame;
 use crate::app::{App, HitRegions, Screen};
 use crate::widgets;
 
-/// Main render function — dispatches to the appropriate screen widget.
+/// Render the current screen. Hit regions are rebuilt each frame.
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    // Reset hit regions for this frame
     app.hit_regions = HitRegions::default();
 
     match app.screen {

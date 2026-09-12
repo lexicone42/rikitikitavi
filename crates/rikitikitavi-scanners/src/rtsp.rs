@@ -10,45 +10,32 @@ use crate::Scanner;
 
 /// RTSP / ONVIF camera exposure scanner.
 ///
-/// IP cameras and NVRs are prime targets for Mirai/RondoDox-class botnets, and
-/// the most visceral home-network finding is "my camera streams to strangers."
-/// This scanner speaks just enough of RTSP (the text-over-TCP control protocol
-/// that carries camera video) to answer one question: can the video stream be
-/// reached without authentication?
+/// Tests whether a camera's video stream is reachable without authentication:
+///  1. `OPTIONS` confirms an RTSP server (reply begins `RTSP/1.0`) and yields
+///     its `Server` header for vendor fingerprinting.
+///  2. `DESCRIBE` against common stream routes. A `200 OK` with no
+///     `WWW-Authenticate` challenge means the stream is served without
+///     credentials; a `401`/`403` with `WWW-Authenticate` means auth is enforced.
 ///
-/// The probe is deliberately narrow and non-destructive:
-///  1. Send an `OPTIONS` request. A reply beginning `RTSP/1.0` confirms an RTSP
-///     server and yields its `Server` header for vendor fingerprinting.
-///  2. Send `DESCRIBE` against a small dictionary of common stream routes. A
-///     `200 OK` with **no** `WWW-Authenticate` challenge proves the stream's SDP
-///     (and therefore the stream) is served without credentials — a High,
-///     `Confirmed` finding. A `401`/`403` with `WWW-Authenticate` means auth is
-///     enforced, which is the correct posture.
-///
-/// It never pulls video frames, never sends credentials, and — like
-/// [`crate::database::DatabaseScanner`] — only probes hosts that Phase 1 found
-/// with an RTSP port open.
+/// Never pulls video frames or sends credentials; only probes hosts Phase 1
+/// found with an RTSP port open.
 pub struct RtspScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// Cap on how many response bytes we read. We only ever need the status line and
-/// headers (plus a small SDP body); this bounds a hostile or endless response
-/// and guarantees we never buffer a video stream.
+/// Cap on response bytes read; only the status line and headers are needed.
 const MAX_RTSP_RESPONSE: usize = 8 * 1024;
 
 /// RTSP control ports: 554 (standard) and 8554 (common alternate).
 const RTSP_PORTS: &[u16] = &[554, 8554];
 
-/// User-Agent sent on every probe. Benign and self-identifying so camera/NVR
-/// logs show what connected.
+/// User-Agent sent on every probe.
 const RTSP_USER_AGENT: &str = "rikitikitavi-scan";
 
-/// Stream routes tried with `DESCRIBE`. These cover the default paths of the
-/// most common consumer camera and NVR firmwares (generic, Dahua, Hikvision,
-/// ONVIF profile paths, and bare channel numbers).
+/// Default stream routes tried with `DESCRIBE` (generic, Dahua, Hikvision,
+/// ONVIF, and bare channel numbers).
 const RTSP_ROUTES: &[&str] = &[
     "/",
     "/live.sdp",
@@ -93,9 +80,6 @@ enum DescribeVerdict {
 }
 
 /// Build an RTSP `OPTIONS` request for `rtsp://ip:port/`.
-///
-/// `OPTIONS` is the lightest RTSP method: it lists supported methods and, in
-/// practice, always elicits a `Server` header without touching any stream.
 fn build_options_request(ip: IpAddr, port: u16, cseq: u32) -> String {
     format!(
         "OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n\
@@ -105,10 +89,8 @@ fn build_options_request(ip: IpAddr, port: u16, cseq: u32) -> String {
     )
 }
 
-/// Build an RTSP `DESCRIBE` request for `rtsp://ip:port{route}`.
-///
-/// `DESCRIBE` asks the server for the stream's SDP media description. A server
-/// that returns it without a challenge is serving the stream unauthenticated.
+/// Build an RTSP `DESCRIBE` request (asks for the stream's SDP) for
+/// `rtsp://ip:port{route}`.
 fn build_describe_request(ip: IpAddr, port: u16, route: &str, cseq: u32) -> String {
     format!(
         "DESCRIBE rtsp://{ip}:{port}{route} RTSP/1.0\r\n\
@@ -176,8 +158,7 @@ const fn classify_describe(resp: &RtspResponse) -> DescribeVerdict {
 
 /// Fingerprint the camera vendor from a `Server` header value.
 ///
-/// Only well-known, unambiguous substrings are matched; anything else is
-/// [`CameraVendor::Unknown`] so we never attach vendor-specific CVEs to a guess.
+/// Only unambiguous substrings match; otherwise [`CameraVendor::Unknown`].
 fn fingerprint_vendor(server: &str) -> CameraVendor {
     let s = server.to_ascii_lowercase();
     if s.contains("hikvision") {
@@ -204,23 +185,15 @@ const fn vendor_label(vendor: CameraVendor) -> &'static str {
     }
 }
 
-/// Recent, high-impact CVEs to attach for an identified vendor.
-///
-/// These are attached only when the `Server` header clearly names the vendor, so
-/// the KEV/EPSS enrichment layer can flag actively-exploited ones (e.g.
-/// Hikvision `CVE-2021-36260` is in the CISA KEV catalog). We attach a CVE only
-/// where we are confident the identifier is correct; Axis is fingerprinted for
-/// context but carries no blanket CVE.
+/// CVEs to attach for an identified vendor (only when the `Server` header names
+/// the vendor). Axis is fingerprinted but carries no blanket CVE.
 fn vendor_cves(vendor: CameraVendor) -> Vec<String> {
     match vendor {
-        // Unauthenticated command injection in the web/RTSP stack of many
-        // Hikvision cameras and NVRs; CISA KEV, mass-exploited by botnets.
+        // Unauthenticated command injection (CISA KEV).
         CameraVendor::Hikvision => vec!["CVE-2021-36260".to_owned()],
-        // Authentication-bypass ("identity authentication bypass") affecting a
-        // wide range of Dahua devices.
+        // Authentication bypass across many Dahua devices.
         CameraVendor::Dahua => vec!["CVE-2021-33044".to_owned(), "CVE-2021-33045".to_owned()],
-        // Stack buffer overflow in the XMeye P2P stack shipped in countless
-        // Xiongmai-based OEM cameras/DVRs.
+        // XMeye P2P stack buffer overflow (Xiongmai OEM cameras/DVRs).
         CameraVendor::Xiongmai => vec!["CVE-2018-10088".to_owned()],
         CameraVendor::Axis | CameraVendor::Unknown => Vec::new(),
     }
@@ -303,8 +276,7 @@ async fn probe_rtsp(ip: IpAddr, port: u16) -> Option<RtspProbe> {
         };
         match classify_describe(&resp) {
             DescribeVerdict::OpenNoAuth => {
-                // One demonstrably-open stream is enough — stop probing further
-                // routes to keep the scan quiet and fast.
+                // One open stream is enough; stop probing further routes.
                 open_route = Some((*route).to_owned());
                 break;
             }
@@ -342,8 +314,7 @@ impl Scanner for RtspScanner {
         tracing::info!("running RTSP/ONVIF camera exposure scan");
         let mut findings = Vec::new();
 
-        // Skip in Passive/quick mode — an RTSP DESCRIBE walk is more than a quick
-        // scan should do.
+        // Skip below Active intensity — this performs a DESCRIBE route walk.
         if !ctx
             .config
             .intensity
@@ -420,7 +391,6 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     });
 
     if let Some(route) = probe.open_route {
-        // Demonstrated: the SDP media description was served with no challenge.
         let mut finding = Finding::new(
             "rtsp",
             &format!("RTSP stream reachable without authentication on {ip}:{port}{route}"),
@@ -434,7 +404,6 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             ),
             Severity::High,
         )
-        // We actually observed the unauthenticated 200 OK — this is demonstrated.
         .with_confidence(rikitikitavi_core::Confidence::Confirmed)
         .with_ip(*ip)
         .with_port(port)
@@ -452,8 +421,7 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
         }
         findings.push(finding);
     } else if probe.auth_required {
-        // Correct posture: the server challenged for credentials. We do NOT try
-        // any credentials. Emit only a low-key presence note.
+        // Server challenged for credentials; none are tried. Presence note only.
         let mut finding = Finding::new(
             "rtsp",
             &format!("RTSP server requires authentication on {ip}:{port}"),
@@ -465,8 +433,6 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             ),
             Severity::Info,
         )
-        // Inference from the presence of an RTSP camera/NVR; not a demonstrated
-        // vulnerability.
         .with_confidence(rikitikitavi_core::Confidence::Probable)
         .with_ip(*ip)
         .with_port(port)
@@ -476,8 +442,7 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
         }
         findings.push(finding);
     } else {
-        // RTSP server confirmed by OPTIONS but no route conclusively open or
-        // challenged. Note its presence for context.
+        // RTSP confirmed by OPTIONS, but no route open or challenged. Presence note.
         let mut finding = Finding::new(
             "rtsp",
             &format!("RTSP server present on {ip}:{port}"),

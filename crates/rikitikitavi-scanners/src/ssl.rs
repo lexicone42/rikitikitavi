@@ -9,24 +9,16 @@ use x509_parser::prelude::*;
 
 use crate::Scanner;
 
-/// TLS/SSL certificate scanner — checks certificates on discovered HTTPS
-/// ports for expiry, self-signed certs, weak keys, and old TLS versions.
-///
-/// Performs direct TLS handshakes using `rustls` to extract:
-/// - Negotiated TLS protocol version (1.2 vs 1.3)
-/// - Negotiated cipher suite (detects weak ciphers like CBC mode, SHA-1)
-/// - Certificate chain details (self-signed, validity)
-/// - HSTS header presence
+/// TLS scanner: direct `rustls` handshake (protocol version, cipher suite,
+/// leaf certificate analysis) plus an HSTS header check on discovered TLS ports.
 pub struct SslScanner;
 
-/// Known HTTP(S) ports to probe for TLS.
+/// Ports probed for TLS in Active mode.
 const TLS_PORTS: &[u16] = &[443, 8443, 8080, 8888, 993, 995, 465, 587, 636, 8883];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Classify a TLS protocol version into a finding.
-///
-/// TLS 1.0 and 1.1 are deprecated (RFC 8996) and considered insecure.
+/// Finding for a deprecated protocol version string (TLS 1.0/1.1, SSL); `None` for TLS 1.2+.
 pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Finding> {
     let version_lower = version.to_lowercase();
 
@@ -94,7 +86,6 @@ pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Find
         );
     }
 
-    // TLS 1.2 or 1.3 — acceptable
     None
 }
 
@@ -259,21 +250,17 @@ pub fn parse_cert_details(der: &[u8]) -> Option<CertDetails> {
     let not_before = format_asn1_time(&validity.not_before);
     let not_after = format_asn1_time(&validity.not_after);
 
-    // Days until expiry
     let now_epoch = chrono::Utc::now().timestamp();
     let expiry_epoch = validity.not_after.timestamp();
     let days_until_expiry = (expiry_epoch - now_epoch) / 86400;
 
-    // Public key info
     let spki = cert.public_key();
     let (key_algorithm, key_bits) = classify_public_key(spki);
 
-    // Signature algorithm
     let sig_alg = cert.signature_algorithm.algorithm.to_string();
     let sig_name = oid_to_sig_name(&sig_alg);
     let uses_sha1_signature = sig_name.contains("sha1") || sig_name.contains("SHA1");
 
-    // Subject Alternative Names
     let san_dns = cert
         .extensions()
         .iter()
@@ -327,8 +314,7 @@ fn classify_public_key(spki: &SubjectPublicKeyInfo<'_>) -> (String, u32) {
     // RSA: OID 1.2.840.113549.1.1.1
     if oid.contains("1.2.840.113549.1.1.1") {
         let bit_size = u32::try_from(spki.subject_public_key.data.len() * 8).unwrap_or(0);
-        // RSA key size in the SPKI is the modulus + exponent in DER encoding;
-        // the actual modulus is slightly smaller. Approximate to standard sizes.
+        // SPKI bit-string length includes DER modulus + exponent; round to standard sizes.
         let approx_bits = match bit_size {
             0..=1200 => 1024,
             1201..=2200 => 2048,
@@ -341,7 +327,6 @@ fn classify_public_key(spki: &SubjectPublicKeyInfo<'_>) -> (String, u32) {
 
     // EC: OID 1.2.840.10045.2.1
     if oid.contains("1.2.840.10045.2.1") {
-        // Determine curve from parameters
         let curve_bits = spki.algorithm.parameters.as_ref().map_or(256, |params| {
             let param_str = format!("{params:?}");
             if param_str.contains("1.2.840.10045.3.1.7") {
@@ -372,7 +357,6 @@ fn classify_public_key(spki: &SubjectPublicKeyInfo<'_>) -> (String, u32) {
 
 /// Map OID strings to human-readable signature algorithm names.
 fn oid_to_sig_name(oid: &str) -> String {
-    // Common signature algorithm OIDs
     if oid.contains("1.2.840.113549.1.1.5") {
         return "sha1WithRSAEncryption".to_owned();
     }
@@ -402,7 +386,6 @@ fn oid_to_sig_name(oid: &str) -> String {
 
 /// Compute total validity period in days from `not_before` to `not_after`.
 fn compute_total_validity_days(cert: &CertDetails) -> i64 {
-    // Parse YYYY-MM-DD dates to compute span
     let parse = |s: &str| -> Option<i64> {
         let parts: Vec<&str> = s.split('-').collect();
         if parts.len() != 3 {
@@ -426,7 +409,7 @@ fn compute_total_validity_days(cert: &CertDetails) -> i64 {
 pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // 1. Expired certificate
+    // Expired
     if cert.days_until_expiry < 0 {
         let days_ago = -cert.days_until_expiry;
         findings.push(
@@ -457,7 +440,7 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             )),
         );
     }
-    // 2. Expiring soon (within 30 days)
+    // Expiring within 30 days
     else if cert.days_until_expiry <= 30 {
         findings.push(
             Finding::new(
@@ -479,7 +462,6 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         );
     }
 
-    // 3. Weak RSA key (< 2048 bits)
     if cert.key_algorithm == "RSA" && cert.key_bits < 2048 {
         findings.push(
             Finding::new(
@@ -500,7 +482,6 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         );
     }
 
-    // 4. SHA-1 signature
     if cert.uses_sha1_signature {
         findings.push(
             Finding::new(
@@ -522,7 +503,6 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         );
     }
 
-    // 5. Self-signed certificate
     if cert.is_self_signed {
         let (severity, desc) = if crate::dns::is_private_ip(ip) {
             (
@@ -557,17 +537,15 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         );
     }
 
-    // 6. Excessive certificate validity (>825 days / ~27 months per CA/B Forum baseline)
-    // IoT devices often ship with 10-50 year certs that will never be rotated.
+    // Excessive validity: >825 days total (CA/B Forum public-cert limit is 398 days).
     if cert.days_until_expiry > 825 {
-        // Calculate total validity in days from not_before to not_after
         let total_validity_days = compute_total_validity_days(cert);
         if total_validity_days > 825 {
             let years = total_validity_days / 365;
             let severity = if total_validity_days > 3650 {
-                Severity::Medium // >10 years: almost certainly never-rotated IoT cert
+                Severity::Medium // >10 years
             } else {
-                Severity::Low // 2-10 years: long but less extreme
+                Severity::Low
             };
             findings.push(
                 Finding::new(
@@ -593,7 +571,6 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         }
     }
 
-    // 7. Certificate details (Info-level)
     findings.push(
         Finding::new(
             "ssl",
@@ -638,7 +615,7 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
 fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding> {
     let lower = cipher.to_lowercase();
 
-    // CBC mode ciphers are vulnerable to padding oracle attacks (Lucky13, POODLE)
+    // CBC mode: padding-oracle class (Lucky13)
     if lower.contains("cbc") {
         return Some(
             Finding::new(
@@ -661,7 +638,6 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
         );
     }
 
-    // SHA-1 in cipher suite (not for cert signature, but for HMAC)
     if lower.contains("sha1") || lower.contains("sha_1") {
         return Some(
             Finding::new(
@@ -683,7 +659,7 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
         );
     }
 
-    // RSA key exchange (no forward secrecy)
+    // Static RSA key exchange: no forward secrecy
     if lower.starts_with("tls_rsa_") && !lower.contains("ecdhe") && !lower.contains("dhe") {
         return Some(
             Finding::new(
@@ -710,10 +686,7 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
     None
 }
 
-/// Perform a direct TLS handshake using `rustls` to extract protocol details.
-///
-/// This bypasses certificate validation (LAN devices have self-signed certs)
-/// to inspect what cipher suite and version the server actually negotiates.
+/// Direct `rustls` handshake; certificate validation disabled (LAN devices are self-signed).
 async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> {
     let addr = SocketAddr::new(ip, port);
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -721,9 +694,7 @@ async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> 
         .ok()?
         .ok()?;
 
-    // Build a rustls config that accepts any certificate (LAN scanning).
-    // Explicitly use aws-lc-rs provider to avoid runtime panics when no
-    // default CryptoProvider is installed (e.g. on macOS).
+    // aws-lc-rs provider set explicitly: no default CryptoProvider may be installed (macOS).
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
@@ -763,7 +734,7 @@ async fn probe_tls_handshake(ip: IpAddr, port: u16) -> Option<TlsHandshakeInfo> 
     })
 }
 
-/// A certificate verifier that accepts everything (for LAN scanning).
+/// Certificate verifier that accepts everything.
 #[derive(Debug)]
 struct NoVerifier;
 
@@ -808,7 +779,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // Direct TLS handshake for cipher suite and version inspection
     if let Some(info) = probe_tls_handshake(ip, port).await {
         tracing::debug!(
             ip = %ip, port, version = %info.protocol_version,
@@ -816,10 +786,8 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
             "TLS handshake details"
         );
 
-        // Check TLS version
         let version_lower = info.protocol_version.to_lowercase();
         if version_lower.contains("1.2") {
-            // TLS 1.2 is acceptable but 1.3 is preferred
             findings.push(
                 Finding::new(
                     "ssl",
@@ -854,26 +822,22 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
             );
         }
 
-        // Classify cipher suite
         if let Some(finding) = classify_cipher_suite(ip, port, &info.cipher_suite) {
             findings.push(finding);
         }
 
-        // Deep certificate analysis via X.509 parsing
         if let Some(der) = &info.leaf_cert_der {
             if let Some(cert_details) = parse_cert_details(der) {
                 findings.extend(analyze_certificate(ip, port, &cert_details));
             } else if info.cert_chain_length == 1 {
-                // Fallback: couldn't parse cert but chain length = 1 → likely self-signed
                 findings.push(classify_cert_issue(ip, port, "self-signed"));
             }
         } else if info.cert_chain_length == 1 {
-            // No cert DER available but chain length = 1
             findings.push(classify_cert_issue(ip, port, "self-signed"));
         }
     }
 
-    // Also do reqwest-based HSTS check
+    // HSTS check. TLS validation disabled: unauthenticated probe, no credentials sent.
     let url = format!("https://{ip}:{port}/");
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -928,13 +892,12 @@ impl Scanner for SslScanner {
         tracing::info!("running TLS/SSL certificate scan");
         let mut findings = Vec::new();
 
-        // Use discovered devices from Phase 1 for adaptive scanning
         if ctx.discovered_devices.is_empty() {
             tracing::info!("no discovered devices, skipping TLS scan");
             return Ok(findings);
         }
 
-        // In Passive mode, only check port 443 (fastest)
+        // Passive mode: port 443 only
         let allowed_tls_ports: &[u16] = if ctx
             .config
             .intensity
@@ -946,7 +909,6 @@ impl Scanner for SslScanner {
         };
 
         for device in &ctx.discovered_devices {
-            // Check TLS on discovered open ports that could speak TLS
             let tls_ports: Vec<u16> = device
                 .open_ports
                 .iter()
@@ -969,7 +931,6 @@ impl Scanner for SslScanner {
     }
 
     fn relevant_ports(&self) -> &[u16] {
-        // TLS-capable ports
         &[443, 8443, 8080, 8888, 993, 995, 465, 587, 636, 8883]
     }
 }

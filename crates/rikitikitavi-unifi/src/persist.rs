@@ -6,10 +6,8 @@ const ON_BOOT_DIR: &str = "/data/on_boot.d";
 const INSTALL_DIR: &str = "/data/rikitikitavi";
 const BOOT_SCRIPT_NAME: &str = "10-rikitikitavi.sh";
 
-/// Install the on-boot persistence script so rikitikitavi survives firmware updates.
-///
-/// On `UniFi` OS 2.x+, `/data/on_boot.d/` scripts are executed on every boot
-/// and `/data/` is preserved across firmware upgrades.
+/// Install the `/data/on_boot.d` script (`UniFi` OS 2.x+; `/data` survives firmware upgrades).
+/// Not implemented: the script is not written.
 pub fn install_persistence() -> Result<()> {
     tracing::info!("installing firmware-update persistence");
 
@@ -20,7 +18,6 @@ pub fn install_persistence() -> Result<()> {
         ));
     }
 
-    // TODO: Write the boot script that sets up cron and starts daemon
     let script_path = boot_dir.join(BOOT_SCRIPT_NAME);
     let _ = script_path;
 

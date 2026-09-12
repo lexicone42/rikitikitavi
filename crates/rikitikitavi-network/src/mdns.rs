@@ -1,16 +1,10 @@
-//! mDNS service discovery with proper DNS packet parsing.
-//!
-//! Hand-rolled DNS parser covering the record types needed for mDNS service
-//! discovery: A, AAAA, PTR, SRV, TXT. Follows the same pattern as
-//! [`wifi_frames`](crate::wifi_frames) — pure `&[u8]` → structured types,
-//! bounds-checked, no unsafe, proptest-fuzzed.
+//! mDNS service discovery with a hand-rolled DNS parser (A, AAAA, PTR, SRV, TXT).
+//! Pure `&[u8]` parsing, bounds-checked, proptest-fuzzed.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
-
-// ── DNS constants ──────────────────────────────────────────────────────
 
 /// DNS record type: A (IPv4 address).
 const TYPE_A: u16 = 1;
@@ -38,8 +32,6 @@ const MAX_NAME_HOPS: usize = 32;
 
 /// DNS header length in bytes.
 const DNS_HEADER_LEN: usize = 12;
-
-// ── Public types ───────────────────────────────────────────────────────
 
 /// An mDNS/Bonjour service discovered on the network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,22 +112,13 @@ pub struct DnsPacket {
     pub records: Vec<DnsRecord>,
 }
 
-// ── DNS name parsing ───────────────────────────────────────────────────
-
-/// Parse a DNS name starting at `offset` in the packet `data`.
-///
-/// Returns `(name, bytes_consumed)` where `bytes_consumed` is how far past
-/// `offset` the caller should advance (compression pointers are only 2 bytes
-/// regardless of the pointed-to name length).
-///
-/// Handles both label sequences and compression pointers (0xC0 prefix).
-/// Uses a depth limit to prevent infinite loops from malicious packets.
+/// Parse a DNS name at `offset`, following compression pointers (max [`MAX_NAME_HOPS`]).
+/// Returns `(name, bytes_consumed)`; a compression pointer consumes 2 bytes regardless of target length.
 pub fn parse_dns_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
     let mut parts: Vec<String> = Vec::new();
     let mut pos = offset;
     let mut hops = 0;
-    // Track how many bytes the name occupies at the *original* position.
-    // Once we follow a pointer, `consumed` is frozen (pointer is 2 bytes).
+    // Frozen at the first compression pointer.
     let mut consumed: Option<usize> = None;
 
     loop {
@@ -145,12 +128,11 @@ pub fn parse_dns_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
 
         let len_byte = data[pos];
 
-        // Compression pointer: top two bits are 11
+        // Compression pointer: top two bits set.
         if len_byte & 0xC0 == 0xC0 {
             if pos + 1 >= data.len() {
                 return None;
             }
-            // Freeze consumed at the first pointer we encounter
             if consumed.is_none() {
                 consumed = Some(pos - offset + 2);
             }
@@ -163,7 +145,7 @@ pub fn parse_dns_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
             continue;
         }
 
-        // Zero-length label = root, name is complete
+        // Root label terminates the name.
         if len_byte == 0 {
             let consumed = consumed.unwrap_or_else(|| pos - offset + 1);
             let name = parts.join(".");
@@ -177,14 +159,11 @@ pub fn parse_dns_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
             return None;
         }
 
-        // Labels should be ASCII, but be lenient with lossy conversion
         let label = String::from_utf8_lossy(&data[label_start..label_end]).into_owned();
         parts.push(label);
         pos = label_end;
     }
 }
-
-// ── DNS header parsing ─────────────────────────────────────────────────
 
 /// Parse a 12-byte DNS header from the start of `data`.
 pub fn parse_dns_header(data: &[u8]) -> Option<DnsHeader> {
@@ -201,23 +180,19 @@ pub fn parse_dns_header(data: &[u8]) -> Option<DnsHeader> {
     })
 }
 
-// ── Resource record parsing ────────────────────────────────────────────
-
-/// Parse a single DNS resource record at `offset`.
-///
-/// Returns `(record, bytes_consumed)` so the caller can advance past it.
+/// Parse one resource record at `offset`. Returns `(record, bytes_consumed)`.
 pub fn parse_resource_record(data: &[u8], offset: usize) -> Option<(DnsRecord, usize)> {
     let (name, name_consumed) = parse_dns_name(data, offset)?;
     let rr_start = offset + name_consumed;
 
-    // Need at least: type(2) + class(2) + TTL(4) + rdlength(2) = 10 bytes
+    // Fixed part: type(2) + class(2) + TTL(4) + rdlength(2) = 10 bytes
     if rr_start + 10 > data.len() {
         return None;
     }
 
     let rtype = u16::from_be_bytes([data[rr_start], data[rr_start + 1]]);
     let rclass = u16::from_be_bytes([data[rr_start + 2], data[rr_start + 3]]);
-    // TTL at rr_start+4..rr_start+8 (not needed for our purposes)
+    // TTL at rr_start+4..rr_start+8 is skipped.
     let rdlength = u16::from_be_bytes([data[rr_start + 8], data[rr_start + 9]]) as usize;
     let rdata_start = rr_start + 10;
     let rdata_end = rdata_start + rdlength;
@@ -226,10 +201,9 @@ pub fn parse_resource_record(data: &[u8], offset: usize) -> Option<(DnsRecord, u
         return None;
     }
 
-    // Strip the mDNS cache-flush bit from the class for comparison
     let class_masked = rclass & !MDNS_CACHE_FLUSH;
     if class_masked != CLASS_IN {
-        // Skip non-IN class records but still advance past them
+        // Non-IN class: returned as an empty TXT so the caller still advances.
         return Some((
             DnsRecord::Txt {
                 name,
@@ -292,7 +266,7 @@ pub fn parse_resource_record(data: &[u8], offset: usize) -> Option<(DnsRecord, u
             DnsRecord::Txt { name, entries }
         }
         _ => {
-            // Unknown record type — skip it
+            // Unknown type: returned as an empty TXT.
             DnsRecord::Txt {
                 name,
                 entries: Vec::new(),
@@ -322,27 +296,22 @@ fn parse_txt_rdata(data: &[u8]) -> Vec<String> {
     entries
 }
 
-// ── Full packet parsing ────────────────────────────────────────────────
-
-/// Parse a complete DNS packet into header + resource records.
-///
-/// Skips questions and collects all answer, authority, and additional records.
+/// Parse a DNS packet: header plus answer, authority, and additional records.
+/// Questions are skipped.
 pub fn parse_dns_packet(data: &[u8]) -> Option<DnsPacket> {
     let header = parse_dns_header(data)?;
 
     let mut offset = DNS_HEADER_LEN;
 
-    // Skip question section
     for _ in 0..header.questions {
         let (_, name_consumed) = parse_dns_name(data, offset)?;
-        // Each question has: name + QTYPE(2) + QCLASS(2)
+        // Question: name + QTYPE(2) + QCLASS(2)
         offset += name_consumed + 4;
         if offset > data.len() {
             return None;
         }
     }
 
-    // Parse answer + authority + additional sections
     let total_records = header
         .answers
         .saturating_add(header.authority)
@@ -363,12 +332,7 @@ pub fn parse_dns_packet(data: &[u8]) -> Option<DnsPacket> {
     Some(DnsPacket { header, records })
 }
 
-// ── Query builder ──────────────────────────────────────────────────────
-
-/// Build a minimal DNS query packet for the given name and record type.
-///
-/// The query has a single question with class IN. Transaction ID is 0
-/// (standard for mDNS).
+/// Build a DNS query with one IN-class question. Transaction ID is 0 (mDNS).
 #[must_use]
 pub fn build_mdns_query(name: &str, record_type: u16) -> Vec<u8> {
     let mut packet = Vec::with_capacity(64);
@@ -376,10 +340,9 @@ pub fn build_mdns_query(name: &str, record_type: u16) -> Vec<u8> {
     // Header: ID=0, flags=0, qdcount=1, ancount=0, nscount=0, arcount=0
     packet.extend_from_slice(&[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
 
-    // Encode the name as DNS labels
     encode_dns_name(&mut packet, name);
 
-    // QTYPE and QCLASS
+    // QTYPE, QCLASS
     packet.extend_from_slice(&record_type.to_be_bytes());
     packet.extend_from_slice(&CLASS_IN.to_be_bytes());
 
@@ -391,7 +354,7 @@ fn encode_dns_name(buf: &mut Vec<u8>, name: &str) {
     for label in name.split('.') {
         let len = label.len();
         if len > 63 {
-            // DNS labels are limited to 63 bytes — truncate
+            // Labels are capped at 63 bytes; longer ones are truncated.
             buf.push(63);
             buf.extend_from_slice(&label.as_bytes()[..63]);
         } else {
@@ -400,12 +363,10 @@ fn encode_dns_name(buf: &mut Vec<u8>, name: &str) {
             buf.extend_from_slice(label.as_bytes());
         }
     }
-    buf.push(0); // Root label
+    buf.push(0); // root label
 }
 
-// ── Service discovery ──────────────────────────────────────────────────
-
-/// Common mDNS service types to query for.
+/// Service types queried by [`discover_services`].
 const SERVICE_QUERIES: &[&str] = &[
     "_services._dns-sd._udp.local",
     "_http._tcp.local",
@@ -418,21 +379,17 @@ const SERVICE_QUERIES: &[&str] = &[
     "_hap._tcp.local",
 ];
 
-/// Discover services via mDNS on the local network.
-///
-/// Sends PTR queries for common service types and collects responses for
-/// `timeout_secs`. Returns structured `MdnsService` objects with names,
-/// types, hostnames, IPs, ports, and TXT metadata.
+/// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until the
+/// socket read timeout (`timeout_secs`) elapses.
 pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
-    // Run the blocking UDP I/O on a separate thread to avoid blocking the
-    // tokio runtime.
+    // Blocking UDP I/O runs off the async runtime.
     let services = tokio::task::spawn_blocking(move || discover_services_blocking(timeout_secs))
         .await
         .map_err(|e| anyhow::anyhow!("mDNS discovery task failed: {e}"))?;
     Ok(services)
 }
 
-/// Blocking mDNS discovery — called from `spawn_blocking`.
+/// Blocking half of [`discover_services`].
 fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
@@ -447,7 +404,6 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
 
     let dest = SocketAddr::new(IpAddr::V4(MDNS_MULTICAST), MDNS_PORT);
 
-    // Send PTR queries for each service type
     for &svc_name in SERVICE_QUERIES {
         let query = build_mdns_query(svc_name, TYPE_PTR);
         if socket.send_to(&query, dest).is_err() {
@@ -455,7 +411,6 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
         }
     }
 
-    // Collect and parse responses
     let mut all_records: Vec<(IpAddr, DnsRecord)> = Vec::new();
     let mut buf = [0u8; 4096];
 
@@ -470,15 +425,11 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
     correlate_mdns_records(&all_records)
 }
 
-/// Correlate mDNS records into structured service descriptions.
-///
-/// Follows the chain: PTR → SRV → A/TXT to build complete `MdnsService`
-/// objects. Services without a resolved IP are included with the responder's
-/// IP as a fallback.
+/// Build services by following PTR → SRV → A/AAAA/TXT. Unresolved targets fall
+/// back to a responder IP (see [`resolve_ip`]).
 fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     use std::collections::HashMap;
 
-    // Index records by name for quick lookup
     let mut a_records: HashMap<&str, Ipv4Addr> = HashMap::new();
     let mut aaaa_records: HashMap<&str, Ipv6Addr> = HashMap::new();
     let mut srv_records: HashMap<&str, (&str, u16)> = HashMap::new();
@@ -505,15 +456,13 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
         }
     }
 
-    // Collect PTR records (service type → instance name)
+    // PTR: service type → instance name
     for (_, record) in records {
         if let DnsRecord::Ptr { name, target } = record {
             ptr_records.push((name.as_str(), target.as_str()));
         }
     }
 
-    // Also collect SRV records that weren't pointed to by a PTR — these are
-    // direct service announcements
     let ptr_targets: std::collections::HashSet<&str> =
         ptr_records.iter().map(|(_, t)| *t).collect();
 
@@ -521,7 +470,6 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     let mut seen: std::collections::HashSet<(String, u16, String)> =
         std::collections::HashSet::new();
 
-    // Build services from PTR → SRV → A/TXT chain
     for (service_type, instance_name) in &ptr_records {
         if let Some(&(target, port)) = srv_records.get(instance_name) {
             let ip = resolve_ip(&a_records, &aaaa_records, target, records);
@@ -531,7 +479,6 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
 
             let key = (ip.to_string(), port, (*service_type).to_owned());
             if seen.insert(key) {
-                // Extract the instance name (part before the service type)
                 let friendly_name = instance_name
                     .strip_suffix(service_type)
                     .and_then(|s| s.strip_suffix('.'))
@@ -549,7 +496,7 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
         }
     }
 
-    // Build services from direct SRV records (not referenced by any PTR)
+    // SRV records not referenced by any PTR are direct announcements.
     for (_, record) in records {
         if let DnsRecord::Srv {
             name, target, port, ..
@@ -584,8 +531,7 @@ fn correlate_mdns_records(records: &[(IpAddr, DnsRecord)]) -> Vec<MdnsService> {
     services
 }
 
-/// Resolve a hostname to an IP address using collected A/AAAA records.
-/// Falls back to the responder's IP if no address record exists.
+/// IP for `target` from A/AAAA records, else the IP of the first responder in `records`.
 fn resolve_ip(
     a_records: &std::collections::HashMap<&str, Ipv4Addr>,
     aaaa_records: &std::collections::HashMap<&str, Ipv6Addr>,
@@ -598,7 +544,6 @@ fn resolve_ip(
     if let Some(&ipv6) = aaaa_records.get(target) {
         return IpAddr::V6(ipv6);
     }
-    // Fallback: use the IP of the first responder
     records
         .first()
         .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |(ip, _)| *ip)
@@ -608,9 +553,7 @@ fn resolve_ip(
 ///
 /// E.g. `"My Printer._ipp._tcp.local"` → `"_ipp._tcp.local"`.
 fn extract_service_type(name: &str) -> String {
-    // If the name starts with '_', it's already a bare service type
-    // (e.g. "_ipp._tcp.local"). Otherwise, strip the instance prefix
-    // before the first "._" (e.g. "My Printer._ipp._tcp.local").
+    // A leading '_' means the name is already a bare service type.
     if name.starts_with('_') {
         name.to_owned()
     } else {
@@ -618,8 +561,6 @@ fn extract_service_type(name: &str) -> String {
             .map_or_else(|| name.to_owned(), |idx| name[idx + 1..].to_owned())
     }
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

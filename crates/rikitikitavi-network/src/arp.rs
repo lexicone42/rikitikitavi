@@ -9,16 +9,12 @@ pub struct ArpEntry {
     pub interface: String,
 }
 
-/// Perform an ARP scan of the given network range.
-///
-/// Currently delegates to reading the ARP cache. A full active scan
-/// (ping sweep + ARP) requires elevated permissions; use the
-/// `rikitikitavi-nethelper.sh` script to populate the cache first (Linux only).
-#[allow(clippy::unused_async)] // Will use await once active ping sweep is implemented
+/// ARP cache entries within `network`. No active probing; on Linux
+/// `rikitikitavi-nethelper.sh` can populate the cache beforehand.
+#[allow(clippy::unused_async)]
 pub async fn arp_scan(network: &ipnetwork::IpNetwork) -> Result<Vec<ArpEntry>> {
     tracing::debug!(%network, "performing ARP scan (reading cache)");
     let entries = read_arp_cache()?;
-    // Filter to entries within the requested network
     Ok(entries
         .into_iter()
         .filter(|e| network.contains(e.ip))
@@ -72,12 +68,8 @@ fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
     Ok(Vec::new())
 }
 
-// ─── Linux parser ───────────────────────────────────────────────────────────
-
-/// Parse the contents of Linux `/proc/net/arp` into ARP entries.
-///
-/// Format: `IP address  HW type  Flags  HW address  Mask  Device`
-/// Filters out incomplete entries (flags `0x0`, MAC `00:00:00:00:00:00`).
+/// Parse Linux `/proc/net/arp`: `IP address  HW type  Flags  HW address  Mask  Device`.
+/// Incomplete entries (flags `0x0` or MAC `00:00:00:00:00:00`) are dropped.
 fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> {
     contents
         .lines()
@@ -92,7 +84,6 @@ fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> {
             let mac = fields[3];
             let interface = fields[5];
 
-            // Skip incomplete entries
             if flags == "0x0" || mac == "00:00:00:00:00:00" {
                 return None;
             }
@@ -106,23 +97,17 @@ fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> {
         .collect()
 }
 
-// ─── macOS parser ───────────────────────────────────────────────────────────
-
-/// Parse macOS `arp -a` output into ARP entries.
-///
-/// Format: `hostname (IP) at MAC on interface [ifscope ...]`
-/// Lines with `(incomplete)` are filtered out.
+/// Parse macOS `arp -a`: `hostname (IP) at MAC on interface [ifscope ...]`.
+/// `(incomplete)` lines and the broadcast MAC are dropped.
 #[cfg(any(target_os = "macos", test))]
 fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> {
     contents
         .lines()
         .filter_map(|line| {
-            // Skip incomplete entries
             if line.contains("(incomplete)") {
                 return None;
             }
 
-            // Find IP in parentheses
             let open = line.find('(')?;
             let close = line.find(')')?;
             if close <= open + 1 {
@@ -131,7 +116,6 @@ fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> {
             let ip_str = &line[open + 1..close];
             let ip: IpAddr = ip_str.parse().ok()?;
 
-            // Find "at MAC on interface"
             let after_close = &line[close + 1..];
             let at_idx = after_close.find(" at ")?;
             let rest = &after_close[at_idx + 4..];
@@ -143,7 +127,6 @@ fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> {
             }
 
             let mac = parts[0];
-            // Skip if MAC is all zeros or incomplete
             if mac == "(incomplete)" || mac == "ff:ff:ff:ff:ff:ff" {
                 return None;
             }

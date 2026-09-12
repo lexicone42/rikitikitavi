@@ -14,8 +14,7 @@ pub struct Cli {
     #[arg(short, long, global = true, env = "RIKITIKITAVI_CONFIG")]
     pub config: Option<PathBuf>,
 
-    /// Logging verbosity. Defaults to `warn` so scan output stays readable;
-    /// use `--log-level info` (or `debug`/`trace`) for progress detail.
+    /// Logging verbosity (error, warn, info, debug, trace).
     #[arg(short, long, global = true, default_value = "warn")]
     pub log_level: String,
 
@@ -101,28 +100,23 @@ pub struct ScanArgs {
     #[arg(long, default_value = "json")]
     pub format: ReportFormatArg,
 
-    /// Exit non-zero (code 2) if any finding is at or above this severity.
-    /// Useful for cron/CI self-audits, e.g. `--fail-on high`.
+    /// Exit with code 2 if any finding is at or above this severity.
     #[arg(long, default_value = "never")]
     pub fail_on: FailOnArg,
 
-    /// Suppress findings whose fingerprint is listed in this baseline file
-    /// (accepted findings), so recurring scans surface only what's new.
+    /// Suppress findings whose fingerprint is listed in this baseline file.
     #[arg(long)]
     pub suppress: Option<PathBuf>,
 
-    /// Write all current findings' fingerprints to this file as a baseline
-    /// (then pass it to `--suppress` on later scans).
+    /// Write all current findings' fingerprints to this file for use with `--suppress`.
     #[arg(long)]
     pub write_baseline: Option<PathBuf>,
 
-    /// Flag any discovered device NOT listed in this known-devices file as a
-    /// "new device on your network" finding.
+    /// Flag discovered devices not listed in this known-devices file as new-device findings.
     #[arg(long)]
     pub known_devices: Option<PathBuf>,
 
-    /// Write all currently-discovered devices to this file as the known set
-    /// (then pass it to `--known-devices` on later scans).
+    /// Write all discovered device identifiers to this file for use with `--known-devices`.
     #[arg(long)]
     pub write_known_devices: Option<PathBuf>,
 
@@ -369,7 +363,7 @@ pub struct MonitorArgs {
     pub yes: bool,
 }
 
-// ── Value enums for clap ────────────────────────────────────────────────
+// Value enums for clap.
 
 #[derive(Clone, ValueEnum)]
 pub enum PerspectiveArg {
@@ -406,12 +400,10 @@ pub enum ReportFormatArg {
     Ocsf,
 }
 
-/// Minimum severity that should make `scan` exit non-zero.
-///
-/// Lets cron/CI self-audits fail meaningfully (e.g. `--fail-on high`).
+/// Minimum severity that makes `scan` exit non-zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum FailOnArg {
-    /// Never fail on findings (default) — exit 0 regardless.
+    /// Never fail on findings.
     Never,
     Info,
     Low,

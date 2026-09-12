@@ -8,9 +8,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// Banner-grabbing services scanner — connects to common service ports,
-/// reads banners, identifies versions, and performs protocol-level probes
-/// (SSH key-exchange analysis, SMTP `EHLO`, FTP `FEAT`).
+/// Service banner scanner: banner grabs, HTTP `Server` header version checks,
+/// and protocol probes (SSH `kex_init`, SMTP `EHLO`, FTP `FEAT`).
 pub struct ServicesScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -50,16 +49,11 @@ pub struct SshKexInfo {
     pub host_key_algorithms: Vec<String>,
 }
 
-/// Parse an SSH `kex_init` packet from raw bytes.
+/// Parse an SSH `kex_init` packet (message type 20).
 ///
-/// The SSH transport protocol sends `kex_init` (message type 20) after the
-/// version exchange. Layout after the SSH packet header:
-/// - 1 byte: message type (20)
-/// - 16 bytes: cookie (random)
-/// - Then 10 name-lists (uint32 length + comma-separated ASCII names)
+/// Layout: [4] packet length, [1] padding length, [1] type=20, [16] cookie,
+/// then name-lists (u32 BE length + comma-separated names).
 pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
-    // Find SSH_MSG_KEXINIT (type 20) in the packet data
-    // Skip the 4-byte packet length + 1-byte padding length prefix
     let payload = if data.len() > 5 && data[5] == 20 {
         &data[5..]
     } else if !data.is_empty() && data[0] == 20 {
@@ -68,7 +62,6 @@ pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
         return None;
     };
 
-    // Skip message type (1) + cookie (16) = 17 bytes
     if payload.len() < 18 {
         return None;
     }
@@ -76,8 +69,7 @@ pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
     let mut offset = 17;
     let mut lists = Vec::new();
 
-    // Parse up to 4 name-lists (kex, host_key, ciphers_c2s, ciphers_s2c,
-    // macs_c2s ...). We only need the first 5 to get kex, host_key, cipher_c2s, cipher_s2c, mac_c2s.
+    // First 5 name-lists: kex, host_key, enc_c2s, enc_s2c, mac_c2s.
     for _ in 0..5 {
         if offset + 4 > payload.len() {
             break;
@@ -210,7 +202,6 @@ async fn probe_ssh_kex(ip: IpAddr, port: u16) -> Option<SshKexInfo> {
         .ok()?
         .ok()?;
 
-    // Read version string first
     let mut buf = vec![0u8; 4096];
     let n = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut buf))
         .await
@@ -220,14 +211,12 @@ async fn probe_ssh_kex(ip: IpAddr, port: u16) -> Option<SshKexInfo> {
         return None;
     }
 
-    // Send our version string to trigger kex_init
     let version = b"SSH-2.0-rikitikitavi_audit\r\n";
     tokio::time::timeout(BANNER_TIMEOUT, stream.write_all(version))
         .await
         .ok()?
         .ok()?;
 
-    // Read kex_init response
     let mut kex_buf = vec![0u8; 8192];
     let kn = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut kex_buf))
         .await
@@ -257,14 +246,11 @@ pub fn parse_smtp_ehlo(response: &str) -> SmtpEhloInfo {
 
     for line in response.lines() {
         let lower = line.to_lowercase();
-        // First line is the greeting banner (220 ...)
         if lower.starts_with("220") && info.banner.is_empty() {
             line.trim().clone_into(&mut info.banner);
             continue;
         }
-        // EHLO responses start with 250
         if lower.starts_with("250") {
-            // Strip "250-" or "250 " prefix
             let ext = if line.len() > 4 { line[4..].trim() } else { "" };
             if !ext.is_empty() {
                 info.extensions.push(ext.to_owned());
@@ -325,7 +311,6 @@ pub fn classify_smtp_ehlo(ip: IpAddr, port: u16, info: &SmtpEhloInfo) -> Vec<Fin
         );
     }
 
-    // Info finding with all details
     if !info.extensions.is_empty() {
         findings.push(
             Finding::new(
@@ -357,7 +342,6 @@ async fn probe_smtp_ehlo(ip: IpAddr, port: u16) -> Option<SmtpEhloInfo> {
         .ok()?
         .ok()?;
 
-    // Read greeting
     let mut buf = vec![0u8; 2048];
     let n = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut buf))
         .await
@@ -368,20 +352,17 @@ async fn probe_smtp_ehlo(ip: IpAddr, port: u16) -> Option<SmtpEhloInfo> {
     }
     let greeting = String::from_utf8_lossy(&buf[..n]).to_string();
 
-    // Send EHLO
     let ehlo = "EHLO rikitikitavi.audit\r\n";
     tokio::time::timeout(BANNER_TIMEOUT, stream.write_all(ehlo.as_bytes()))
         .await
         .ok()?
         .ok()?;
 
-    // Read EHLO response
     let en = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut buf))
         .await
         .ok()?
         .ok()?;
 
-    // Send QUIT
     let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"QUIT\r\n")).await;
 
     if en == 0 {
@@ -409,12 +390,10 @@ pub fn parse_ftp_feat(response: &str) -> FtpFeatInfo {
 
     for line in response.lines() {
         let lower = line.to_lowercase();
-        // 220 banner
         if lower.starts_with("220") && info.banner.is_empty() {
             line.trim().clone_into(&mut info.banner);
             continue;
         }
-        // FEAT lines start with a space (inside 211-..211 block)
         if line.starts_with(' ') {
             let feat = line.trim().to_owned();
             let feat_lower = feat.to_lowercase();
@@ -488,7 +467,6 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
         .ok()?
         .ok()?;
 
-    // Read greeting
     let mut buf = vec![0u8; 2048];
     let n = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut buf))
         .await
@@ -499,19 +477,16 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
     }
     let greeting = String::from_utf8_lossy(&buf[..n]).to_string();
 
-    // Send FEAT
     tokio::time::timeout(BANNER_TIMEOUT, stream.write_all(b"FEAT\r\n"))
         .await
         .ok()?
         .ok()?;
 
-    // Read FEAT response
     let fn_ = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut buf))
         .await
         .ok()?
         .ok()?;
 
-    // Send QUIT
     let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"QUIT\r\n")).await;
 
     if fn_ == 0 {
@@ -525,7 +500,7 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
 /// Ports that send a banner immediately upon connection.
 const BANNER_PORTS: &[u16] = &[21, 22, 23, 25, 110, 143, 3306, 5432, 6379];
 
-/// Ports where we need to send an HTTP request to get a response.
+/// Ports probed with an HTTP `HEAD` request.
 const HTTP_PORTS: &[u16] = &[80, 8080, 8443, 8888];
 
 /// Grab a banner from a TCP service that speaks first.
@@ -575,7 +550,6 @@ async fn grab_http_server(ip: IpAddr, port: u16) -> Option<String> {
     }
 
     let response = String::from_utf8_lossy(&buf[..n]);
-    // Extract Server header (case-insensitive)
     for line in response.lines() {
         let lower = line.to_lowercase();
         if lower.starts_with("server:") {
@@ -585,29 +559,24 @@ async fn grab_http_server(ip: IpAddr, port: u16) -> Option<String> {
     None
 }
 
-/// Extract an OS guess from an SSH version banner.
-///
-/// Returns `None` for bare `OpenSSH` without OS suffix (too ambiguous).
+/// OS guess from an SSH banner suffix; `None` for bare `OpenSSH`.
 fn parse_os_from_ssh_banner(banner: &str) -> Option<String> {
     let lower = banner.to_lowercase();
     if lower.contains("dropbear") {
         return Some("Linux (embedded)".to_owned());
     }
-    // OpenSSH_X.Yp1 Debian-5+deb11u5 → extract deb version
     if lower.contains("debian") {
         if let Some(detail) = parse_debian_version(banner) {
             return Some(detail);
         }
         return Some("Linux (Debian)".to_owned());
     }
-    // OpenSSH_X.Yp1 Ubuntu-3ubuntu0.4 → extract Ubuntu version from OpenSSH mapping
     if lower.contains("ubuntu") {
         if let Some(detail) = parse_ubuntu_version(banner) {
             return Some(detail);
         }
         return Some("Linux (Ubuntu)".to_owned());
     }
-    // OpenSSH_X.Yp1 FreeBSD-20230316 → extract FreeBSD version
     if lower.contains("freebsd") {
         return Some("FreeBSD".to_owned());
     }
@@ -625,14 +594,8 @@ pub struct OsFingerprint {
     pub is_eol: bool,
 }
 
-/// Parse Debian version from SSH banner suffix.
-///
-/// Format: `Debian-N+debXXuY` where XX is the Debian major version.
-/// Examples:
-///   - `Debian-5+deb11u5` → Debian 11 Bullseye
-///   - `Debian-2+deb12u1` → Debian 12 Bookworm
+/// Debian release from the `+debXXuY` banner suffix (e.g. `Debian-5+deb11u5` → Debian 11).
 fn parse_debian_version(banner: &str) -> Option<String> {
-    // Look for +deb\d+ pattern (the actual Debian version suffix, not "Debian" word)
     let lower = banner.to_lowercase();
     let deb_idx = lower.find("+deb")?;
     let after_deb = &lower[deb_idx + 4..];
@@ -659,25 +622,14 @@ const fn debian_version_info(version: u32) -> (Option<&'static str>, &'static st
     }
 }
 
-/// Parse Ubuntu version from SSH banner. The SSH package version
-/// encodes which Ubuntu release it belongs to.
-///
-/// We map the OpenSSH version bundled with each Ubuntu release:
-///   - `OpenSSH_8.9p1` → Ubuntu 22.04 Jammy
-///   - `OpenSSH_9.3p1` → Ubuntu 23.10 Mantic
-///   - `OpenSSH_9.6p1` → Ubuntu 24.04 Noble
+/// Ubuntu release inferred from the bundled `OpenSSH` version (e.g. 8.9 → 22.04).
 fn parse_ubuntu_version(banner: &str) -> Option<String> {
-    // Extract the OpenSSH version to map to Ubuntu release
     let (major, minor) = extract_ssh_version(banner)?;
     let (release, codename, eol) = ubuntu_from_openssh(major, minor)?;
     Some(format!("Linux (Ubuntu {release} {codename}, EOL: {eol})"))
 }
 
-/// Map `OpenSSH` (major, minor) to Ubuntu release, codename, and EOL date.
-///
-/// Ubuntu ships specific `OpenSSH` versions with each release. This mapping
-/// is not 100% precise (PPAs can override), but the combination of
-/// `OpenSSH` version + "Ubuntu" in the banner makes it reliable.
+/// Map `OpenSSH` (major, minor) to Ubuntu (release, codename, EOL date).
 const fn ubuntu_from_openssh(
     major: u32,
     minor: u32,
@@ -699,12 +651,10 @@ const fn ubuntu_from_openssh(
     }
 }
 
-/// Check whether an OS fingerprint from an SSH banner indicates an EOL distro,
-/// and if so, generate a finding.
+/// Finding if the SSH banner indicates an EOL Debian/Ubuntu release.
 pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     let lower = banner.to_lowercase();
 
-    // Debian: extract version from +deb\d+ pattern
     if lower.contains("debian") {
         let deb_idx = lower.find("+deb")?;
         let after_deb = &lower[deb_idx + 4..];
@@ -734,7 +684,6 @@ pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         return None;
     }
 
-    // Ubuntu: map OpenSSH version → release → EOL
     if lower.contains("ubuntu") {
         let (major, minor) = extract_ssh_version(banner)?;
         let (release, codename, eol_date) = ubuntu_from_openssh(major, minor)?;
@@ -781,7 +730,6 @@ fn is_date_past(date_str: &str) -> bool {
 fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     let banner_lower = banner.to_lowercase();
 
-    // Redis — check for no-auth
     if port == 6379
         && banner_lower.contains("redis")
         && !banner_lower.contains("noauth")
@@ -808,7 +756,6 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         );
     }
 
-    // MySQL exposed
     if port == 3306 && banner_lower.contains("mysql") {
         return Some(
             Finding::new(
@@ -831,7 +778,6 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         );
     }
 
-    // PostgreSQL exposed
     if port == 5432 {
         return Some(
             Finding::new(
@@ -851,9 +797,7 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         );
     }
 
-    // SSH version disclosure
     if port == 22 && banner_lower.contains("ssh") {
-        // Detect Dropbear SSH (common on embedded/IoT devices)
         if banner_lower.contains("dropbear") {
             let hint = DeviceHint::new()
                 .with_device_type(DeviceType::IoT)
@@ -881,11 +825,9 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             );
         }
 
-        // Full version-aware CVE analysis
         if let Some((major, minor)) = extract_ssh_version(banner) {
             let cves = check_openssh_cves(major, minor);
             if !cves.is_empty() {
-                // Use the highest severity CVE for the finding
                 let max_severity = cves.iter().map(|c| c.2).max().unwrap_or(Severity::Low);
 
                 let cve_list: Vec<String> = cves
@@ -945,7 +887,6 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             }
         }
 
-        // No known CVEs — basic version disclosure
         let severity = if banner_lower.contains("openssh") {
             match extract_ssh_major_version(banner) {
                 Some(v) if v < 7 => Severity::High,
@@ -973,7 +914,6 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         return Some(finding);
     }
 
-    // FTP banner
     if port == 21 && banner_lower.contains("ftp") {
         return Some(
             Finding::new(
@@ -988,7 +928,6 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         );
     }
 
-    // Generic version disclosure for other services
     if !banner.is_empty() {
         return Some(
             Finding::new(
@@ -1043,8 +982,7 @@ fn extract_ssh_version(banner: &str) -> Option<(u32, u32)> {
 pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static str, Severity)> {
     let mut cves = Vec::new();
 
-    // CVE-2024-6387 "regreSSHion" — OpenSSH 8.5p1..9.7p1 (glibc-based Linux)
-    // Signal handler race condition → unauthenticated RCE
+    // CVE-2024-6387 regreSSHion: 8.5p1..9.7p1
     if (major == 8 && minor >= 5) || (major == 9 && minor <= 7) {
         cves.push((
             "CVE-2024-6387",
@@ -1054,7 +992,7 @@ pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static
         ));
     }
 
-    // CVE-2023-38408 — OpenSSH < 9.3p2, PKCS#11 remote code execution via forwarded agent
+    // CVE-2023-38408 PKCS#11 agent RCE: < 9.3p2
     if major < 9 || (major == 9 && minor < 3) {
         cves.push((
             "CVE-2023-38408",
@@ -1063,7 +1001,7 @@ pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static
         ));
     }
 
-    // CVE-2023-48795 "Terrapin" — OpenSSH < 9.6, prefix truncation attack on chacha20-poly1305
+    // CVE-2023-48795 Terrapin: < 9.6
     if major < 9 || (major == 9 && minor < 6) {
         cves.push((
             "CVE-2023-48795",
@@ -1073,7 +1011,7 @@ pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static
         ));
     }
 
-    // CVE-2021-41617 — OpenSSH 6.2..8.7, privilege separation bypass
+    // CVE-2021-41617: 6.2..8.7
     if (major == 6 && minor >= 2) || major == 7 || (major == 8 && minor <= 7) {
         cves.push((
             "CVE-2021-41617",
@@ -1083,7 +1021,7 @@ pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static
         ));
     }
 
-    // CVE-2018-15473 — OpenSSH < 7.8, user enumeration
+    // CVE-2018-15473 user enumeration: < 7.8
     if major < 7 || (major == 7 && minor < 8) {
         cves.push((
             "CVE-2018-15473",
@@ -1112,23 +1050,13 @@ pub struct ServerVersion {
     pub raw: String,
 }
 
-/// Parse an HTTP `Server` header into a structured product/version.
-///
-/// Handles common formats:
-/// - `nginx/1.18.0`
-/// - `Apache/2.4.41 (Ubuntu)`
-/// - `lighttpd/1.4.55`
-/// - `Microsoft-IIS/10.0`
-/// - `MiniServ/1.950` (Webmin)
-/// - `Jetty(9.4.31.v20200723)`
-/// - `openresty/1.19.9.1`
+/// Parse an HTTP `Server` header: `product/version[ (os)]` or `Jetty(version)`.
 pub fn parse_server_header(header: &str) -> Option<ServerVersion> {
     let trimmed = header.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Try product/version format (most common)
     if let Some((product, version_rest)) = trimmed.split_once('/') {
         let product_clean = product.trim().to_lowercase();
         if let Some(ver) = parse_version_numbers(version_rest) {
@@ -1142,7 +1070,6 @@ pub fn parse_server_header(header: &str) -> Option<ServerVersion> {
         }
     }
 
-    // Try Jetty(version) format
     let lower = trimmed.to_lowercase();
     if lower.starts_with("jetty(") || lower.starts_with("jetty/") {
         let rest = &trimmed[6..];
@@ -1176,10 +1103,7 @@ fn parse_version_numbers(version: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// Known EOL / vulnerable server version ranges.
-///
-/// Returns `(severity, description, optional_cwe, optional_cve_refs)` if the version
-/// is known-bad, or `None` if the version is acceptable/unknown.
+/// Known EOL / vulnerable version ranges per product; `None` if acceptable or unknown.
 #[allow(clippy::too_many_lines)]
 pub fn check_server_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     match sv.product.as_str() {
@@ -1215,15 +1139,14 @@ pub struct ServerVersionIssue {
 }
 
 fn check_nginx_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // nginx 1.24 is current stable (Apr 2023), 1.25 is mainline
-    // Anything below 1.22 is EOL
+    // < 1.22 is EOL
     if sv.major == 1 && sv.minor < 22 {
         let mut refs = Vec::new();
-        // nginx < 1.17.7 vulnerable to request smuggling (CVE-2019-20372)
+        // < 1.17.7: CVE-2019-20372 (request smuggling)
         if sv.minor < 17 || (sv.minor == 17 && sv.patch < 7) {
             refs.push("https://nvd.nist.gov/vuln/detail/CVE-2019-20372".to_owned());
         }
-        // nginx < 1.21.0 vulnerable to DNS resolver (CVE-2021-23017)
+        // < 1.21.0: CVE-2021-23017 (resolver)
         if sv.minor < 21 {
             refs.push("https://nvd.nist.gov/vuln/detail/CVE-2021-23017".to_owned());
         }
@@ -1246,7 +1169,7 @@ fn check_nginx_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_apache_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // Apache 2.4 is the only active branch; 2.2 EOL since 2017
+    // 2.2 EOL since 2017
     if sv.major == 2 && sv.minor <= 2 {
         let refs = vec!["https://nvd.nist.gov/vuln/detail/CVE-2017-9798".to_owned()];
         return Some(ServerVersionIssue {
@@ -1261,12 +1184,9 @@ fn check_apache_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
             cve_refs: refs,
         });
     }
-    // Apache 2.4.x — check for known vulnerable patch levels
     if sv.major == 2 && sv.minor == 4 {
         let mut refs = Vec::new();
-        // < 2.4.49: path traversal CVE-2021-41773 (only affects 2.4.49 with specific config,
-        // but < 2.4.49 has other issues)
-        // < 2.4.52: CVE-2021-44790 (mod_lua buffer overflow)
+        // < 2.4.52: CVE-2021-44790 (mod_lua)
         if sv.patch < 52 {
             refs.push("https://nvd.nist.gov/vuln/detail/CVE-2021-44790".to_owned());
         }
@@ -1290,7 +1210,7 @@ fn check_apache_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_lighttpd_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // lighttpd 1.4.76+ is current; anything < 1.4.56 has CVE-2022-22707
+    // < 1.4.56: CVE-2022-22707
     if sv.major == 1 && sv.minor == 4 && sv.patch < 56 {
         return Some(ServerVersionIssue {
             severity: Severity::Medium,
@@ -1307,7 +1227,7 @@ fn check_lighttpd_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_iis_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // IIS 10.0 is current (Windows Server 2016+); IIS 7.5 → Server 2008 R2 (EOL)
+    // < 8: Server 2008 R2 and older (EOL)
     if sv.major < 8 {
         return Some(ServerVersionIssue {
             severity: Severity::High,
@@ -1339,8 +1259,7 @@ fn check_iis_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_openresty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // OpenResty bundles nginx; version correlates with nginx version
-    // OpenResty < 1.19 bundles nginx < 1.19 which is EOL
+    // < 1.19 bundles EOL nginx
     if sv.major == 1 && sv.minor < 19 {
         return Some(ServerVersionIssue {
             severity: Severity::Medium,
@@ -1357,9 +1276,7 @@ fn check_openresty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_miniserv_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // MiniServ is Webmin's HTTP server
-    // Webmin < 1.990 vulnerable to CVE-2022-0824 (RCE)
-    // Version format: MiniServ/1.950 (patch is really minor for Webmin)
+    // Webmin (MiniServ) < 1.990: CVE-2022-0824; `1.950` parses as major=1, minor=950
     let webmin_version = sv.major * 1000 + sv.minor;
     if webmin_version < 1990 {
         return Some(ServerVersionIssue {
@@ -1377,11 +1294,10 @@ fn check_miniserv_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
 }
 
 fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    // Jetty 9.4.x is EOL (community support ended Jun 2023)
-    // Jetty 10.0/11.0/12.0 are active
+    // <= 9.x is EOL
     if sv.major <= 9 {
         let mut refs = Vec::new();
-        // Jetty < 9.4.51: CVE-2023-26048 (header overflow)
+        // < 9.4.51: CVE-2023-26048
         if sv.major < 9
             || (sv.major == 9 && sv.minor < 4)
             || (sv.major == 9 && sv.minor == 4 && sv.patch < 51)
@@ -1402,11 +1318,7 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     None
 }
 
-/// Classify an HTTP Server header with version intelligence.
-///
-/// Parses the Server header to extract product/version, then checks against
-/// known EOL and vulnerable version databases. Returns a higher-severity
-/// finding when the software version has known security issues.
+/// Finding for a `Server` header: version issue if known, else Info disclosure.
 fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
     if let Some(sv) = parse_server_header(server)
         && let Some(issue) = check_server_version(&sv)
@@ -1432,7 +1344,6 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
         return finding;
     }
 
-    // Fallback: plain version disclosure
     Finding::new(
         "services",
         &format!("HTTP server version disclosure on {ip}:{port}"),
@@ -1503,7 +1414,6 @@ impl Scanner for ServicesScanner {
         tracing::info!("running service banner scan");
         let mut findings = Vec::new();
 
-        // ── Adaptive mode: use Phase 1 discovered devices ───────────
         if !ctx.discovered_devices.is_empty() {
             tracing::info!(
                 device_count = ctx.discovered_devices.len(),
@@ -1512,7 +1422,6 @@ impl Scanner for ServicesScanner {
 
             for device in &ctx.discovered_devices {
                 let ip = device.ip;
-                // Grab banners on all discovered open ports (not just hardcoded)
                 for open_port in &device.open_ports {
                     let port = open_port.port;
                     if BANNER_PORTS.contains(&port) {
@@ -1524,8 +1433,6 @@ impl Scanner for ServicesScanner {
                                 findings.push(os_finding);
                             }
                         }
-                        // Deep protocol probes for specific services
-                        // (skipped in Passive mode for speed)
                         if ctx
                             .config
                             .intensity
@@ -1538,7 +1445,7 @@ impl Scanner for ServicesScanner {
                             findings.push(classify_http_server(ip, port, &server));
                         }
                     } else {
-                        // Try banner grab on unknown ports too
+                        // Unknown port: plain banner grab
                         if let Some(banner) = grab_banner(ip, port).await {
                             if let Some(finding) = classify_banner(ip, port, &banner) {
                                 findings.push(finding);
@@ -1558,7 +1465,6 @@ impl Scanner for ServicesScanner {
             return Ok(findings);
         }
 
-        // ── Fallback: classic mode using ARP cache ──────────────────
         let arp_entries =
             rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "services".to_owned(),

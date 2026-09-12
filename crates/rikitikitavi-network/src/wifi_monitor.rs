@@ -1,19 +1,16 @@
-//! Platform-specific `WiFi` monitor mode setup and teardown.
-//!
-//! On Linux, creates a virtual monitor interface preserving the existing connection.
-//! On macOS, uses pcap's rfmon mode which disconnects `WiFi`.
+//! `WiFi` monitor mode setup and teardown.
+//! Linux: virtual monitor interface via `iw` (existing connection preserved).
+//! macOS: pcap rfmon on the real interface (disconnects `WiFi`).
 
 use anyhow::{Context, Result, bail};
 use std::process::Command;
-
-// ── Public types ────────────────────────────────────────────────────────
 
 /// Describes whether monitor mode is available.
 #[derive(Debug)]
 pub enum MonitorCapability {
     /// Monitor mode is supported on this interface.
     Supported { interface: String, phy: String },
-    /// Monitor mode is not available; reason explains why.
+    /// Monitor mode unavailable, with reason.
     NotSupported(String),
 }
 
@@ -53,14 +50,12 @@ impl MonitorSession {
                 teardown_linux_monitor(&self.monitor_interface)?;
             }
             MonitorPlatform::MacOsRfmon => {
-                // No explicit cleanup needed — rfmon is released when pcap capture closes.
+                // rfmon is released when the pcap capture closes.
             }
         }
         Ok(())
     }
 }
-
-// ── Platform detection ──────────────────────────────────────────────────
 
 /// Find the primary `WiFi` interface on this system.
 pub fn find_wifi_interface() -> Result<String> {
@@ -72,19 +67,15 @@ pub fn detect_capability() -> MonitorCapability {
     detect_capability_platform()
 }
 
-/// Set up a monitor mode session.
-///
-/// On Linux, this creates a virtual monitor interface (e.g. `rikmon0`).
-/// On macOS, this returns the existing interface — rfmon is set at capture time.
+/// Set up a monitor session. Linux creates a virtual interface (`rikmon0`);
+/// macOS returns the existing interface, with rfmon set at capture time.
 pub fn setup_monitor(interface: &str) -> Result<MonitorSession> {
     setup_monitor_platform(interface)
 }
 
-// ── Linux implementation ────────────────────────────────────────────────
-
 #[cfg(target_os = "linux")]
 fn find_wifi_interface_platform() -> Result<String> {
-    // Check /sys/class/net/*/wireless — any interface with this dir is wireless
+    // Interfaces with a `/sys/class/net/<if>/wireless` directory are wireless.
     let entries = std::fs::read_dir("/sys/class/net").context("failed to read /sys/class/net")?;
 
     for entry in entries {
@@ -97,7 +88,6 @@ fn find_wifi_interface_platform() -> Result<String> {
         }
     }
 
-    // Fallback: try `iw dev` output
     parse_iw_dev_interface(&run_command("iw", &["dev"])?)
         .ok_or_else(|| anyhow::anyhow!("no WiFi interface found"))
 }
@@ -109,12 +99,10 @@ fn detect_capability_platform() -> MonitorCapability {
         Err(e) => return MonitorCapability::NotSupported(format!("no WiFi interface: {e}")),
     };
 
-    // Get the phy for this interface
     let Some(phy) = get_phy_for_interface(&interface) else {
         return MonitorCapability::NotSupported(format!("could not determine phy for {interface}"));
     };
 
-    // Check if monitor mode is supported
     let Ok(output) = run_command("iw", &["phy", &phy, "info"]) else {
         return MonitorCapability::NotSupported(
             "iw command not found or failed — install iw".to_owned(),
@@ -132,11 +120,10 @@ fn detect_capability_platform() -> MonitorCapability {
 fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
     let mon_name = "rikmon0";
 
-    // Remove stale monitor interface if it exists
+    // Remove a stale interface from a previous run.
     let _ = run_command("ip", &["link", "set", mon_name, "down"]);
     let _ = run_command("iw", &["dev", mon_name, "del"]);
 
-    // Create virtual monitor interface
     run_command(
         "iw",
         &[
@@ -151,7 +138,6 @@ fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
     )
     .with_context(|| format!("failed to create monitor interface from {interface}"))?;
 
-    // Bring it up
     run_command("ip", &["link", "set", mon_name, "up"])
         .with_context(|| format!("failed to bring up {mon_name}"))?;
 
@@ -177,8 +163,6 @@ fn teardown_linux_monitor(mon_interface: &str) -> Result<()> {
     Ok(())
 }
 
-// ── macOS implementation ────────────────────────────────────────────────
-
 #[cfg(target_os = "macos")]
 fn find_wifi_interface_platform() -> Result<String> {
     let output = run_command("networksetup", &["-listallhardwareports"])?;
@@ -193,8 +177,7 @@ fn detect_capability_platform() -> MonitorCapability {
         Err(e) => return MonitorCapability::NotSupported(format!("no WiFi interface: {e}")),
     };
 
-    // On macOS, if we can find the interface, we can attempt rfmon.
-    // The actual check happens when pcap tries to set rfmon mode.
+    // rfmon support is only verified when pcap opens the capture.
     MonitorCapability::Supported {
         phy: "unknown".to_owned(),
         interface,
@@ -203,8 +186,6 @@ fn detect_capability_platform() -> MonitorCapability {
 
 #[cfg(target_os = "macos")]
 fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
-    // On macOS, we don't create a virtual interface — pcap sets rfmon on the real interface.
-    // This WILL disconnect the WiFi connection.
     tracing::warn!(
         "macOS: enabling monitor mode on {interface} will disconnect your WiFi connection"
     );
@@ -215,8 +196,6 @@ fn setup_monitor_platform(interface: &str) -> Result<MonitorSession> {
         platform: MonitorPlatform::MacOsRfmon,
     })
 }
-
-// ── Fallback for unsupported platforms ──────────────────────────────────
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn find_wifi_interface_platform() -> Result<String> {
@@ -232,8 +211,6 @@ fn detect_capability_platform() -> MonitorCapability {
 fn setup_monitor_platform(_interface: &str) -> Result<MonitorSession> {
     bail!("WiFi monitor mode is not supported on this platform");
 }
-
-// ── Shared helpers ──────────────────────────────────────────────────────
 
 fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(cmd)
@@ -252,18 +229,15 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
 /// Get the physical device name (phy) for a wireless interface on Linux.
 #[cfg(target_os = "linux")]
 fn get_phy_for_interface(interface: &str) -> Option<String> {
-    // Try /sys/class/net/<iface>/phy80211/name
     let path = format!("/sys/class/net/{interface}/phy80211/name");
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_owned())
 }
 
-// ── Parsing functions (take &str for testability) ───────────────────────
-
-/// Parse `iw dev` output to find an interface name.
+/// First `Interface <name>` entry in `iw dev` output.
 fn parse_iw_dev_interface(output: &str) -> Option<String> {
-    // Output looks like:
+    // Format:
     //   phy#0
     //     Interface wlan0
     //       type managed
@@ -279,9 +253,8 @@ fn parse_iw_dev_interface(output: &str) -> Option<String> {
     None
 }
 
-/// Check if `iw phy <phy> info` output indicates monitor mode support.
+/// Whether `iw phy <phy> info` lists `monitor` under "Supported interface modes:".
 fn parse_iw_phy_supports_monitor(output: &str) -> bool {
-    // Look for "monitor" in the "Supported interface modes:" section
     let mut in_modes = false;
     for line in output.lines() {
         let trimmed = line.trim();
@@ -295,7 +268,6 @@ fn parse_iw_phy_supports_monitor(output: &str) -> bool {
                     return true;
                 }
             } else if !trimmed.is_empty() {
-                // Left the modes section
                 in_modes = false;
             }
         }
@@ -306,7 +278,7 @@ fn parse_iw_phy_supports_monitor(output: &str) -> bool {
 /// Parse `networksetup -listallhardwareports` to find the `WiFi` interface name.
 #[cfg(any(target_os = "macos", test))]
 fn parse_networksetup_wifi_interface(output: &str) -> Option<String> {
-    // Output format:
+    // Format:
     //   Hardware Port: Wi-Fi
     //   Device: en0
     //   Ethernet Address: ...
@@ -325,8 +297,6 @@ fn parse_networksetup_wifi_interface(output: &str) -> Option<String> {
     }
     None
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

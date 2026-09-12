@@ -19,8 +19,7 @@ use rikitikitavi_core::{NetworkMode, Perspective};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-/// Context passed to every scanner, providing information about the target
-/// environment and scan configuration.
+/// Per-scan context passed to every scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanContext {
     /// Target network CIDR.
@@ -33,15 +32,12 @@ pub struct ScanContext {
     pub network_mode: NetworkMode,
     /// Full scan configuration.
     pub config: ScanConfig,
-    /// Devices discovered during Phase 1 (network/port/device scanning).
-    /// Phase 2 scanners use this to adapt their checks based on what was
-    /// actually found on the network (open ports, device types, etc.).
+    /// Devices found in Phase 1; Phase 2 scanners adapt their checks to them.
     #[serde(default)]
     pub discovered_devices: Vec<Device>,
 }
 
-/// Serde default for backwards-compatible deserialization of old JSON files
-/// that lack the `scanned_at` field.
+/// Serde default for JSON files that predate `scanned_at`.
 fn default_scan_time() -> DateTime<Utc> {
     Utc::now()
 }

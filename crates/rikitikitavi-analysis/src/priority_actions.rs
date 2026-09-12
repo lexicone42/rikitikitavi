@@ -16,17 +16,11 @@ const fn severity_weight(severity: Severity) -> u32 {
     }
 }
 
-/// Group findings by shared remediation, rank by impact, and return the top 5.
+/// Top 5 remediation groups by score.
 ///
-/// Findings without remediation are skipped. Findings are grouped by their
-/// `remediation.description` field (the canonical action key from OVRS
-/// templates). Each group is scored as:
-///
-///   `score = severity_weight * 100 + device_count * 10 + finding_count`
-///
-/// The top 5 groups (by descending score) become `PriorityAction` items.
+/// Findings are grouped by `remediation.description` (no remediation: skipped) and each
+/// group scored as `severity_weight * 100 + device_count * 10 + finding_count`.
 pub fn generate_priority_actions(findings: &[Finding]) -> Vec<PriorityAction> {
-    // Group findings by remediation description
     let mut groups: HashMap<String, GroupAccumulator> = HashMap::new();
 
     for finding in findings {
@@ -44,19 +38,18 @@ pub fn generate_priority_actions(findings: &[Finding]) -> Vec<PriorityAction> {
                 finding_ids: Vec::new(),
             });
 
-        // Track worst severity
         if finding.severity > entry.max_severity {
             entry.max_severity = finding.severity;
         }
 
-        // Track affected IPs for device count (deduplicated later)
+        // Deduplicated at scoring time.
         if let Some(ip) = finding.affected_ip {
             entry.affected_ips.push(ip);
         }
 
         entry.finding_ids.push(finding.id);
 
-        // Use the most detailed steps/effort if current group has empty ones
+        // First non-empty steps/effort win.
         if entry.steps.is_empty() && !remediation.steps.is_empty() {
             entry.steps.clone_from(&remediation.steps);
         }
@@ -65,7 +58,6 @@ pub fn generate_priority_actions(findings: &[Finding]) -> Vec<PriorityAction> {
         }
     }
 
-    // Score and rank
     let mut scored: Vec<(String, GroupAccumulator, u32)> = groups
         .into_iter()
         .map(|(title, mut acc)| {
@@ -171,7 +163,7 @@ mod tests {
         ];
         let actions = generate_priority_actions(&findings);
         assert_eq!(actions.len(), 2);
-        // "Upgrade TLS" should be rank 1 (higher severity + more devices)
+        // Higher severity and more devices ranks first.
         assert_eq!(actions[0].title, "Upgrade TLS");
         assert_eq!(actions[0].severity, Severity::High);
         assert_eq!(actions[0].affected_device_count, 2);
@@ -192,7 +184,7 @@ mod tests {
             .collect();
         let actions = generate_priority_actions(&findings);
         assert_eq!(actions.len(), 5);
-        // Ranks should be 1..=5
+        // Ranks 1..=5.
         for (i, action) in actions.iter().enumerate() {
             assert_eq!(action.rank, u32::try_from(i + 1).unwrap());
         }

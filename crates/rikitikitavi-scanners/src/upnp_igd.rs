@@ -1,25 +1,13 @@
 //! `UPnP` Internet Gateway Device (IGD) port-forwarding exposure scanner.
 //!
-//! Answers a simple but important question: **what has my router forwarded to
-//! the internet?** Many consumer routers ship with `UPnP` IGD enabled by
-//! default, letting any device or application on the LAN — games and
-//! consoles, torrent/P2P clients, smart-home hubs, or malware on a compromised
-//! `IoT` device — punch a hole through the router's firewall and expose an
-//! internal host directly to the internet, with no further user confirmation.
-//! These forwards accumulate silently and are rarely audited.
-//!
-//! This scanner:
-//! 1. Discovers the Internet Gateway Device via an SSDP M-SEARCH multicast
-//!    for `urn:schemas-upnp-org:device:InternetGatewayDevice:1` and `:2`.
-//! 2. Fetches the device description `XML` from the SSDP `LOCATION` and finds
-//!    the `WANIPConnection` (or `WANPPPConnection`) service's control `URL`.
-//! 3. Enumerates active port mappings via repeated SOAP
-//!    `GetGenericPortMappingEntry` calls, stopping at the first SOAP fault
-//!    (typically error 713, `SpecifiedArrayIndexInvalid`) or non-200 response.
-//! 4. Emits one finding per active mapping, plus an informational summary.
-//!
-//! It never adds, removes, or modifies a mapping — this is read-only
-//! enumeration of what the router already reports.
+//! Read-only enumeration of the router's active `UPnP` port forwards:
+//! 1. Discover the IGD via SSDP M-SEARCH for
+//!    `urn:schemas-upnp-org:device:InternetGatewayDevice:1` and `:2`.
+//! 2. Fetch the device description `XML` from the SSDP `LOCATION` and find the
+//!    `WANIPConnection`/`WANPPPConnection` service's control `URL`.
+//! 3. Enumerate mappings via repeated SOAP `GetGenericPortMappingEntry` calls,
+//!    stopping at the first SOAP fault (typically error 713) or non-200 response.
+//! 4. Emit one finding per active mapping, plus a summary. Never modifies a mapping.
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
@@ -37,9 +25,8 @@ pub struct UpnpIgdScanner;
 /// SSDP multicast address and port.
 const SSDP_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(239, 255, 255, 250), 1900);
 
-/// Search targets for Internet Gateway Devices. SSDP matches the search
-/// target exactly (unless using `ssdp:all`/`upnp:rootdevice`), so a v2-only
-/// IGD will not answer an M-SEARCH for `:1` — both are searched explicitly.
+/// Search targets for Internet Gateway Devices. SSDP matches the ST exactly, so
+/// both `:1` and `:2` are searched (a v2-only IGD ignores a `:1` M-SEARCH).
 const IGD_SEARCH_TARGETS: &[&str] = &[
     "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
     "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
@@ -54,12 +41,11 @@ const SSDP_COLLECT_WINDOW: Duration = Duration::from_secs(3);
 /// Bound for each HTTP request (device description fetch, SOAP call).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// SOAP responses are a handful of short XML elements; 64 `KiB` is generous
-/// while bounding a hostile or malfunctioning router.
+/// Body read cap for SOAP responses.
 const SOAP_BODY_CAP: usize = 64 * 1024;
 
-/// Hard ceiling on `GetGenericPortMappingEntry` calls per WAN connection
-/// service, so a router that never returns a fault cannot hang the scan.
+/// Ceiling on `GetGenericPortMappingEntry` calls per WAN connection service, so
+/// a router that never returns a fault cannot hang the scan.
 const MAX_PORT_MAPPINGS: u32 = 100;
 
 // ── SSDP discovery ───────────────────────────────────────────────────
@@ -139,10 +125,7 @@ async fn discover_igd_locations() -> Vec<String> {
 
 // ── UPnP device description parsing ─────────────────────────────────
 
-/// Extract the text content between simple XML tags (non-recursive).
-///
-/// Looks for `<tag>content</tag>` and returns `content`. Mirrors
-/// [`crate::mdns::parse_upnp_device_xml`]'s helper of the same shape.
+/// Extract the text content of `<tag>content</tag>` (non-recursive).
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -156,12 +139,8 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     }
 }
 
-/// Find the `WANIPConnection`/`WANPPPConnection` service inside a `UPnP`
-/// device description `XML` and return its `(serviceType, controlURL)`.
-///
-/// Scans each `<service>...</service>` block (attribute-free, per the `UPnP`
-/// device schema) rather than parsing the full document tree, since only the
-/// service type and control `URL` are needed.
+/// Find the `WANIPConnection`/`WANPPPConnection` service in a `UPnP` device
+/// description `XML` and return its `(serviceType, controlURL)`.
 fn find_wan_connection_service(xml: &str) -> Option<(String, String)> {
     let mut idx = 0;
     while let Some(rel_start) = xml[idx..].find("<service>") {
@@ -184,14 +163,10 @@ fn find_wan_connection_service(xml: &str) -> Option<(String, String)> {
     None
 }
 
-/// Resolve a (possibly relative) `controlURL` against the SSDP `LOCATION`
-/// base `URL`.
+/// Resolve a (possibly relative) `controlURL` against the SSDP `LOCATION`.
 ///
-/// Absolute URLs are returned unchanged. Relative URLs are resolved against
-/// the scheme and authority (`scheme://host:port`) of `location` — routers
-/// overwhelmingly use root-relative control paths (e.g.
-/// `/upnp/control/WANIPConn1`), so this simple join is correct in practice
-/// without pulling in a full `URL`-resolution crate.
+/// Absolute URLs pass through; relative URLs join to `location`'s
+/// `scheme://host:port`. Assumes root-relative control paths (the router norm).
 fn resolve_control_url(location: &str, control_url: &str) -> Option<String> {
     if control_url.starts_with("http://") || control_url.starts_with("https://") {
         return Some(control_url.to_owned());
@@ -206,11 +181,10 @@ fn resolve_control_url(location: &str, control_url: &str) -> Option<String> {
     Some(format!("{authority}/{path}"))
 }
 
-/// Extract the host `IP` address from a `LOCATION` `URL` such as
-/// `http://192.168.1.1:49152/desc.xml`.
+/// Extract the host `IP` from a `LOCATION` `URL` (e.g.
+/// `http://192.168.1.1:49152/desc.xml`).
 ///
-/// `IPv4`-only (routers overwhelmingly advertise `IPv4` `LOCATION`s on the
-/// LAN); an `IPv6` literal in brackets will fail to parse and yield `None`.
+/// `IPv4`-only; a bracketed `IPv6` literal fails to parse and yields `None`.
 fn extract_host_ip(location: &str) -> Option<IpAddr> {
     let after_scheme = location.split("://").nth(1)?;
     let host_port = after_scheme.split('/').next()?;
@@ -276,11 +250,9 @@ struct PortMappingEntry {
 /// Parse a `GetGenericPortMappingEntryResponse` `SOAP` body into a
 /// [`PortMappingEntry`].
 ///
-/// Returns `None` if any field essential to describing the mapping
-/// (`NewExternalPort`, `NewInternalPort`, `NewProtocol`, `NewInternalClient`)
-/// is missing or unparsable. `NewEnabled` defaults to `true` when absent
-/// (some minimal implementations omit it for active mappings); `NewEnabled`
-/// values of `1` or `true` (case-insensitive) count as enabled.
+/// `None` if `NewExternalPort`, `NewInternalPort`, `NewProtocol`, or
+/// `NewInternalClient` is missing/unparsable. `NewEnabled` defaults to `true`
+/// when absent; `1` or `true` (case-insensitive) count as enabled.
 fn parse_port_mapping_response(xml: &str) -> Option<PortMappingEntry> {
     let external_port: u16 = extract_xml_tag(xml, "NewExternalPort")?.parse().ok()?;
     let internal_port: u16 = extract_xml_tag(xml, "NewInternalPort")?.parse().ok()?;
@@ -358,10 +330,8 @@ async fn enumerate_port_mappings(
 
 // ── Severity classification ──────────────────────────────────────────
 
-/// Ports whose exposure to the internet is especially dangerous:
-/// remote-management, remote-desktop, and file-sharing protocols that are
-/// frequently targeted by mass internet scanners and rarely intended to be
-/// internet-facing.
+/// Ports whose internet exposure is especially dangerous (remote management,
+/// remote desktop, file sharing).
 const fn is_sensitive_port(port: u16) -> bool {
     matches!(port, 22 | 23 | 80 | 445 | 3389 | 5900 | 8080)
 }
@@ -485,8 +455,7 @@ impl Scanner for UpnpIgdScanner {
         tracing::info!("running UPnP IGD port-forward scan");
         let mut findings = Vec::new();
 
-        // This performs active SSDP discovery plus SOAP calls against the
-        // router — skip it in quick/passive scans.
+        // Skip below Active intensity — this performs SSDP discovery and SOAP calls.
         if !ctx
             .config
             .intensity

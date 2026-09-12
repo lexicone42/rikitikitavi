@@ -1,11 +1,7 @@
-//! Pure-Rust 802.11 management frame parsing.
-//!
-//! Parses raw captured packets (radiotap header + 802.11 frame) into structured
-//! types for analysis. No platform-specific code — just bytes in, data out.
+//! 802.11 management frame parsing: radiotap header + frame body to structured types.
+//! Platform-independent, bounds-checked.
 
 use std::fmt;
-
-// ── Types ───────────────────────────────────────────────────────────────
 
 /// Six-byte MAC address.
 pub type MacAddress = [u8; 6];
@@ -32,7 +28,7 @@ pub enum FrameType {
     Other,
 }
 
-/// Beacon frame — broadcast by access points to announce their presence.
+/// Beacon frame (AP announcement).
 #[derive(Debug, Clone)]
 pub struct BeaconFrame {
     pub bssid: MacAddress,
@@ -42,7 +38,7 @@ pub struct BeaconFrame {
     pub signal_dbm: Option<i8>,
 }
 
-/// Probe request — sent by devices searching for networks.
+/// Probe request (client searching for networks).
 #[derive(Debug, Clone)]
 pub struct ProbeRequestFrame {
     pub source_mac: MacAddress,
@@ -51,7 +47,7 @@ pub struct ProbeRequestFrame {
     pub signal_dbm: Option<i8>,
 }
 
-/// Probe response — AP reply to a probe request.
+/// Probe response (AP reply to a probe request).
 #[derive(Debug, Clone)]
 pub struct ProbeResponseFrame {
     pub bssid: MacAddress,
@@ -103,8 +99,7 @@ impl fmt::Display for EncryptionType {
     }
 }
 
-// ── Radiotap present-field bit positions ────────────────────────────────
-
+// Radiotap `present` bitmask positions.
 const RADIOTAP_FLAGS: u32 = 1 << 1;
 const RADIOTAP_RATE: u32 = 1 << 2;
 const RADIOTAP_CHANNEL: u32 = 1 << 3;
@@ -112,9 +107,9 @@ const RADIOTAP_FHSS: u32 = 1 << 4;
 const RADIOTAP_DBM_SIGNAL: u32 = 1 << 5;
 const RADIOTAP_DBM_NOISE: u32 = 1 << 6;
 
-// ── 802.11 frame control subtypes (first byte of frame control) ─────────
+// 802.11 frame-control byte 0 (type + subtype, version bits masked).
 
-/// Beacon (management, subtype 8): type=0b00, subtype=0b1000 → byte = 0x80.
+/// Beacon (management, subtype 8): 0x80.
 const FC_BEACON: u8 = 0x80;
 /// Probe request (management, subtype 4): 0x40.
 const FC_PROBE_REQUEST: u8 = 0x40;
@@ -125,8 +120,7 @@ const FC_DEAUTH: u8 = 0xC0;
 /// Disassociation (management, subtype 10): 0xA0.
 const FC_DISASSOC: u8 = 0xA0;
 
-// ── Tagged parameter IDs ────────────────────────────────────────────────
-
+// Tagged parameter (IE) IDs.
 const TAG_SSID: u8 = 0;
 const TAG_DS_PARAMETER: u8 = 3;
 const TAG_RSN: u8 = 48;
@@ -138,13 +132,9 @@ const WPA_OUI: [u8; 4] = [0x00, 0x50, 0xF2, 0x01];
 /// IEEE 802.11i RSN AKM suite OUI for SAE (`WPA3`).
 const RSN_AKM_SAE: [u8; 4] = [0x00, 0x0F, 0xAC, 0x08];
 
-// ── Public API ──────────────────────────────────────────────────────────
-
-/// Parse a radiotap header from the front of a captured packet.
-///
-/// Returns `None` if the data is too short or the header is malformed.
+/// Parse the radiotap header at the front of a captured packet.
 pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
-    // Minimum radiotap header: version(1) + pad(1) + length(2) + present(4) = 8 bytes
+    // Fixed header: version(1) + pad(1) + length(2) + present(4) = 8 bytes
     if data.len() < 8 {
         return None;
     }
@@ -161,13 +151,12 @@ pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
 
     let present = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
-    // Walk through present fields to extract signal and channel.
-    // Radiotap fields appear in order of their bit position.
+    // Fields follow in bit-position order.
     let mut offset = 8;
     let mut signal_dbm = None;
     let mut channel_freq = None;
 
-    // Skip extended present bitmasks (bit 31 set = another u32 follows)
+    // Bit 31 set: another present word follows. Only the first word's fields are parsed.
     let mut cur_present = present;
     while cur_present & (1 << 31) != 0 {
         offset += 4;
@@ -185,10 +174,7 @@ pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
             data[offset + 3],
         ]);
         offset += 4;
-        // We only parse the first bitmask's fields
     }
-    // Reset offset to after all present bitmasks
-    // (we already advanced past them)
 
     // Bit 0: TSFT (u64, 8-byte aligned)
     if present & 1 != 0 {
@@ -231,9 +217,9 @@ pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
         offset += 1;
     }
 
-    // Bit 6: Antenna noise dBm — we skip it but need to account for the byte
+    // Bit 6: Antenna noise dBm (i8), not parsed
     if present & RADIOTAP_DBM_NOISE != 0 {
-        let _ = offset; // suppress unused warning in the last branch
+        let _ = offset;
     }
 
     Some(RadiotapHeader {
@@ -243,9 +229,7 @@ pub fn parse_radiotap(data: &[u8]) -> Option<RadiotapHeader> {
     })
 }
 
-/// Parse an 802.11 frame from raw captured data (including radiotap header).
-///
-/// Returns `None` if the packet is too short or unparseable.
+/// Parse a captured packet (radiotap header + 802.11 frame).
 pub fn parse_frame(data: &[u8]) -> Option<FrameType> {
     let header = parse_radiotap(data)?;
     let frame_data = data.get(header.length..)?;
@@ -256,7 +240,7 @@ pub fn parse_frame(data: &[u8]) -> Option<FrameType> {
     }
 
     let fc0 = frame_data[0];
-    // Mask out protocol version bits (bits 0-1) and check only type+subtype
+    // Bits 0-1 are the protocol version.
     let subtype_byte = fc0 & 0xFC;
 
     match subtype_byte {
@@ -290,7 +274,7 @@ pub fn parse_mac(s: &str) -> Option<MacAddress> {
     Some(mac)
 }
 
-/// Check if a MAC address is a broadcast/multicast address.
+/// Whether `mac` is the broadcast address `ff:ff:ff:ff:ff:ff`.
 pub const fn is_broadcast(mac: &MacAddress) -> bool {
     mac[0] == 0xFF
         && mac[1] == 0xFF
@@ -300,15 +284,12 @@ pub const fn is_broadcast(mac: &MacAddress) -> bool {
         && mac[5] == 0xFF
 }
 
-/// Check if a MAC address uses a locally-administered (randomized) bit.
-/// Bit 1 of the first octet is the U/L bit: 1 = locally administered.
+/// Whether the U/L bit (bit 1 of the first octet) is set: locally administered / randomized.
 pub const fn is_locally_administered(mac: &MacAddress) -> bool {
     mac[0] & 0x02 != 0
 }
 
-// ── Internal parsing ────────────────────────────────────────────────────
-
-/// Extract 6-byte MAC address starting at `offset`.
+/// Six bytes at `offset` as a MAC address.
 fn read_mac(data: &[u8], offset: usize) -> Option<MacAddress> {
     if offset + 6 > data.len() {
         return None;
@@ -328,9 +309,7 @@ const fn align_to(offset: usize, alignment: usize) -> usize {
     }
 }
 
-/// Parse a beacon frame body.
-/// Layout: FC(2) + Dur(2) + DA(6) + SA(6) + BSSID(6) + SeqCtl(2) = 24 bytes header
-/// Then: Timestamp(8) + Interval(2) + Capability(2) + Tagged Parameters
+/// Beacon: FC(2) Dur(2) DA(6) SA(6) BSSID(6) SeqCtl(2) | Timestamp(8) Interval(2) Capability(2) | IEs
 fn parse_beacon(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType> {
     if frame.len() < 36 {
         return None;
@@ -338,7 +317,6 @@ fn parse_beacon(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType> {
 
     let bssid = read_mac(frame, 16)?;
 
-    // Fixed fields start at offset 24: timestamp(8) + interval(2) + capability(2) = 12
     let capability = u16::from_le_bytes([frame[34], frame[35]]);
     let tagged_start = 36;
     let (ssid, channel, encryption) = parse_tagged_parameters(&frame[tagged_start..], capability);
@@ -352,15 +330,13 @@ fn parse_beacon(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType> {
     }))
 }
 
-/// Parse a probe request frame.
-/// Layout: FC(2) + Dur(2) + DA(6) + SA(6) + BSSID(6) + SeqCtl(2) = 24 bytes
-/// Then: Tagged Parameters (no fixed fields for probe request)
+/// Probe request: FC(2) Dur(2) DA(6) SA(6) BSSID(6) SeqCtl(2) | IEs (no fixed fields)
 fn parse_probe_request(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType> {
     if frame.len() < 24 {
         return None;
     }
 
-    let source_mac = read_mac(frame, 10)?; // SA at offset 10
+    let source_mac = read_mac(frame, 10)?;
 
     let (ssid, _, _) = parse_tagged_parameters(&frame[24..], 0);
 
@@ -371,7 +347,7 @@ fn parse_probe_request(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType
     }))
 }
 
-/// Parse a probe response frame (same layout as beacon).
+/// Probe response: same layout as a beacon.
 fn parse_probe_response(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameType> {
     if frame.len() < 36 {
         return None;
@@ -390,9 +366,7 @@ fn parse_probe_response(frame: &[u8], signal_dbm: Option<i8>) -> Option<FrameTyp
     }))
 }
 
-/// Parse a deauthentication frame.
-/// Layout: FC(2) + Dur(2) + DA(6) + SA(6) + BSSID(6) + SeqCtl(2) = 24 bytes
-/// Then: Reason code (2 bytes)
+/// Deauthentication: FC(2) Dur(2) DA(6) SA(6) BSSID(6) SeqCtl(2) | Reason(2)
 fn parse_deauth(frame: &[u8]) -> Option<FrameType> {
     if frame.len() < 26 {
         return None;
@@ -411,7 +385,7 @@ fn parse_deauth(frame: &[u8]) -> Option<FrameType> {
     }))
 }
 
-/// Parse a disassociation frame (same layout as deauth).
+/// Disassociation: same layout as deauthentication.
 fn parse_disassoc(frame: &[u8]) -> Option<FrameType> {
     if frame.len() < 26 {
         return None;
@@ -430,10 +404,8 @@ fn parse_disassoc(frame: &[u8]) -> Option<FrameType> {
     }))
 }
 
-/// Parse 802.11 tagged parameters to extract SSID, channel, and encryption type.
-///
-/// `capability` is the 2-byte capability info from beacons/probe responses.
-/// Bit 4 (0x0010) = Privacy — indicates WEP if no RSN/WPA IE is present.
+/// SSID, channel, and encryption from tagged parameters. `capability` bit 4
+/// (Privacy) means WEP when no RSN/WPA IE is present.
 fn parse_tagged_parameters(
     data: &[u8],
     capability: u16,
@@ -459,13 +431,12 @@ fn parse_tagged_parameters(
         match tag_id {
             TAG_SSID => {
                 if tag_len > 0 {
-                    // SSID may contain non-UTF8 bytes
                     let s = String::from_utf8_lossy(tag_data).to_string();
                     if !s.is_empty() && !s.chars().all(|c| c == '\0') {
                         ssid = Some(s);
                     }
                 }
-                // tag_len == 0 means broadcast/wildcard SSID
+                // tag_len == 0: wildcard SSID
             }
             TAG_DS_PARAMETER => {
                 if tag_len == 1 {
@@ -474,7 +445,6 @@ fn parse_tagged_parameters(
             }
             TAG_RSN => {
                 has_rsn = true;
-                // Check AKM suites for SAE (WPA3)
                 if tag_len >= 8 {
                     has_sae = check_rsn_for_sae(tag_data);
                 }
@@ -505,30 +475,26 @@ fn parse_tagged_parameters(
     (ssid, channel, encryption)
 }
 
-/// Check an RSN information element for SAE AKM suite (`WPA3`).
+/// Whether an RSN IE lists the SAE AKM suite (`WPA3`).
+/// Layout: Version(2) Group(4) PairwiseCount(2) Pairwise(4*n) AkmCount(2) Akm(4*n)
 fn check_rsn_for_sae(rsn_data: &[u8]) -> bool {
-    // RSN IE layout:
-    // Version(2) + Group cipher(4) + Pairwise count(2) + Pairwise suites(4*n) + AKM count(2) + AKM suites(4*n)
     if rsn_data.len() < 2 {
         return false;
     }
 
-    let mut offset = 2; // skip version
+    let mut offset = 2;
 
-    // Group cipher suite
     if offset + 4 > rsn_data.len() {
         return false;
     }
     offset += 4;
 
-    // Pairwise cipher suite count + suites
     if offset + 2 > rsn_data.len() {
         return false;
     }
     let pairwise_count = u16::from_le_bytes([rsn_data[offset], rsn_data[offset + 1]]) as usize;
     offset += 2 + pairwise_count * 4;
 
-    // AKM suite count + suites
     if offset + 2 > rsn_data.len() {
         return false;
     }
@@ -547,8 +513,6 @@ fn check_rsn_for_sae(rsn_data: &[u8]) -> bool {
 
     false
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

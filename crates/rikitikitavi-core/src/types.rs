@@ -83,22 +83,15 @@ impl fmt::Display for Severity {
     }
 }
 
-/// How strongly a finding is evidenced — the difference between "we saw the
-/// door standing open" and "the banner suggests the door might be unlocked."
-///
-/// A home user who gets one wrong scary alert stops trusting the tool, so every
-/// finding declares how it was established. Version-banner CVE matches are only
-/// `Probable` (backported patches keep old banners); a successful default-cred
-/// login or an observed directory listing is `Confirmed`.
+/// Evidence strength of a finding. Ordered `Inferred` < `Probable` < `Confirmed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
-    /// Heuristic or indirect: OUI-only device type, port-open-only, a guess.
+    /// Heuristic or indirect: OUI-only device type, port-open-only.
     Inferred,
-    /// Strong but not demonstrated: banner/version match, header signature.
+    /// Banner/version match or header signature; not demonstrated.
     Probable,
-    /// Actively demonstrated: a login succeeded, a listing/stream was observed,
-    /// an unauthenticated service answered.
+    /// Demonstrated: successful login, observed listing/stream, unauthenticated response.
     Confirmed,
 }
 

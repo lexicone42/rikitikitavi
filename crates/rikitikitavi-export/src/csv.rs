@@ -2,13 +2,10 @@ use anyhow::Result;
 use rikitikitavi_models::ScanResults;
 use std::path::Path;
 
-/// Export scan findings as a CSV file.
-///
-/// Findings are sorted by severity descending (Critical first).
+/// Export findings as CSV, sorted by severity descending.
 pub fn export_csv(results: &ScanResults, path: &Path) -> Result<()> {
     tracing::info!(?path, "exporting CSV report");
 
-    // Sort findings by severity descending
     let mut sorted_findings = results.findings.clone();
     sorted_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 

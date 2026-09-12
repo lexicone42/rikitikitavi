@@ -9,17 +9,16 @@ use rikitikitavi_models::Finding;
 use crate::app::App;
 use crate::theme::Palette;
 
-/// The Rikki-Tikki-Tavi mascot — four-pawed mongoose with a cobra in its jaws!
-/// Lines above the animated snake line.
+/// Mascot art: lines above the animated line.
 const MONGOOSE_TOP: &[&str] = &[r"     .-------.            ", r"    / o    o  \           "];
 
-/// The mongoose's jaw clenching the cobra — static part before the wiggling tip.
+/// Mascot art: static prefix of the animated line.
 const SNAKE_FACE: &str = r"   (    .w.    >--~";
 
-/// Animated cobra tip dangling from the mongoose's jaws — 4 wiggle frames.
+/// Mascot art: animated tip frames.
 const SNAKE_DANGLE: &[&str] = &["~§>", "§~>", "~>§", ">§~"];
 
-/// Mongoose body below the face — four paws on the ground.
+/// Mascot art: lines below the animated line.
 const MONGOOSE_BOTTOM: &[&str] = &[
     r"    \  '---'  /           ",
     r"     '-------'            ",
@@ -28,7 +27,7 @@ const MONGOOSE_BOTTOM: &[&str] = &[
     r"   '--'     '--'          ",
 ];
 
-/// Severity bar sparkline characters.
+/// Eighth-block characters for the severity bars.
 const BLOCKS: &[char] = &[' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
 #[allow(clippy::too_many_lines)]
@@ -46,10 +45,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    // ── Header ──────────────────────────────────────────────────────────
     render_header(frame, chunks[0], &palette, app);
 
-    // ── Mascot + Risk Summary ───────────────────────────────────────────
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(28), Constraint::Min(30)])
@@ -57,19 +54,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_mascot(frame, top_chunks[0], &palette, app.tick);
     render_risk_summary(frame, top_chunks[1], app, &palette);
-
-    // ── Recent Findings ─────────────────────────────────────────────────
     render_recent_findings(frame, chunks[2], app, &palette);
-
-    // ── Scan Status ─────────────────────────────────────────────────────
     super::scan_progress::render(frame, chunks[3], app);
-
-    // ── Footer ──────────────────────────────────────────────────────────
     render_footer(frame, chunks[4], &palette, app);
 
-    // Record recent findings area as clickable list
+    // Recent-findings pane is the clickable list; 1 border row, no header row.
     app.hit_regions.list_area = Some(chunks[2]);
-    // 1 row for top border, no header row
     app.hit_regions.list_header_offset = 1;
 }
 
@@ -93,7 +83,6 @@ fn render_header(frame: &mut Frame, area: Rect, palette: &Palette, app: &App) {
         ),
     ];
 
-    // Show status message on the right if available
     let status = app.status_message.as_deref().map_or_else(Vec::new, |msg| {
         vec![Span::styled(
             format!("  [{msg}]"),
@@ -119,7 +108,6 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
     #[allow(clippy::cast_possible_truncation)]
     let snake_frame = (tick / 3 % 4) as usize;
 
-    // Top lines: mongoose head with proud eyes and biting mouth
     let mut lines: Vec<Line> = MONGOOSE_TOP
         .iter()
         .map(|line| {
@@ -130,7 +118,6 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
         })
         .collect();
 
-    // Animated chin line: face in accent color + dangling snake in green
     lines.push(Line::from(vec![
         Span::styled(SNAKE_FACE.to_owned(), Style::default().fg(palette.accent)),
         Span::styled(
@@ -141,7 +128,6 @@ fn render_mascot(frame: &mut Frame, area: Rect, palette: &Palette, tick: u64) {
         ),
     ]));
 
-    // Bottom lines: mongoose body
     lines.extend(MONGOOSE_BOTTOM.iter().map(|line| {
         Line::from(Span::styled(
             (*line).to_owned(),
@@ -189,7 +175,6 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         .filter(|f| f.severity == rikitikitavi_core::Severity::Info)
         .count();
 
-    // Build visual severity bars
     let max_count = [critical, high, medium, low, info]
         .into_iter()
         .max()
@@ -216,7 +201,6 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         Line::from(""),
     ];
 
-    // Action required callout
     if critical + high > 0 {
         lines.push(Line::from(vec![Span::styled(
             format!("  Action Required: {} findings", critical + high),
@@ -249,7 +233,6 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         ),
     ]));
 
-    // Diff summary (when comparison data is available)
     if let Some(diff) = &app.scan_diff {
         lines.push(Line::from(Span::styled(
             format!(
@@ -261,7 +244,6 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         )));
     }
 
-    // Risk grade
     let grade = map_risk_grade(critical, high, medium, palette);
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
@@ -353,7 +335,6 @@ fn map_risk_grade(
 fn render_recent_findings(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let findings = app.findings();
 
-    // Sort by severity descending so Critical/High appear first
     let mut sorted_findings: Vec<&Finding> = findings.iter().collect();
     sorted_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 
@@ -444,7 +425,6 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
         crate::app::Screen::DeviceDetail => "Device Detail",
     };
 
-    // Build the screen indicator text to compute its width
     let indicator_text = format!(" [{screen_indicator}] ");
     #[allow(clippy::cast_possible_truncation)]
     let indicator_width = indicator_text.len() as u16;
@@ -483,9 +463,8 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
     );
     frame.render_widget(footer, area);
 
-    // Record clickable tab regions in the footer.
-    // The footer content starts at area.x + 1 (border) + indicator_width + 2 (spacing).
-    let content_y = area.y + 1; // row inside the border
+    // Tab hit regions: content starts after border (1) + indicator + spacing (2).
+    let content_y = area.y + 1;
     let mut x = area.x + 1 + indicator_width + 2;
     let tabs: &[(&str, Screen)] = &[
         ("[D]ash", Screen::Dashboard),
@@ -496,7 +475,7 @@ fn render_footer(frame: &mut Frame, area: Rect, palette: &Palette, app: &mut App
     ];
     for &(label, screen) in tabs {
         #[allow(clippy::cast_possible_truncation)]
-        let w = label.len() as u16 + 2; // label + trailing spaces
+        let w = label.len() as u16 + 2; // label + two trailing spaces
         app.hit_regions
             .footer_tabs
             .push((Rect::new(x, content_y, w, 1), screen));

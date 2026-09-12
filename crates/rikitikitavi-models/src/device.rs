@@ -4,11 +4,7 @@ use std::net::IpAddr;
 
 use crate::mac::MacAddr;
 
-/// Stable identity of a device across scan runs.
-///
-/// Uses MAC address when available (stable across DHCP), falls back to IP.
-/// The MAC variant holds a canonical [`MacAddr`], so the same physical address
-/// fingerprints identically no matter how a scanner formatted it.
+/// Device identity across scan runs: canonical [`MacAddr`] when known, else IP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceFingerprint {
     Mac(MacAddr),
@@ -79,12 +75,8 @@ impl Device {
         }
     }
 
-    /// Builder-style setter for MAC address.
-    ///
-    /// Accepts any common textual form (colon/hyphen/dotted/bare hex, any case)
-    /// and stores it canonically. An unparseable value is dropped (leaving the
-    /// device to fingerprint by IP) rather than stored in a form that would not
-    /// match the same address seen elsewhere.
+    /// Builder-style setter for MAC address. Accepts any [`MacAddr`] textual form;
+    /// an unparseable value is dropped (device then fingerprints by IP).
     #[must_use]
     pub fn with_mac(mut self, mac: impl AsRef<str>) -> Self {
         self.mac = mac.as_ref().parse().ok();
@@ -105,8 +97,7 @@ impl Device {
         self
     }
 
-    /// Compute a fingerprint that identifies this device across scan runs.
-    /// Prefers MAC (stable across DHCP) over IP.
+    /// MAC fingerprint when known, else IP.
     pub fn fingerprint(&self) -> DeviceFingerprint {
         self.mac
             .map_or(DeviceFingerprint::Ip(self.ip), DeviceFingerprint::Mac)
@@ -131,9 +122,7 @@ pub enum PortProtocol {
     Udp,
 }
 
-/// Hint about a device's identity, attached to findings by scanners that
-/// discover device metadata. The runner merges hints into `Device` objects
-/// using a priority-based strategy.
+/// Device metadata attached to a finding; the runner merges hints into `Device` by source priority.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceHint {
     /// Vendor / manufacturer name.
@@ -318,8 +307,7 @@ mod tests {
 
     #[test]
     fn fingerprint_is_format_independent() {
-        // The core bug this newtype fixes: the SAME physical MAC reported in
-        // different formats/casing by different scanners must fingerprint equally.
+        // Same MAC in different textual forms must fingerprint equally.
         let ip = "10.0.0.1".parse().unwrap();
         let a = Device::new(ip).with_mac("AA:BB:CC:DD:EE:FF");
         let b = Device::new(ip).with_mac("aa-bb-cc-dd-ee-ff");
@@ -339,7 +327,7 @@ mod tests {
     fn fingerprint_same_mac_same_fingerprint() {
         let d1 = Device::new("10.0.0.1".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
         let d2 = Device::new("10.0.0.2".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff");
-        // Same MAC → same fingerprint even with different IPs (DHCP scenario)
+        // Same MAC, different IPs.
         assert_eq!(d1.fingerprint(), d2.fingerprint());
     }
 

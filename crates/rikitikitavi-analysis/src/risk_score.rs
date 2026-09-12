@@ -1,10 +1,8 @@
 use rikitikitavi_core::Severity;
 use rikitikitavi_models::Finding;
 
-/// Calculate an aggregate risk score (0.0–100.0) from a set of findings.
-///
-/// The score weights critical findings heavily and accounts for the total
-/// number of issues across all severity levels.
+/// Aggregate risk score (0.0–100.0): sum of per-severity weights
+/// (Critical 25, High 15, Medium 8, Low 3, Info 1), KEV findings ×1.5, capped at 100.
 pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
     if findings.is_empty() {
         return 0.0;
@@ -20,26 +18,14 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
             Severity::Low => 3.0,
             Severity::Info => 1.0,
         };
-        // A finding whose CVE is actively exploited in the wild (CISA KEV) weighs
-        // more than an equally-severe theoretical issue.
         score += if finding.is_kev { base * 1.5 } else { base };
     }
 
-    // Cap at 100
     score.min(100.0)
 }
 
-/// Compute a letter grade and label from severity counts.
-///
-/// Returns `(grade_with_label, color_hint)` where `color_hint` is a CSS-friendly
-/// color name that both the TUI and HTML report can map to their palette.
-///
-/// Grade scale:
-/// - **F**: Any critical findings
-/// - **D**: More than 2 high findings
-/// - **C**: Any high findings
-/// - **B**: More than 3 medium findings
-/// - **A**: Otherwise
+/// Letter grade from severity counts, as `(label, color_hint)`.
+/// F: any critical; D: >2 high; C: any high; B: >3 medium; A: otherwise.
 pub const fn risk_grade(
     critical: usize,
     high: usize,

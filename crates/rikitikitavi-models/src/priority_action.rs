@@ -2,11 +2,7 @@ use rikitikitavi_core::Severity;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A deduplicated, ranked remediation action derived from scan findings.
-///
-/// Multiple findings often share the same fix (e.g., "Upgrade TLS" applies
-/// to every host still running TLS 1.0). `PriorityAction` groups these into
-/// a single actionable item ranked by impact.
+/// A ranked remediation action grouping all findings that share one fix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriorityAction {
     /// Unique action ID.

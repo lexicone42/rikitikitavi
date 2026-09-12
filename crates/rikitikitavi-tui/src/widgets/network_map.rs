@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::App;
 use crate::theme::Palette;
 
-/// Device type icons for the network map.
+/// Icon for a device type.
 const fn device_icon(device: &rikitikitavi_models::Device) -> &'static str {
     match device.device_type {
         rikitikitavi_models::DeviceType::Router => "🌐",
@@ -41,7 +41,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let devices = app.devices();
 
-    // Animated threat snake skulking near the internet gateway
+    // Snake position oscillates with the tick counter.
     #[allow(clippy::cast_possible_truncation)]
     let snake_pos = (app.tick / 5 % 10) as usize;
     let snake_padding = if snake_pos < 5 {
@@ -132,7 +132,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::ITALIC),
         )));
     } else {
-        // Draw the horizontal backbone
         lines.push(Line::from(vec![
             Span::raw("           "),
             Span::styled(
@@ -227,9 +226,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(footer, chunks[1]);
 
-    // Record the map area for mouse clicks on device lines (after borrows dropped).
-    // Lines before first device: border(1) + empty(1) + internet box(3) + pipe(1)
-    //   + router box(3) + pipe(1) + backbone(1) = 11
+    // Rows above the first device line (border + map header lines), for click mapping.
     app.hit_regions.list_area = Some(map_area);
-    app.hit_regions.list_header_offset = 13; // +1 for the threat snake line
+    app.hit_regions.list_header_offset = 13;
 }

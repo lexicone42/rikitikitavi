@@ -5,13 +5,10 @@ use rikitikitavi_models::{DeviceHint, DeviceType, Finding, MacAddr, ScanContext}
 use crate::Scanner;
 use crate::oui_db::ieee_oui_lookup;
 
-/// Device fingerprinting scanner — identifies device types via MAC OUI lookup
-/// and open port profiling.
+/// Device fingerprinting scanner — MAC OUI lookup and open-port profiling.
 pub struct DeviceScanner;
 
-/// Classify device type from vendor name (human-readable label for descriptions).
-///
-/// Vendor names come from the IEEE OUI database (normalized by the generator).
+/// Human-readable device-type label for a vendor name (from the IEEE OUI database).
 fn classify_by_vendor(vendor: &str) -> &'static str {
     match vendor {
         "Synology" => "NAS",
@@ -35,11 +32,9 @@ fn classify_by_vendor(vendor: &str) -> &'static str {
     }
 }
 
-/// Map a vendor name to a structured [`DeviceType`] for enrichment.
+/// Map a vendor name to a structured [`DeviceType`].
 ///
-/// Only classifies when the mapping is unambiguous for a home network context.
-/// Vendors that make diverse product lines (routers, phones, PCs) return
-/// [`DeviceType::Unknown`] and rely on mDNS/UPnP for accurate classification.
+/// Multi-product-line vendors return [`DeviceType::Unknown`] to avoid misclassifying.
 const fn vendor_to_device_type(vendor: &str) -> DeviceType {
     match vendor.as_bytes() {
         b"Synology" => DeviceType::Nas,
@@ -100,9 +95,7 @@ impl Scanner for DeviceScanner {
         let mut unidentified = 0u32;
 
         for entry in &entries {
-            // A locally-administered (randomized) MAC has no meaningful vendor OUI.
-            // iOS 14+/Android 10+ randomize by default, so an OUI lookup here would
-            // return a bogus vendor. Skip the lookup and note it instead.
+            // Locally-administered (randomized) MACs have no meaningful vendor OUI; skip lookup.
             if entry
                 .mac
                 .parse::<MacAddr>()

@@ -7,8 +7,7 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// Router security scanner — checks for admin interfaces, `UPnP`, telnet,
-/// and HTTPS enforcement on the gateway.
+/// Gateway scanner: admin ports, HTTP→HTTPS redirect, Telnet, FTP, `UPnP` root description.
 pub struct RouterScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -24,6 +23,7 @@ async fn is_port_open(ip: IpAddr, port: u16) -> bool {
 
 /// Check if HTTP on port 80 redirects to HTTPS.
 async fn check_http_redirect(ip: IpAddr) -> Option<bool> {
+    // TLS validation disabled: unauthenticated probe, no credentials sent.
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -38,7 +38,6 @@ async fn check_http_redirect(ip: IpAddr) -> Option<bool> {
                 .get("location")
                 .is_some_and(|location| location.to_str().unwrap_or("").starts_with("https://"))
         } else {
-            // Got a response but no redirect — HTTP is served directly
             false
         }
     })
@@ -51,7 +50,6 @@ async fn check_upnp(ip: IpAddr) -> bool {
         .build()
         .unwrap_or_default();
 
-    // Common UPnP description URLs
     let urls = [
         format!("http://{ip}:49152/rootDesc.xml"),
         format!("http://{ip}:1900/rootDesc.xml"),
@@ -104,7 +102,6 @@ impl Scanner for RouterScanner {
 
         tracing::info!(%gateway, "scanning router");
 
-        // Check admin ports
         let admin_ports: &[(u16, &str)] = &[
             (80, "HTTP"),
             (443, "HTTPS"),
@@ -140,7 +137,6 @@ impl Scanner for RouterScanner {
             );
         }
 
-        // Check if HTTP port 80 redirects to HTTPS
         if open_admin_ports.iter().any(|&(p, _)| p == 80) {
             match check_http_redirect(gateway).await {
                 Some(true) => {
@@ -182,7 +178,6 @@ impl Scanner for RouterScanner {
             }
         }
 
-        // Check Telnet on gateway
         if is_port_open(gateway, 23).await {
             findings.push(
                 Finding::new(
@@ -205,7 +200,6 @@ impl Scanner for RouterScanner {
             );
         }
 
-        // Check FTP on gateway
         if is_port_open(gateway, 21).await {
             findings.push(
                 Finding::new(
@@ -228,7 +222,6 @@ impl Scanner for RouterScanner {
             );
         }
 
-        // Check UPnP
         if check_upnp(gateway).await {
             findings.push(
                 Finding::new(

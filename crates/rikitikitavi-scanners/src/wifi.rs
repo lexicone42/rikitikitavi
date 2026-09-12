@@ -5,8 +5,7 @@ use rikitikitavi_network::WifiEncryption;
 
 use crate::Scanner;
 
-/// `WiFi` security scanner — grades nearby networks by encryption strength,
-/// detects WPS, open networks, and weak encryption.
+/// `WiFi` scanner: encryption grade, WPS, and hidden-SSID findings for visible networks.
 pub struct WifiScanner;
 
 /// Grade a `WiFi` encryption type into a severity level.
@@ -91,7 +90,6 @@ impl Scanner for WifiScanner {
             let severity = encryption_severity(network.encryption);
             let enc_name = encryption_name(network.encryption);
 
-            // Only report networks with weak encryption as findings
             match network.encryption {
                 WifiEncryption::Open => {
                     findings.push(
@@ -156,7 +154,6 @@ impl Scanner for WifiScanner {
                     );
                 }
                 _ => {
-                    // WPA2/WPA3 are fine — just report as info
                     findings.push(Finding::new(
                         "wifi",
                         &format!("WiFi \"{}\": {enc_name}", network.ssid),
@@ -170,7 +167,6 @@ impl Scanner for WifiScanner {
                 }
             }
 
-            // WPS check
             if network.wps_enabled {
                 findings.push(
                     Finding::new(
@@ -191,7 +187,6 @@ impl Scanner for WifiScanner {
                 );
             }
 
-            // Hidden network check
             if network.hidden {
                 findings.push(Finding::new(
                     "wifi",

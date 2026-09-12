@@ -4,8 +4,7 @@ use rikitikitavi_models::{Finding, ScanContext};
 
 use crate::Scanner;
 
-/// Network discovery scanner — finds devices on the local network via ARP cache,
-/// detects interfaces, gateway, and network topology.
+/// Network discovery scanner: interfaces, gateway, target CIDR, ARP cache device count.
 pub struct NetworkScanner;
 
 #[async_trait]
@@ -30,7 +29,6 @@ impl Scanner for NetworkScanner {
         tracing::info!("running network discovery scan");
         let mut findings = Vec::new();
 
-        // Discover interfaces
         match rikitikitavi_network::list_interfaces() {
             Ok(interfaces) => {
                 let active = interfaces
@@ -48,7 +46,6 @@ impl Scanner for NetworkScanner {
             }
         }
 
-        // Check gateway
         match ctx.gateway {
             Some(gw) => {
                 findings.push(
@@ -71,7 +68,6 @@ impl Scanner for NetworkScanner {
             }
         }
 
-        // Report network CIDR
         if let Some(network) = &ctx.target_network {
             findings.push(Finding::new(
                 "network",
@@ -81,7 +77,6 @@ impl Scanner for NetworkScanner {
             ));
         }
 
-        // Read ARP cache for device discovery
         let arp_entries =
             rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                 scanner: "network".to_owned(),
@@ -111,7 +106,6 @@ impl Scanner for NetworkScanner {
             ));
         }
 
-        // Flag large device count
         if device_count > 30 {
             findings.push(
                 Finding::new(

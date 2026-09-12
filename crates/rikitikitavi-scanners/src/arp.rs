@@ -6,24 +6,15 @@ use std::net::IpAddr;
 
 use crate::Scanner;
 
-/// ARP security scanner — detects ARP cache anomalies that indicate spoofing.
-///
-/// Analyzes the ARP cache for:
-/// - Duplicate MACs (multiple IPs sharing one MAC — potential ARP spoofing)
-/// - Duplicate IPs (multiple MACs for one IP — ARP spoofing in progress)
-/// - Broadcast MAC in ARP entries (clearly malicious)
-/// - Gateway MAC anomalies
+/// ARP cache anomaly scanner: duplicate IPs, duplicate MACs, broadcast MACs,
+/// incomplete entries.
 pub struct ArpScanner;
 
-/// Analyze ARP entries for spoofing indicators.
-///
-/// Returns a list of anomaly descriptions. Pure function for testability.
+/// Detect spoofing indicators in ARP entries.
 fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Vec<ArpAnomaly> {
     let mut anomalies = Vec::new();
 
-    // ── Check for duplicate IPs (multiple MACs for same IP) ─────────
-    // Deduplicate MACs per IP first — on macOS, arp -a often shows the
-    // same IP+MAC pair on multiple interfaces (en0, en1, awdl0).
+    // Dedupe per IP: macOS `arp -a` lists the same IP+MAC once per interface.
     let mut ip_to_macs: HashMap<IpAddr, HashSet<&str>> = HashMap::new();
     for entry in entries {
         ip_to_macs.entry(entry.ip).or_default().insert(&entry.mac);
@@ -40,11 +31,8 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
         }
     }
 
-    // ── Check for duplicate MACs (one MAC claiming multiple IPs) ────
-    // Deduplicate IPs per MAC — same reasoning as above.
     let mut mac_to_ips: HashMap<&str, HashSet<IpAddr>> = HashMap::new();
     for entry in entries {
-        // Skip broadcast and multicast MACs
         if is_broadcast_mac(&entry.mac) || is_multicast_mac(&entry.mac) {
             continue;
         }
@@ -53,7 +41,7 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
 
     for (mac, ips) in &mac_to_ips {
         if ips.len() > 3 {
-            // A single MAC with many IPs is suspicious (normal for router: 1-3 IPs)
+            // Threshold 3: a router legitimately holds 1–3 IPs.
             anomalies.push(ArpAnomaly::DuplicateMac {
                 mac: (*mac).to_owned(),
                 ips: ips.iter().copied().collect(),
@@ -61,7 +49,6 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
         }
     }
 
-    // ── Check for broadcast/multicast MACs in ARP entries ───────────
     for entry in entries {
         if is_broadcast_mac(&entry.mac) {
             anomalies.push(ArpAnomaly::BroadcastMac {
@@ -71,7 +58,6 @@ fn detect_arp_anomalies(entries: &[ArpEntryData], gateway: Option<IpAddr>) -> Ve
         }
     }
 
-    // ── Check for incomplete/zero MAC entries ───────────────────────
     for entry in entries {
         if is_zero_mac(&entry.mac) {
             anomalies.push(ArpAnomaly::IncompleteMac { ip: entry.ip });

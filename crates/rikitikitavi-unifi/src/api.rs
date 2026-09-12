@@ -51,13 +51,7 @@ impl UniFiClient {
         })
     }
 
-    /// Create a client, choosing TLS validation based on `insecure`.
-    ///
-    /// This is the constructor callers should prefer: it validates certificates
-    /// by default (protecting the admin credentials `POSTed` during login) and only
-    /// bypasses validation when the operator explicitly opts in, emitting a loud
-    /// warning when it does. Many `UniFi` controllers ship self-signed certs, so the
-    /// insecure path exists — but it must be a deliberate choice, not the default.
+    /// Preferred constructor: validates TLS unless `insecure`, which logs a warning.
     pub fn connect(base_url: &str, site: &str, insecure: bool) -> Result<Self> {
         if insecure {
             tracing::warn!(
@@ -119,7 +113,6 @@ impl UniFiClient {
             );
         }
 
-        // Extract CSRF token from response headers
         if let Some(csrf) = resp.headers().get("x-csrf-token") {
             self.csrf_token = csrf.to_str().ok().map(ToOwned::to_owned);
         }
@@ -135,7 +128,7 @@ impl UniFiClient {
 
         self.bearer_token = Some(token.to_owned());
 
-        // Verify the token works by fetching sites
+        // Verified by fetching sites.
         let url = format!("{}/api/self/sites", self.base_url);
         let resp = self
             .client
@@ -251,7 +244,7 @@ impl UniFiClient {
     /// Get IDS/IPS events.
     pub async fn get_ids_events(&self, limit: u32) -> Result<Vec<IdsEvent>> {
         tracing::debug!(site = %self.site, limit, "fetching IDS events");
-        // The IDS endpoint uses a POST with query parameters
+        // POST with a JSON body, unlike the other endpoints.
         let url = format!("{}/api/s/{}/stat/ips/event", self.base_url, self.site);
         let body = serde_json::json!({
             "_limit": limit,

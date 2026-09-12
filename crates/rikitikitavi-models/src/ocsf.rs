@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use crate::Finding;
 
-// ── Epoch-ms serialization for OCSF `timestamp_t` ──────────────────────
-
+// OCSF `timestamp_t` is epoch milliseconds.
 fn serialize_epoch_ms<S: Serializer>(dt: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_i64(dt.timestamp_millis())
 }
@@ -16,11 +15,7 @@ fn deserialize_epoch_ms<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>
         .ok_or_else(|| serde::de::Error::custom("invalid epoch milliseconds"))
 }
 
-// ── OCSF Vulnerability Finding (class 2002) ────────────────────────────
-
-/// OCSF 1.1 Vulnerability Finding for Security Lake export.
-///
-/// Maps to OCSF class 2002 (`Vulnerability` Finding).
+/// OCSF 1.1 Vulnerability Finding (class 2002) for Security Lake export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcsfFinding {
     /// Always 2002 (Vulnerability Finding).
@@ -99,7 +94,7 @@ pub struct OcsfFindingInfo {
 pub struct OcsfAnalytic {
     /// CWE identifier (e.g. "CWE-319").
     pub uid: String,
-    /// CWE description.
+    /// CWE name; currently the identifier again.
     pub name: String,
     /// Always "Rule".
     pub r#type: String,
@@ -136,7 +131,6 @@ pub struct OcsfResource {
 impl From<&Finding> for OcsfFinding {
     #[allow(clippy::too_many_lines)]
     fn from(f: &Finding) -> Self {
-        // ── Resources from IP / port / hostname ────────────────────
         let mut resources = Vec::new();
         if let Some(ip) = f.affected_ip {
             resources.push(OcsfResource {
@@ -153,14 +147,12 @@ impl From<&Finding> for OcsfFinding {
             });
         }
 
-        // ── CWE → analytic ────────────────────────────────────────
         let analytic = f.cwe_id.as_ref().map(|cwe| OcsfAnalytic {
             uid: cwe.clone(),
             name: cwe.clone(),
             r#type: "Rule".to_owned(),
         });
 
-        // ── CVEs → vulnerabilities ────────────────────────────────
         let vulnerabilities: Vec<OcsfVulnerability> = f
             .cve_ids
             .iter()
@@ -381,7 +373,7 @@ mod tests {
 
         let json = serde_json::to_value(&ocsf).unwrap();
         let time = json["time"].as_i64().unwrap();
-        // Epoch ms should be in a reasonable range (after 2020, before 2100)
+        // Sanity range: 2020..2100.
         assert!(time > 1_577_836_800_000, "time should be after 2020");
         assert!(time < 4_102_444_800_000, "time should be before 2100");
 
@@ -400,8 +392,7 @@ mod tests {
         let json = serde_json::to_string(&ocsf).unwrap();
         let recovered: OcsfFinding = serde_json::from_str(&json).unwrap();
 
-        // Epoch-ms truncates sub-millisecond precision, but the roundtrip
-        // should preserve millisecond-level accuracy.
+        // Sub-millisecond precision is dropped; milliseconds survive.
         assert_eq!(
             ocsf.time.timestamp_millis(),
             recovered.time.timestamp_millis()

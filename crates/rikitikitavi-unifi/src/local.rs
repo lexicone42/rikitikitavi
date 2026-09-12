@@ -15,15 +15,11 @@ pub struct UniFiEnvironment {
 }
 
 impl UniFiEnvironment {
-    /// Attempt to detect if we're running on a `UniFi` device.
-    ///
-    /// Checks for `UniFi` OS markers: `/etc/unifi-os/`, `/data/unifi-core/`, etc.
-    /// Only performs detection on Linux, since `UniFi` devices run Linux.
+    /// Detect a `UniFi` OS host via `/etc/unifi-os` or `/data/unifi-core`.
     #[cfg(target_os = "linux")]
     pub fn detect() -> Option<Self> {
         tracing::info!("attempting UniFi environment detection");
 
-        // Check for UniFi OS markers
         if !Path::new("/etc/unifi-os").exists() && !Path::new("/data/unifi-core").exists() {
             tracing::debug!("no UniFi OS markers found");
             return None;
@@ -43,7 +39,7 @@ impl UniFiEnvironment {
         })
     }
 
-    /// On non-Linux platforms, `UniFi` on-device detection is not applicable.
+    /// Always `None` off Linux.
     #[cfg(not(target_os = "linux"))]
     pub fn detect() -> Option<Self> {
         tracing::debug!("UniFi on-device detection is only supported on Linux");
@@ -67,7 +63,6 @@ fn classify_board(board_name: &str) -> UniFiDevice {
         "usg" | "unifi-security-gateway" => UniFiDevice::SecurityGateway,
         "usgp4" | "usg-pro-4" => UniFiDevice::SecurityGatewayPro4,
         _ => {
-            // Fallback: check for partial matches
             if name.contains("ap") || name.contains("u6") || name.contains("u7") {
                 UniFiDevice::AccessPoint
             } else if name.contains("usw") || name.contains("switch") {
@@ -79,14 +74,13 @@ fn classify_board(board_name: &str) -> UniFiDevice {
     }
 }
 
-/// Parse board.info file content to extract the board name.
+/// `board.name` or `board.shortname` value from `board.info` content.
 fn parse_board_info(contents: &str) -> Option<String> {
     for line in contents.lines() {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("board.name=") {
             return Some(value.trim().to_owned());
         }
-        // Some files use board.shortname
         if let Some(value) = line.strip_prefix("board.shortname=") {
             return Some(value.trim().to_owned());
         }
@@ -98,7 +92,6 @@ fn parse_board_info(contents: &str) -> Option<String> {
 fn detect_device_type() -> UniFiDevice {
     tracing::debug!("detecting UniFi device type");
 
-    // Try /etc/board.info first (most common location)
     if let Ok(contents) = std::fs::read_to_string("/etc/board.info")
         && let Some(board_name) = parse_board_info(&contents)
     {
@@ -106,12 +99,11 @@ fn detect_device_type() -> UniFiDevice {
         return classify_board(&board_name);
     }
 
-    // Try /data/unifi-core/config/hardware
     if let Ok(contents) = std::fs::read_to_string("/data/unifi-core/config/hardware") {
         return classify_board(contents.trim());
     }
 
-    // Try hostname as last resort (some devices set hostname to model)
+    // Some devices set the hostname to the model name.
     if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
         let hostname = hostname.trim().to_lowercase();
         if hostname.starts_with("udm") || hostname.starts_with("ucg") || hostname.starts_with("udr")
@@ -125,7 +117,6 @@ fn detect_device_type() -> UniFiDevice {
 
 #[cfg(target_os = "linux")]
 fn read_unifi_os_version() -> Option<String> {
-    // Primary location
     if let Ok(version) = std::fs::read_to_string("/etc/unifi-os/unifi_version") {
         let v = version.trim().to_owned();
         if !v.is_empty() {
@@ -133,7 +124,6 @@ fn read_unifi_os_version() -> Option<String> {
         }
     }
 
-    // Alternative: /data/unifi-core/version
     std::fs::read_to_string("/data/unifi-core/version")
         .ok()
         .map(|s| s.trim().to_owned())
@@ -142,7 +132,6 @@ fn read_unifi_os_version() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn read_network_app_version() -> Option<String> {
-    // Check the UniFi Network app version
     let paths = [
         "/data/unifi-core/config/version",
         "/usr/lib/unifi/data/system.properties",

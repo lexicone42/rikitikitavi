@@ -2,11 +2,8 @@ use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError};
 use rikitikitavi_models::{Finding, ScanContext};
 
-/// Scanner module trait — all scanners implement this.
-///
-/// Each scanner represents one category of security checks (e.g., port scanning,
-/// DNS security, `WiFi` security). Scanners declare which attacker perspectives
-/// they support and produce a list of [`Finding`]s when run.
+/// Interface implemented by every scanner: declares supported perspectives and
+/// produces [`Finding`]s.
 #[async_trait]
 pub trait Scanner: Send + Sync {
     /// Unique identifier for this scanner.
@@ -31,10 +28,8 @@ pub trait Scanner: Send + Sync {
         false
     }
 
-    /// Ports this scanner is relevant for. An empty slice (default) means the
-    /// scanner is always relevant regardless of which ports are open. A
-    /// non-empty slice means the scanner should only run if at least one of
-    /// these ports was discovered open during Phase 1.
+    /// Ports that gate this scanner in Phase 2. Empty (default) = always run;
+    /// otherwise run only if one of these ports was found open in Phase 1.
     fn relevant_ports(&self) -> &[u16] {
         &[]
     }
@@ -50,11 +45,11 @@ impl ScannerRegistry {
     pub fn new() -> Self {
         Self {
             scanners: vec![
-                // Phase 1: Discovery scanners
+                // Phase 1 (discovery)
                 Box::new(crate::network::NetworkScanner),
                 Box::new(crate::ports::PortScanner),
                 Box::new(crate::device::DeviceScanner),
-                // Phase 2: Deep analysis scanners
+                // Phase 2 (deep analysis)
                 Box::new(crate::router::RouterScanner),
                 Box::new(crate::dns::DnsScanner),
                 Box::new(crate::wifi::WifiScanner),

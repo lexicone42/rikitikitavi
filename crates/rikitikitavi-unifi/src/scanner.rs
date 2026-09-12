@@ -6,19 +6,16 @@ use rikitikitavi_scanners::Scanner;
 use crate::api::UniFiClient;
 use crate::models::{FirewallRule, WlanConfig};
 
-/// UniFi-specific security scanner.
-///
-/// When running on a `UniFi` device or connected to a `UniFi` controller, this
-/// scanner performs deep audits of controller settings, firewall rules, `WiFi`
-/// configuration, threat management, and client security.
+/// `UniFi` scanner: audits WLAN configs, firewall rules, device firmware, and IDS events
+/// via the controller API.
 pub struct UniFiScanner;
 
-/// Default common SSIDs that suggest an uncustomized network.
+/// SSID substrings that indicate a default or unconfigured network.
 const DEFAULT_SSIDS: &[&str] = &[
     "UniFi", "UBNT", "Ubiquiti", "default", "linksys", "netgear", "HOME-", "SETUP",
 ];
 
-/// Evaluate WLAN security settings for a single WLAN config.
+/// Findings for one WLAN config.
 #[allow(clippy::too_many_lines)]
 pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -36,7 +33,6 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         return findings;
     }
 
-    // Check encryption mode
     let security_lower = wlan.security.to_lowercase();
     if security_lower == "open" || security_lower.is_empty() {
         findings.push(
@@ -54,7 +50,6 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         );
     }
 
-    // Check WPA mode
     if let Some(wpa_mode) = &wlan.wpa_mode {
         let wpa_lower = wpa_mode.to_lowercase();
         if wpa_lower.contains("wpa1") || wpa_lower == "wpa" {
@@ -83,7 +78,7 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         }
     }
 
-    // Check PMF (Protected Management Frames / 802.11w)
+    // PMF = Protected Management Frames (802.11w)
     if let Some(pmf) = &wlan.pmf_mode {
         let pmf_lower = pmf.to_lowercase();
         if pmf_lower == "disabled" || pmf_lower == "optional" {
@@ -112,7 +107,6 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         }
     }
 
-    // Check for default SSID
     let ssid_lower = wlan.name.to_lowercase();
     let is_default = DEFAULT_SSIDS
         .iter()
@@ -131,7 +125,6 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         ));
     }
 
-    // Guest network check
     if wlan.is_guest {
         findings.push(Finding::new(
             "unifi",
@@ -148,7 +141,7 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
     findings
 }
 
-/// Evaluate firewall rules for security issues.
+/// Findings for a set of firewall rules.
 pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -181,7 +174,6 @@ pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
             continue;
         }
 
-        // Detect overly permissive rules (any→any allow)
         let src_any = rule
             .src
             .as_deref()
@@ -244,7 +236,6 @@ impl Scanner for UniFiScanner {
         tracing::info!("running UniFi security scan");
         let mut findings = Vec::new();
 
-        // Try local detection first
         let local_env = crate::local::UniFiEnvironment::detect();
         if let Some(env) = &local_env {
             findings.push(Finding::new(
@@ -261,7 +252,6 @@ impl Scanner for UniFiScanner {
             ));
         }
 
-        // Try to connect to local controller API
         let controller_url = if local_env.is_some() {
             Some("https://localhost".to_owned())
         } else {
@@ -279,19 +269,13 @@ impl Scanner for UniFiScanner {
             return Ok(findings);
         };
 
-        // SAFETY (TLS): `new_insecure` is deliberate here and safe because this is
-        // an UNAUTHENTICATED probe — we only check whether a controller login page
-        // is reachable and never send credentials on this client. UniFi controllers
-        // almost always present a self-signed cert, so validation would just break
-        // detection. Do NOT copy this into any path that calls `login()` — use
-        // `UniFiClient::connect(url, site, insecure)` (validation on by default) there.
+        // TLS validation intentionally disabled: unauthenticated probe, no credentials sent.
         let client =
             UniFiClient::new_insecure(&url, "default").map_err(|e| ScanError::ScannerFailed {
                 scanner: "unifi".to_owned(),
                 message: format!("failed to create UniFi client: {e}"),
             })?;
 
-        // Attempt unauthenticated detection — can the login page be reached?
         if !client.is_authenticated() {
             findings.push(Finding::new(
                 "unifi",
@@ -306,7 +290,6 @@ impl Scanner for UniFiScanner {
             return Ok(findings);
         }
 
-        // Authenticated scans — fetch and audit WLAN configs
         match client.get_wlans().await {
             Ok(wlans) => {
                 tracing::info!(wlan_count = wlans.len(), "fetched WLAN configs");
@@ -319,7 +302,6 @@ impl Scanner for UniFiScanner {
             }
         }
 
-        // Audit firewall rules
         match client.get_firewall_rules().await {
             Ok(rules) => {
                 tracing::info!(rule_count = rules.len(), "fetched firewall rules");
@@ -330,7 +312,6 @@ impl Scanner for UniFiScanner {
             }
         }
 
-        // Report device firmware versions
         match client.get_devices().await {
             Ok(devices) => {
                 for device in &devices {
@@ -352,7 +333,6 @@ impl Scanner for UniFiScanner {
             }
         }
 
-        // IDS/IPS events summary
         match client.get_ids_events(100).await {
             Ok(events) => {
                 if events.is_empty() {

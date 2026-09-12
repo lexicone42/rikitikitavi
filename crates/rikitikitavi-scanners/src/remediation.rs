@@ -1,15 +1,11 @@
-//! OVRS-compliant remediation template registry.
-//!
-//! Parses embedded YAML templates at runtime (once, via `OnceLock`) and
-//! provides a `get(id, params)` API that scanners use instead of
-//! hardcoding `Remediation` structs.
+//! OVRS remediation template registry.
+//! Embedded YAML templates are parsed once (`OnceLock`); `get(id, params)`
+//! returns an interpolated `Remediation`.
 
 use rikitikitavi_models::Remediation;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-
-// ── OVRS serde types ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,8 +98,6 @@ struct RemediationHints {
     change_type: Option<String>,
 }
 
-// ── Registry ────────────────────────────────────────────────────────
-
 static REGISTRY: OnceLock<RemediationRegistry> = OnceLock::new();
 
 struct RemediationRegistry {
@@ -143,8 +137,6 @@ fn init_registry() -> RemediationRegistry {
 
     RemediationRegistry { templates }
 }
-
-// ── Public API ──────────────────────────────────────────────────────
 
 /// Look up a remediation template by ID, applying parameter interpolation.
 pub fn get(id: &str, params: &[(&str, &str)]) -> Option<Remediation> {
@@ -193,8 +185,6 @@ fn format_duration(seconds: u64) -> String {
         format!("{} hour(s)", seconds / 3600)
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

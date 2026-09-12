@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use crate::app::App;
 use crate::theme::Palette;
 
-/// Animated snake spinner for scanning indicator — the mongoose hunts!
+/// Spinner frames.
 const SNAKE_SPINNER: &[&str] = &["~§>", "§~>", "~>§", ">§~"];
 
 /// Render a scan progress bar into the given area.
@@ -15,7 +15,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = Palette::from_theme(app.config.theme);
 
     if app.scanning {
-        // Animate the spinner based on progress
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let spinner_idx = ((app.scan_progress * 20.0).max(0.0) as usize) % SNAKE_SPINNER.len();
         let spinner = SNAKE_SPINNER[spinner_idx];

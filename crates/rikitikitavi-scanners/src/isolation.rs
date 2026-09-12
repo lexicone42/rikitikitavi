@@ -8,8 +8,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 
-/// Network isolation scanner — detects flat networks, multiple subnets,
-/// and potential inter-VLAN routing.
+/// Network isolation scanner: /24 subnet count in the ARP cache and reachability
+/// of common alternate gateway IPs.
 pub struct IsolationScanner;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -76,7 +76,6 @@ impl Scanner for IsolationScanner {
                 message: format!("failed to read ARP cache: {e}"),
             })?;
 
-        // Detect unique /24 subnets in ARP cache
         let subnets: HashSet<[u8; 3]> = arp_entries
             .iter()
             .filter_map(|e| subnet_24(&e.ip))
@@ -116,7 +115,6 @@ impl Scanner for IsolationScanner {
             ));
         }
 
-        // Probe alternate gateways for inter-VLAN routing
         let current_gateway = ctx.gateway.and_then(|ip| match ip {
             IpAddr::V4(v4) => Some(v4),
             IpAddr::V6(_) => None,
@@ -124,7 +122,6 @@ impl Scanner for IsolationScanner {
 
         let mut reachable_gateways = Vec::new();
         for &gw in ALTERNATE_GATEWAYS {
-            // Skip our own gateway
             if current_gateway == Some(gw) {
                 continue;
             }
@@ -160,7 +157,6 @@ impl Scanner for IsolationScanner {
             );
         }
 
-        // Large flat network warning
         if arp_entries.len() > 50 && subnets.len() <= 1 {
             findings.push(
                 Finding::new(

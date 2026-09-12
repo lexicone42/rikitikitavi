@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::Scanner;
 
-/// HTTP security audit scanner — checks security headers, default pages,
-/// admin panels, and directory listing on HTTP ports found in Phase 1.
+/// HTTP audit scanner: security headers, CSP/CORS/cookie attributes, default
+/// pages, directory listing, admin paths on Phase 1 HTTP ports.
 pub struct HttpAuditScanner;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -135,22 +135,18 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
 pub fn is_default_page(body: &str) -> bool {
     let lower = body.to_lowercase();
 
-    // Apache default
     if lower.contains("it works!") && lower.contains("apache") {
         return true;
     }
 
-    // nginx default
     if lower.contains("welcome to nginx") {
         return true;
     }
 
-    // IIS default
     if lower.contains("welcome") && lower.contains("internet information services") {
         return true;
     }
 
-    // lighttpd default
     if lower.contains("placeholder page") || lower.contains("lighttpd") && lower.contains("works") {
         return true;
     }
@@ -165,16 +161,8 @@ pub fn is_directory_listing(body: &str) -> bool {
         && lower.contains("<a href=")
 }
 
-/// Fingerprint high-value NAS and smart-home hub web UIs (Synology DSM, QNAP
-/// QTS, Home Assistant) from the `Server` header and page body.
-///
-/// These are the prized hosts on a prosumer LAN — NAS devices are the top
-/// ransomware target (eCh0raix, Deadbolt, Qlocker) and a smart-home hub controls
-/// locks/cameras/alarms — so simply surfacing them, and advising to keep firmware
-/// current and never expose them to the internet, is high value. Whether the UI
-/// is reachable *without authentication* is flagged separately by the admin-panel
-/// classifier, so this stays a Probable identification rather than fabricating a
-/// version-specific CVE.
+/// Identify Synology DSM, QNAP QTS, or Home Assistant web UIs from the `Server`
+/// header and body. Probable-confidence Low finding; auth state is judged separately.
 pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) -> Option<Finding> {
     let hay = format!("{} {}", server.unwrap_or(""), body).to_lowercase();
 
@@ -229,7 +217,7 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
 pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Finding> {
     let lower = server.to_lowercase();
 
-    // Apache < 2.4.50 had path traversal (CVE-2021-41773)
+    // Apache 2.4.4x (CVE-2021-41773 affects 2.4.49)
     if lower.contains("apache/2.4.4") && !lower.contains("apache/2.4.5") {
         return Some(
             Finding::new(
@@ -249,7 +237,6 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
         );
     }
 
-    // Generic version disclosure
     if lower.contains('/') {
         return Some(
             Finding::new(
@@ -340,7 +327,6 @@ pub fn classify_http_methods(ip: IpAddr, port: u16, allow_header: &str) -> Vec<F
         );
     }
 
-    // Info finding with all methods
     if !methods.is_empty() {
         findings.push(
             Finding::new(
@@ -367,7 +353,6 @@ pub fn detect_framework(
 ) -> Option<Finding> {
     let body_lower = body.to_lowercase();
 
-    // X-Powered-By header
     if let Some(pb) = powered_by {
         return Some(
             Finding::new(
@@ -386,7 +371,6 @@ pub fn detect_framework(
         );
     }
 
-    // Body-based framework detection
     let framework = if body_lower.contains("wp-content") || body_lower.contains("wp-includes") {
         Some("WordPress")
     } else if body_lower.contains("__next") || body_lower.contains("_next/static") {
@@ -424,14 +408,8 @@ pub fn detect_framework(
 }
 
 // ── Admin panel authentication classification ──────────────────
-//
-// Instead of a crude "does the body contain 'login'?" check, we collect
-// multiple weak signals from the HTTP response and score them.  Positive
-// weight → evidence of auth protection; negative weight → evidence of
-// exposed admin content.  The net score drives a three-way classification:
-//   Protected  (score ≥  threshold) → suppress the finding
-//   Exposed    (score ≤ −threshold) → High severity
-//   Ambiguous  (in between)         → Medium severity
+// Weighted signals are summed: score ≥ +3 → Protected (no finding),
+// ≤ −3 → Exposed (High), otherwise Ambiguous (Medium).
 
 /// Individual signal detected in an HTTP response for auth classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -471,9 +449,7 @@ pub enum AuthSignal {
     SubstantialPage,
 }
 
-/// Header-level signals extracted from an HTTP response before consuming the
-/// body.  Threading these through a struct avoids losing information when
-/// `resp.text().await` moves the response.
+/// Header-derived auth signals, captured before the body is consumed.
 #[derive(Debug, Default)]
 pub struct ResponseHeaderSignals {
     /// `WWW-Authenticate` header present.
@@ -547,8 +523,7 @@ pub fn classify_auth(signals: &[AuthSignal]) -> AuthClassification {
     }
 }
 
-/// Admin keywords for structural content detection (requires ≥ 2 alongside
-/// HTML table elements).
+/// Keywords for structural admin-content detection (≥ 2 required alongside table elements).
 const ADMIN_KEYWORDS: &[&str] = &[
     "settings",
     "configuration",
@@ -701,12 +676,8 @@ fn is_spa_shell(lower: &str) -> bool {
         && lower.contains("<script")
 }
 
-/// Detect a thin redirect page that just changes port or scheme.
-///
-/// Matches bodies containing `location.replace(` or `location.href=` that
-/// target a URL with the same host but a different port/scheme, *without*
-/// any login/auth keywords.  These pages are not admin panels — they are
-/// transparent redirectors.
+/// Thin redirect page: `location.replace(` / `location.href` present and no
+/// login/auth keywords.
 fn is_port_redirect(lower: &str) -> bool {
     let has_redirect = lower.contains("location.replace(") || lower.contains("location.href");
     if !has_redirect {
@@ -717,9 +688,7 @@ fn is_port_redirect(lower: &str) -> bool {
     !has_auth_target
 }
 
-/// Check for `RFC1918` private IP addresses in body content.
-///
-/// Uses boundary-aware matching to avoid false positives on version strings.
+/// Detect `RFC1918`-looking addresses in the body (`192.168.` or delimiter-prefixed `10.`).
 fn has_private_ips(lower: &str) -> bool {
     lower.contains("192.168.")
         || lower.contains(">10.")
@@ -785,13 +754,7 @@ fn format_auth_evidence(signals: &[AuthSignal]) -> String {
     parts.join(". ")
 }
 
-// ── Content-Security-Policy deep analysis ───────────────────────
-//
-// Instead of just checking CSP presence, we parse the header value into
-// structured directives and analyse each for known weaknesses:
-// `unsafe-inline`, `unsafe-eval`, `data:` URIs, wildcard sources, and
-// missing critical directives like `object-src`, `base-uri`, and
-// `frame-ancestors`.
+// ── Content-Security-Policy analysis ────────────────────────────
 
 /// A parsed CSP directive: name + list of source expressions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,10 +763,7 @@ pub struct CspDirective {
     pub sources: Vec<String>,
 }
 
-/// Parse a `Content-Security-Policy` header into structured directives.
-///
-/// CSP syntax: `directive-name src1 src2; directive-name2 src3`
-/// All names and sources are lowercased for comparison.
+/// Parse a CSP header (`name src1 src2; name2 src3`) into lowercased directives.
 pub fn parse_csp(header: &str) -> Vec<CspDirective> {
     header
         .split(';')
@@ -820,10 +780,7 @@ pub fn parse_csp(header: &str) -> Vec<CspDirective> {
         .collect()
 }
 
-/// Find the effective sources for a directive, falling back to `default-src`.
-///
-/// CSP specifies that any unmentioned fetch directive inherits from
-/// `default-src`.  This helper models that fallback chain.
+/// Sources for `name`, falling back to `default-src` (CSP inheritance).
 fn csp_effective_sources<'a>(directives: &'a [CspDirective], name: &str) -> Option<&'a [String]> {
     directives
         .iter()
@@ -832,17 +789,13 @@ fn csp_effective_sources<'a>(directives: &'a [CspDirective], name: &str) -> Opti
         .map(|d| d.sources.as_slice())
 }
 
-/// Check if a source list is restrictive enough that missing specific
-/// directives are not a concern (`'none'` or `'self'` only).
+/// True if every source is `'none'` or `'self'`.
 fn is_restrictive(sources: &[String]) -> bool {
     !sources.is_empty() && sources.iter().all(|s| s == "'none'" || s == "'self'")
 }
 
-/// Analyse a `Content-Security-Policy` header for weaknesses.
-///
-/// Only call this when a CSP header *is* present — we already generate a
-/// separate "missing CSP" finding.  `has_x_frame_options` suppresses the
-/// `frame-ancestors` finding when XFO already provides clickjacking defence.
+/// Analyse a present CSP header for weaknesses. `has_x_frame_options`
+/// suppresses the `frame-ancestors` finding.
 #[allow(clippy::too_many_lines)]
 pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: bool) -> Vec<Finding> {
     let directives = parse_csp(header);
@@ -851,7 +804,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
     }
     let mut findings = Vec::new();
 
-    // ── script-src analysis (most impactful) ──
     if let Some(sources) = csp_effective_sources(&directives, "script-src") {
         if sources.iter().any(|s| s == "'unsafe-inline'") {
             findings.push(
@@ -914,7 +866,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
         }
     }
 
-    // ── Wildcard sources in any directive ──
     let wildcard_directives: Vec<&str> = directives
         .iter()
         .filter(|d| d.sources.iter().any(|s| s == "*"))
@@ -941,7 +892,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
         );
     }
 
-    // ── Missing object-src without restrictive default ──
     let has_object_src = directives.iter().any(|d| d.name == "object-src");
     if !has_object_src {
         let default_restrictive = directives
@@ -969,7 +919,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
         }
     }
 
-    // ── Missing base-uri ──
     if !directives.iter().any(|d| d.name == "base-uri") {
         findings.push(
             Finding::new(
@@ -987,7 +936,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
         );
     }
 
-    // ── Missing frame-ancestors when no XFO either ──
     if !directives.iter().any(|d| d.name == "frame-ancestors") && !has_x_frame_options {
         findings.push(
             Finding::new(
@@ -1009,11 +957,6 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
 }
 
 // ── CORS analysis ───────────────────────────────────────────────
-//
-// Cross-Origin Resource Sharing misconfigurations allow any website to
-// interact with network device APIs.  On a home network, this means a
-// malicious webpage could read router status, change settings, or
-// exfiltrate data from NAS devices.
 
 /// Analyse CORS headers for misconfigurations.
 pub fn analyze_cors(
@@ -1030,8 +973,7 @@ pub fn analyze_cors(
 
     if origin == "*" {
         if allow_credentials {
-            // Spec-invalid combination (browsers reject it), but signals
-            // fundamentally broken CORS config.
+            // Browsers reject `*` + credentials; still a misconfiguration.
             findings.push(
                 Finding::new(
                     "http_audit",
@@ -1071,8 +1013,6 @@ pub fn analyze_cors(
             );
         }
     } else if origin == "null" {
-        // The `null` origin can be forged via sandboxed iframes and data:
-        // URIs, so trusting it is effectively an open CORS policy.
         findings.push(
             Finding::new(
                 "http_audit",
@@ -1095,10 +1035,7 @@ pub fn analyze_cors(
     findings
 }
 
-// ── Cookie security attribute analysis ──────────────────────────
-//
-// Session cookies without Secure, HttpOnly, or SameSite attributes are
-// vulnerable to interception, XSS theft, and CSRF attacks respectively.
+// ── Cookie attribute analysis ───────────────────────────────────
 
 /// Security-relevant attributes parsed from a `Set-Cookie` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1111,10 +1048,8 @@ pub struct CookieAttributes {
 
 /// Parse a single `Set-Cookie` header value into security attributes.
 pub fn parse_set_cookie(header: &str) -> CookieAttributes {
-    // Cookie name is everything before first '='
     let name = header.split('=').next().unwrap_or("").trim().to_lowercase();
 
-    // Attributes follow the value, separated by ';'
     let lower = header.to_lowercase();
     let parts: Vec<&str> = lower.split(';').map(str::trim).collect();
 
@@ -1158,7 +1093,6 @@ pub fn analyze_cookies(
             continue;
         }
 
-        // Missing Secure on HTTPS — session can leak over HTTP
         if is_https && !cookie.secure {
             findings.push(
                 Finding::new(
@@ -1185,7 +1119,6 @@ pub fn analyze_cookies(
             );
         }
 
-        // Missing HttpOnly — XSS can steal the cookie
         if !cookie.http_only {
             findings.push(
                 Finding::new(
@@ -1211,7 +1144,6 @@ pub fn analyze_cookies(
             );
         }
 
-        // Missing or weak SameSite
         match cookie.same_site.as_deref() {
             None => {
                 findings.push(
@@ -1257,20 +1189,17 @@ pub fn analyze_cookies(
                     .with_cwe("CWE-352"),
                 );
             }
-            Some(_) => { /* Lax or Strict — good */ }
+            Some(_) => { /* Lax or Strict */ }
         }
     }
 
     findings
 }
 
-/// Extract header-level auth signals from a `reqwest::Response` before
-/// the body is consumed.
+/// Extract header-level auth signals from a `reqwest::Response`.
 fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSignals {
     let has_www_authenticate = resp.headers().contains_key("www-authenticate");
 
-    // CSRF: explicit x-csrf-token / x-xsrf-token header, or mentioned in
-    // access-control-expose-headers.
     let has_csrf_token = resp.headers().contains_key("x-csrf-token")
         || resp.headers().contains_key("x-xsrf-token")
         || resp
@@ -1282,7 +1211,6 @@ fn extract_response_header_signals(resp: &reqwest::Response) -> ResponseHeaderSi
                 lower.contains("csrf") || lower.contains("xsrf")
             });
 
-    // Session cookie: set-cookie header with a session-like name.
     let has_session_cookie = resp.headers().get_all("set-cookie").iter().any(|v| {
         v.to_str()
             .ok()
@@ -1315,6 +1243,7 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         "http"
     };
 
+    // TLS validation disabled: unauthenticated probe, no credentials sent.
     let Ok(client) = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(HTTP_TIMEOUT)
@@ -1324,10 +1253,8 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         return findings;
     };
 
-    // Main page request
     let url = format!("{scheme}://{ip}:{port}/");
     if let Ok(resp) = client.get(&url).send().await {
-        // Check security headers
         let headers = HeaderSet {
             has_hsts: resp.headers().contains_key("strict-transport-security"),
             has_x_frame_options: resp.headers().contains_key("x-frame-options"),
@@ -1340,13 +1267,11 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                 .map(ToOwned::to_owned),
         };
 
-        // Only report missing HSTS on HTTPS ports
         if scheme == "https" {
             findings.extend(classify_missing_headers(ip, port, &headers));
         } else {
-            // For HTTP, still check other headers but skip HSTS
             let partial = HeaderSet {
-                has_hsts: true, // Suppress HSTS finding for HTTP
+                has_hsts: true, // no HSTS finding on plain HTTP
                 has_x_frame_options: headers.has_x_frame_options,
                 has_content_security_policy: headers.has_content_security_policy,
                 has_x_content_type_options: headers.has_x_content_type_options,
@@ -1355,30 +1280,24 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             findings.extend(classify_missing_headers(ip, port, &partial));
         }
 
-        // Server header analysis
         if let Some(ref server) = headers.server
             && let Some(finding) = classify_server_header(ip, port, server)
         {
             findings.push(finding);
         }
 
-        // X-Powered-By framework detection
         let powered_by = resp
             .headers()
             .get("x-powered-by")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
 
-        // ── Extract deep-analysis headers before consuming the body ──
-
-        // CSP raw value for deep parsing (presence already checked above)
         let csp_value = resp
             .headers()
             .get("content-security-policy")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
 
-        // CORS headers
         let cors_origin = resp
             .headers()
             .get("access-control-allow-origin")
@@ -1390,7 +1309,6 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("true"));
 
-        // Parse all Set-Cookie headers for cookie attribute analysis
         let cookies: Vec<CookieAttributes> = resp
             .headers()
             .get_all("set-cookie")
@@ -1399,11 +1317,9 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             .map(parse_set_cookie)
             .collect();
 
-        // Check body for default pages and framework fingerprinting. Cap the read:
-        // the response is from an untrusted device and could be arbitrarily large.
+        // Body read is capped (untrusted device).
         let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
 
-        // High-value NAS / smart-home-hub identification from header + body.
         if let Some(f) = classify_nas_ha(ip, port, headers.server.as_deref(), &body) {
             findings.push(f);
         }
@@ -1448,21 +1364,15 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
                 );
             }
 
-            // Framework fingerprinting from body + X-Powered-By
             if let Some(fw_finding) = detect_framework(ip, port, powered_by.as_deref(), &body) {
                 findings.push(fw_finding);
             }
         }
 
-        // ── Deep header analysis (CSP, CORS, cookies) ──
-
-        // CSP deep analysis: only when CSP IS present (missing CSP is already
-        // flagged by classify_missing_headers above).
         if let Some(ref csp) = csp_value {
             findings.extend(analyze_csp(ip, port, csp, headers.has_x_frame_options));
         }
 
-        // CORS misconfiguration check
         findings.extend(analyze_cors(
             ip,
             port,
@@ -1470,19 +1380,16 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             cors_credentials,
         ));
 
-        // Session cookie attribute analysis
         let is_https = scheme == "https";
         findings.extend(analyze_cookies(ip, port, is_https, &cookies));
     }
 
-    // OPTIONS method enumeration
     if let Ok(resp) = client.request(reqwest::Method::OPTIONS, &url).send().await
         && let Some(allow) = resp.headers().get("allow").and_then(|v| v.to_str().ok())
     {
         findings.extend(classify_http_methods(ip, port, allow));
     }
 
-    // Probe admin paths with signal-based auth classification
     for path in ADMIN_PATHS {
         let admin_url = format!("{scheme}://{ip}:{port}{path}");
         if let Ok(resp) = client.get(&admin_url).send().await
@@ -1496,7 +1403,7 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
 
             match classification {
                 AuthClassification::Protected => {
-                    // Auth detected (login form, OAuth, etc.) — no finding
+                    // no finding
                 }
                 AuthClassification::Exposed => {
                     let evidence = format_auth_evidence(&signals);
@@ -1578,7 +1485,6 @@ impl Scanner for HttpAuditScanner {
         tracing::info!("running HTTP security audit");
         let mut findings = Vec::new();
 
-        // Skip entirely in Passive mode — HTTP audit is slow and not essential
         if !ctx
             .config
             .intensity
@@ -1588,14 +1494,12 @@ impl Scanner for HttpAuditScanner {
             return Ok(findings);
         }
 
-        // Use discovered devices from Phase 1 for adaptive scanning
         if ctx.discovered_devices.is_empty() {
             tracing::info!("no discovered devices, skipping HTTP audit");
             return Ok(findings);
         }
 
         for device in &ctx.discovered_devices {
-            // Only audit devices with HTTP ports open
             let http_ports: Vec<u16> = device
                 .open_ports
                 .iter()

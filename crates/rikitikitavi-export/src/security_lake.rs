@@ -4,23 +4,18 @@ use anyhow::Result;
 use rikitikitavi_models::ScanResults;
 use rikitikitavi_models::ocsf::OcsfFinding;
 
-/// Export scan results as OCSF-compliant NDJSON to a file.
-///
-/// Each finding becomes one line of JSON conforming to the OCSF 1.1
-/// Vulnerability Finding schema (class 2002). The `risk_score` from the
-/// overall scan is injected into each OCSF record.
+/// Write findings as OCSF 1.1 Vulnerability Finding (class 2002) NDJSON.
 pub fn export_ocsf_json(results: &ScanResults, path: &Path) -> Result<()> {
     let ndjson = to_ocsf_ndjson(results)?;
     std::fs::write(path, ndjson)?;
     Ok(())
 }
 
-/// Convert scan results to an OCSF NDJSON string (one JSON object per line).
+/// OCSF NDJSON (one object per line); a non-zero scan `risk_score` is copied into each record.
 pub fn to_ocsf_ndjson(results: &ScanResults) -> Result<String> {
     let mut buf = String::new();
     for finding in &results.findings {
         let mut ocsf = OcsfFinding::from(finding);
-        // Inject the scan-level risk score into each OCSF record.
         if results.risk_score > 0.0 {
             ocsf.risk_score = Some(results.risk_score);
         }
