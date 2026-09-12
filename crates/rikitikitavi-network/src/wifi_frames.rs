@@ -429,19 +429,15 @@ fn parse_tagged_parameters(
         let tag_data = &data[offset..offset + tag_len];
 
         match tag_id {
-            TAG_SSID => {
-                if tag_len > 0 {
-                    let s = String::from_utf8_lossy(tag_data).to_string();
-                    if !s.is_empty() && !s.chars().all(|c| c == '\0') {
-                        ssid = Some(s);
-                    }
+            // tag_len == 0 is the wildcard SSID.
+            TAG_SSID if tag_len > 0 => {
+                let s = String::from_utf8_lossy(tag_data).to_string();
+                if !s.is_empty() && !s.chars().all(|c| c == '\0') {
+                    ssid = Some(s);
                 }
-                // tag_len == 0: wildcard SSID
             }
-            TAG_DS_PARAMETER => {
-                if tag_len == 1 {
-                    channel = Some(tag_data[0]);
-                }
+            TAG_DS_PARAMETER if tag_len == 1 => {
+                channel = Some(tag_data[0]);
             }
             TAG_RSN => {
                 has_rsn = true;

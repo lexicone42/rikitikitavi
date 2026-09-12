@@ -167,11 +167,9 @@ impl App {
             KeyCode::Enter => {
                 self.enter_detail();
             }
-            KeyCode::Esc => {
-                if self.screen == Screen::DeviceDetail {
-                    self.screen = Screen::Dashboard;
-                    self.selected_device = None;
-                }
+            KeyCode::Esc if self.screen == Screen::DeviceDetail => {
+                self.screen = Screen::Dashboard;
+                self.selected_device = None;
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
