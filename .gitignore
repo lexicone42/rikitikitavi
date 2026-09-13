@@ -33,3 +33,6 @@ tarpaulin-report.html
 
 # Claude Code local settings + ephemeral workflow worktrees
 /.claude/
+
+# libFuzzer -jobs worker logs
+fuzz-*.log
