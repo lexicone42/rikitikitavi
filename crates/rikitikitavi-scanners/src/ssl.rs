@@ -538,7 +538,6 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
         );
     }
 
-    // Excessive validity: >825 days total (CA/B Forum public-cert limit is 398 days).
     if cert.days_until_expiry > 825 {
         let total_validity_days = compute_total_validity_days(cert);
         if total_validity_days > 825 {

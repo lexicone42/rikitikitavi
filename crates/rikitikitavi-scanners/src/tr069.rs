@@ -290,7 +290,6 @@ impl Scanner for Tr069Scanner {
         tracing::info!("running TR-069/CWMP exposure scan");
         let mut findings = Vec::new();
 
-        // Skip below Active intensity — this issues an active HTTP probe.
         if !ctx
             .config
             .intensity

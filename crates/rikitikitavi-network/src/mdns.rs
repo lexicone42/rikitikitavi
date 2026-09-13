@@ -385,7 +385,6 @@ const SERVICE_QUERIES: &[&str] = &[
 /// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until
 /// `timeout_secs` (minimum 1) elapses or [`MAX_MDNS_RECORDS`] are collected.
 pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
-    // Blocking UDP I/O runs off the async runtime.
     let services = tokio::task::spawn_blocking(move || discover_services_blocking(timeout_secs))
         .await
         .map_err(|e| anyhow::anyhow!("mDNS discovery task failed: {e}"))?;

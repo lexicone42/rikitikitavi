@@ -26,7 +26,7 @@ const ARP_FALLBACK_IDS: [&str; 6] = [
     "smb",
     "snmp",
     "database",
-    "mgmt_plane",
+    "mgmt-plane",
 ];
 
 /// Detect gateway and target network into `ctx`; return devices from the ARP cache.
@@ -89,10 +89,26 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
     devices
 }
 
-/// TCP-connect sweep of the target network; merges new, non-excluded hosts into
-/// `ctx.discovered_devices`. Skipped at Passive intensity or without a target network.
-/// Returns the number of hosts added.
-pub async fn active_host_discovery(ctx: &mut ScanContext, exclusions: &ExclusionSet) -> usize {
+/// `targets` minus excluded IPs/CIDRs and `excluded_mac_ips`.
+fn filter_sweep_targets(
+    targets: Vec<IpAddr>,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> Vec<IpAddr> {
+    targets
+        .into_iter()
+        .filter(|ip| !exclusions.excludes_ip(*ip) && !excluded_mac_ips.contains(ip))
+        .collect()
+}
+
+/// TCP-connect sweep of the target network, excluded hosts never probed; merges new
+/// hosts into `ctx.discovered_devices`. Skipped at Passive intensity or without a
+/// target network. Returns the number of hosts added.
+pub async fn active_host_discovery(
+    ctx: &mut ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> usize {
     use rikitikitavi_models::config::ScanIntensity;
 
     if !ctx.config.intensity.at_least(ScanIntensity::Active) {
@@ -102,13 +118,17 @@ pub async fn active_host_discovery(ctx: &mut ScanContext, exclusions: &Exclusion
         return 0;
     };
 
-    let found = rikitikitavi_network::tcp_sweep(&network, Duration::from_millis(400), 256).await;
+    let targets = filter_sweep_targets(
+        rikitikitavi_network::sweep::sweep_targets(&network),
+        exclusions,
+        excluded_mac_ips,
+    );
+    let found =
+        rikitikitavi_network::sweep::tcp_sweep_hosts(targets, Duration::from_millis(400), 256)
+            .await;
 
     let mut added = 0;
     for ip in found {
-        if exclusions.excludes_ip(ip) {
-            continue;
-        }
         if !ctx.discovered_devices.iter().any(|d| d.ip == ip) {
             let mut dev = Device::new(ip);
             if ctx.gateway == Some(ip) {
@@ -144,7 +164,8 @@ pub async fn discover_hosts(ctx: &mut ScanContext) -> Result<usize> {
     let exclusions = ctx.config.exclusions()?;
     ctx.discovered_devices = discover_network(ctx);
     apply_exclusions(&mut ctx.discovered_devices, &exclusions);
-    let added = active_host_discovery(ctx, &exclusions).await;
+    let excluded_mac_ips = arp_ips_of_excluded_macs(&exclusions);
+    let added = active_host_discovery(ctx, &exclusions, &excluded_mac_ips).await;
     if added > 0 {
         // The sweep's SYNs populate the ARP cache; MAC-less sweep hosts pick their MACs up here.
         let arp = rikitikitavi_network::read_arp_cache().unwrap_or_default();
@@ -173,6 +194,9 @@ pub fn fill_macs_from_arp(devices: &mut [Device], arp: &[rikitikitavi_network::A
 
 /// ARP-cache IPs whose MAC is excluded.
 fn arp_ips_of_excluded_macs(exclusions: &ExclusionSet) -> HashSet<IpAddr> {
+    if exclusions.is_empty() {
+        return HashSet::new();
+    }
     rikitikitavi_network::read_arp_cache()
         .unwrap_or_default()
         .iter()
@@ -437,11 +461,7 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     let exclusions = ctx.config.exclusions()?;
     apply_exclusions(&mut ctx.discovered_devices, &exclusions);
-    let excluded_mac_ips = if exclusions.is_empty() {
-        HashSet::new()
-    } else {
-        arp_ips_of_excluded_macs(&exclusions)
-    };
+    let excluded_mac_ips = arp_ips_of_excluded_macs(&exclusions);
 
     let selection = plan_scanners(&registry, ctx)?;
     log_selection(&selection, ctx.perspective);
@@ -556,7 +576,7 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         );
     }
 
-    // KEV enrichment runs before scoring so escalated severities affect the risk score.
+    // KEV before scoring.
     let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
     if kev_count > 0 {
         tracing::info!(
@@ -1189,6 +1209,37 @@ mod tests {
     }
 
     #[test]
+    fn arp_fallback_ids_are_registered_scanner_ids() {
+        let registry = ScannerRegistry::new();
+        for id in ARP_FALLBACK_IDS {
+            assert!(registry.get(id).is_some(), "{id} is not a scanner id");
+        }
+    }
+
+    #[test]
+    fn filter_sweep_targets_never_lists_excluded_hosts() {
+        let exclusions =
+            ExclusionSet::parse(&owned(&["10.0.0.4/31"]), &owned(&["10.0.0.2"])).unwrap();
+        let mac_ips = HashSet::from([ip("10.0.0.6")]);
+
+        let all = rikitikitavi_network::sweep::sweep_targets(&"10.0.0.0/29".parse().unwrap());
+        let targets = filter_sweep_targets(all.clone(), &exclusions, &mac_ips);
+
+        assert_eq!(all.len(), 6);
+        assert_eq!(targets.len(), all.len() - 4);
+        for excluded in ["10.0.0.2", "10.0.0.4", "10.0.0.5", "10.0.0.6"] {
+            assert!(
+                !targets.contains(&ip(excluded)),
+                "{excluded} in {targets:?}"
+            );
+        }
+        assert_eq!(
+            filter_sweep_targets(all.clone(), &ExclusionSet::default(), &HashSet::new()),
+            all
+        );
+    }
+
+    #[test]
     fn filter_phase2_skips_arp_fallback_when_all_devices_excluded() {
         let mut ctx = ctx_with(None, Perspective::Unauthenticated);
         ctx.config.excluded_devices = owned(&["10.0.0.5"]);
@@ -1196,8 +1247,9 @@ mod tests {
         let none = HashSet::new();
 
         let ids = phase2_ids(&ctx, &exclusions, &none);
-        assert!(!ids.contains(&"credentials"), "{ids:?}");
-        assert!(!ids.contains(&"snmp"), "{ids:?}");
+        for id in ARP_FALLBACK_IDS {
+            assert!(!ids.contains(&id), "{id} in {ids:?}");
+        }
         assert!(ids.contains(&"dns"), "{ids:?}");
         assert!(ids.contains(&"router"), "{ids:?}");
 

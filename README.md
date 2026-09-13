@@ -293,7 +293,7 @@ scan:
   parallelism: 64              # 1..=4096
   timeout_seconds: 0           # 0 = unbounded; otherwise the whole scan aborts after N seconds
   excluded_networks: ["192.168.50.0/24"]                    # CIDRs never probed
-  excluded_devices: ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]  # IPs or MACs never probed
+  excluded_devices: ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]  # IPs never probed; MACs once the ARP cache knows them
 ```
 
 Reports, baseline and known-device files are written with mode `0600`; the scan-history directory with `0700`.

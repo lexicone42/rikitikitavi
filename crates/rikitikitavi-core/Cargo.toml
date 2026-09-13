@@ -14,8 +14,6 @@ chrono.workspace = true
 uuid.workspace = true
 ipnetwork.workspace = true
 
-[dev-dependencies]
-proptest.workspace = true
 tempfile = "3"
 
 [lints]

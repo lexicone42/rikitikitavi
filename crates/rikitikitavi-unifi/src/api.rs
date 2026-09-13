@@ -1,10 +1,17 @@
 use anyhow::{Context, Result, bail};
+use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};
+use rikitikitavi_scanners::http_util::{read_body_capped, unauthenticated_probe_client};
 use serde::Deserialize;
+use std::time::Duration;
 
 use crate::models::{
     AdoptedDevice, FirewallRule, IdsEvent, NetworkConfig, Site, UniFiClientInfo, WlanConfig,
 };
+
+/// Body cap for the unauthenticated probe.
+const PROBE_BODY_MAX: usize = 64 * 1024;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Standard `UniFi` API JSON envelope.
 #[derive(Debug, Deserialize)]
@@ -111,7 +118,7 @@ impl UniFiClient {
         let client = Client::builder()
             .danger_accept_invalid_certs(accept_invalid_certs)
             .cookie_store(true)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
@@ -348,17 +355,18 @@ impl UniFiClient {
         Ok(envelope.data)
     }
 
-    /// Unauthenticated liveness probe: a `UniFi` controller answers `/api/self/sites`
-    /// with 401 (`api.err.LoginRequired` on classic, `AUTHENTICATION_REQUIRED` on `UniFi` OS).
+    /// Unauthenticated liveness probe: a `UniFi` controller answers `/api/self/sites` with
+    /// `api.err.LoginRequired` (classic) or `AUTHENTICATION_REQUIRED` (`UniFi` OS) in the body.
+    /// Status alone is not trusted. Dedicated client: no cookies, no redirects, capped body.
     pub async fn probe(&self) -> bool {
-        let url = self.api_url("/api/self/sites");
-        let Ok(resp) = self.client.get(&url).send().await else {
+        let Ok(client) = unauthenticated_probe_client(PROBE_TIMEOUT, Policy::none()) else {
             return false;
         };
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            return true;
-        }
-        let body = resp.text().await.unwrap_or_default();
+        let url = self.api_url("/api/self/sites");
+        let Ok(resp) = client.get(&url).send().await else {
+            return false;
+        };
+        let body = read_body_capped(resp, PROBE_BODY_MAX).await;
         body.contains("api.err.LoginRequired") || body.contains("AUTHENTICATION_REQUIRED")
     }
 
@@ -661,10 +669,16 @@ mod tests {
         assert!(client.bearer_token.is_none());
     }
 
+    const LOGIN_REQUIRED: &str =
+        r#"{"meta":{"rc":"error","msg":"api.err.LoginRequired"},"data":[]}"#;
+    const AUTH_REQUIRED: &str = r#"{"code":"AUTHENTICATION_REQUIRED","message":"Login required"}"#;
+    const BASIC_AUTH_HTML: &str =
+        "<html><head><title>401 Authorization Required</title></head><body>login</body></html>";
+
     #[tokio::test]
     async fn probe_uses_layout_prefix() {
         let base = spawn_server(|method, path, _| match (method, path) {
-            ("GET", "/proxy/network/api/self/sites") => http_response(401, "", "{}"),
+            ("GET", "/proxy/network/api/self/sites") => http_response(401, "", AUTH_REQUIRED),
             _ => http_response(200, "", "<html>"),
         })
         .await;
@@ -674,5 +688,51 @@ mod tests {
             .unwrap()
             .with_layout(ApiLayout::UniFiOs);
         assert!(os.probe().await);
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_marker_on_401_and_200() {
+        let base = spawn_server(|_, _, _| http_response(401, "", LOGIN_REQUIRED)).await;
+        assert!(UniFiClient::new(&base, "default").unwrap().probe().await);
+        let base = spawn_server(|_, _, _| http_response(200, "", AUTH_REQUIRED)).await;
+        assert!(UniFiClient::new(&base, "default").unwrap().probe().await);
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_basic_auth_401_without_marker() {
+        let base = spawn_server(|_, _, _| {
+            http_response(
+                401,
+                "WWW-Authenticate: Basic realm=\"router\"\r\n",
+                BASIC_AUTH_HTML,
+            )
+        })
+        .await;
+        assert!(!UniFiClient::new(&base, "default").unwrap().probe().await);
+        let base = spawn_server(|_, _, _| http_response(401, "", "{}")).await;
+        assert!(!UniFiClient::new(&base, "default").unwrap().probe().await);
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_follow_redirects() {
+        let base = spawn_server(|_, path, _| {
+            if path == "/login" {
+                http_response(401, "", LOGIN_REQUIRED)
+            } else {
+                http_response(302, "Location: /login\r\n", "")
+            }
+        })
+        .await;
+        assert!(!UniFiClient::new(&base, "default").unwrap().probe().await);
+    }
+
+    #[tokio::test]
+    async fn probe_reads_at_most_body_cap() {
+        let beyond = format!("{}{LOGIN_REQUIRED}", "x".repeat(PROBE_BODY_MAX));
+        let base = spawn_server(move |_, _, _| http_response(401, "", &beyond)).await;
+        assert!(!UniFiClient::new(&base, "default").unwrap().probe().await);
+        let within = format!("{}{LOGIN_REQUIRED}", "x".repeat(PROBE_BODY_MAX / 2));
+        let base = spawn_server(move |_, _, _| http_response(401, "", &within)).await;
+        assert!(UniFiClient::new(&base, "default").unwrap().probe().await);
     }
 }

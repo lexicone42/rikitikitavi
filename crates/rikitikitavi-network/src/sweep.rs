@@ -1,5 +1,8 @@
 //! Host discovery via bounded TCP-connect probing (no root required).
 //! Complements the ARP cache, which only lists hosts recently talked to.
+//!
+//! Callers filter exclusions out of the target list before probing; a MAC exclusion
+//! can only be mapped to an IP for hosts already in the ARP cache.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -50,13 +53,20 @@ async fn host_alive(ip: IpAddr, timeout: Duration) -> bool {
 /// Live hosts in `network`, sorted. `timeout` bounds each connect; `concurrency`
 /// caps parallel hosts. Addresses beyond [`MAX_SWEEP_HOSTS`] are silently not probed.
 pub async fn tcp_sweep(network: &IpNetwork, timeout: Duration, concurrency: usize) -> Vec<IpAddr> {
-    let targets = sweep_targets(network);
+    tcp_sweep_hosts(sweep_targets(network), timeout, concurrency).await
+}
+
+/// Live hosts among `targets`, sorted. Only listed addresses are probed.
+pub async fn tcp_sweep_hosts(
+    targets: Vec<IpAddr>,
+    timeout: Duration,
+    concurrency: usize,
+) -> Vec<IpAddr> {
     if targets.is_empty() {
         return Vec::new();
     }
 
     tracing::debug!(
-        %network,
         host_count = targets.len(),
         "starting TCP-connect host sweep"
     );
@@ -130,6 +140,23 @@ mod tests {
         // nothing listening. This exercises the real connect/refused code path.
         let alive = host_alive("127.0.0.1".parse().unwrap(), Duration::from_millis(500)).await;
         assert!(alive, "loopback should be detected as alive");
+    }
+
+    #[tokio::test]
+    async fn tcp_sweep_hosts_probes_only_listed_targets() {
+        assert!(
+            tcp_sweep_hosts(Vec::new(), Duration::from_millis(200), 4)
+                .await
+                .is_empty()
+        );
+        // Loopback is alive via refused connects; an unlisted address can never appear.
+        let alive = tcp_sweep_hosts(
+            vec!["127.0.0.1".parse().unwrap()],
+            Duration::from_millis(500),
+            4,
+        )
+        .await;
+        assert_eq!(alive, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
     }
 
     #[tokio::test]

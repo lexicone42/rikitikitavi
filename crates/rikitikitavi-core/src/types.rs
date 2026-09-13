@@ -116,7 +116,6 @@ impl fmt::Display for Confidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
     const SEVERITIES: [Severity; 5] = [
         Severity::Info,
@@ -137,55 +136,54 @@ mod tests {
         Perspective::Privileged,
     ];
 
-    fn arb_severity() -> impl Strategy<Value = Severity> {
-        proptest::sample::select(&SEVERITIES[..])
+    /// `ocsf_id` lies in 1..=5 and is strictly monotone in the derived `Ord`, hence injective.
+    #[test]
+    fn severity_ocsf_id_in_range_and_monotone() {
+        for a in SEVERITIES {
+            assert!((1..=5).contains(&a.ocsf_id()), "{a:?}");
+            for b in SEVERITIES {
+                assert_eq!(a.cmp(&b), a.ocsf_id().cmp(&b.ocsf_id()), "{a:?} vs {b:?}");
+            }
+        }
     }
 
-    fn arb_confidence() -> impl Strategy<Value = Confidence> {
-        proptest::sample::select(&CONFIDENCES[..])
+    /// `Severity` `Display` is non-empty uppercase ASCII and injective.
+    #[test]
+    fn severity_display_uppercase_and_injective() {
+        for a in SEVERITIES {
+            let sa = a.to_string();
+            assert!(
+                !sa.is_empty() && sa.bytes().all(|c| c.is_ascii_uppercase()),
+                "{sa:?}"
+            );
+            for b in SEVERITIES {
+                assert_eq!(a == b, sa == b.to_string(), "{a:?} vs {b:?}");
+            }
+        }
     }
 
-    fn arb_perspective() -> impl Strategy<Value = Perspective> {
-        proptest::sample::select(&PERSPECTIVES[..])
+    /// `Confidence::label` is injective.
+    #[test]
+    fn confidence_label_injective() {
+        for a in CONFIDENCES {
+            for b in CONFIDENCES {
+                assert_eq!(a == b, a.label() == b.label(), "{a:?} vs {b:?}");
+            }
+        }
     }
 
-    proptest! {
-        /// `ocsf_id` is strictly monotone in the derived `Ord`, hence injective.
-        #[test]
-        fn prop_severity_ocsf_id_monotone(a in arb_severity(), b in arb_severity()) {
-            prop_assert_eq!(a.cmp(&b), a.ocsf_id().cmp(&b.ocsf_id()));
-        }
-
-        /// `ocsf_id` lies in 1..=5.
-        #[test]
-        fn prop_severity_ocsf_id_in_range(s in arb_severity()) {
-            prop_assert!((1..=5).contains(&s.ocsf_id()));
-        }
-
-        /// `Severity` `Display` is non-empty uppercase ASCII and injective.
-        #[test]
-        fn prop_severity_display_injective(a in arb_severity(), b in arb_severity()) {
-            let (sa, sb) = (a.to_string(), b.to_string());
-            prop_assert!(!sa.is_empty() && sa.bytes().all(|c| c.is_ascii_uppercase()));
-            prop_assert_eq!(a == b, sa == sb);
-        }
-
-        /// `Confidence::label` equals `Display` and is injective.
-        #[test]
-        fn prop_confidence_label_equals_display_and_injective(
-            a in arb_confidence(),
-            b in arb_confidence(),
-        ) {
-            prop_assert_eq!(a.label(), a.to_string());
-            prop_assert_eq!(a == b, a.label() == b.label());
-        }
-
-        /// `Perspective` `Display` is lowercase ASCII and injective.
-        #[test]
-        fn prop_perspective_display_injective(a in arb_perspective(), b in arb_perspective()) {
-            let (sa, sb) = (a.to_string(), b.to_string());
-            prop_assert!(!sa.is_empty() && sa.bytes().all(|c| c.is_ascii_lowercase()));
-            prop_assert_eq!(a == b, sa == sb);
+    /// `Perspective` `Display` is non-empty lowercase ASCII and injective.
+    #[test]
+    fn perspective_display_lowercase_and_injective() {
+        for a in PERSPECTIVES {
+            let sa = a.to_string();
+            assert!(
+                !sa.is_empty() && sa.bytes().all(|c| c.is_ascii_lowercase()),
+                "{sa:?}"
+            );
+            for b in PERSPECTIVES {
+                assert_eq!(a == b, sa == b.to_string(), "{a:?} vs {b:?}");
+            }
         }
     }
 }

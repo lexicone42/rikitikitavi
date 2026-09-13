@@ -180,7 +180,6 @@ impl Scanner for MqttScanner {
         tracing::info!("running MQTT broker security scan");
         let mut findings = Vec::new();
 
-        // Skip below Active intensity — this performs an application-layer handshake.
         if !ctx
             .config
             .intensity

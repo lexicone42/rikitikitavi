@@ -127,7 +127,7 @@ pub struct ScanArgs {
     pub attack_paths: bool,
 
     /// Quick scan (fewer checks, faster).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "aggressive")]
     pub quick: bool,
 
     /// Aggressive scan (thorough, may trigger alerts).
@@ -162,7 +162,7 @@ pub struct ScanArgs {
 
 #[derive(Args)]
 pub struct TuiArgs {
-    /// Continuous monitoring mode.
+    /// Re-scan automatically every `--interval` seconds.
     #[arg(long)]
     pub watch: bool,
 
@@ -447,6 +447,13 @@ mod tests {
             panic!("expected monitor command");
         };
         assert_eq!(args.duration, 1);
+    }
+
+    #[test]
+    fn scan_quick_conflicts_with_aggressive() {
+        assert!(Cli::try_parse_from(["rikitikitavi", "scan", "--quick", "--aggressive"]).is_err());
+        assert!(Cli::try_parse_from(["rikitikitavi", "scan", "--quick"]).is_ok());
+        assert!(Cli::try_parse_from(["rikitikitavi", "scan", "--aggressive"]).is_ok());
     }
 
     #[test]

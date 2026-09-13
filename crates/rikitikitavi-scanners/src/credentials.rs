@@ -601,11 +601,7 @@ fn classify_telnet_response(response: &str) -> TelnetOutcome {
 
     // Shell prompt at end of output
     let trimmed = response.trim_end();
-    if trimmed.ends_with('$')
-        || trimmed.ends_with('#')
-        || trimmed.ends_with('>')
-        || trimmed.ends_with('~')
-    {
+    if trimmed.ends_with(['$', '#', '>']) {
         return TelnetOutcome::Success;
     }
 
@@ -1578,6 +1574,15 @@ mod tests {
             classify_telnet_response("admin\r\nadmin"),
             TelnetOutcome::Inconclusive
         );
+    }
+
+    #[test]
+    fn test_classify_trailing_tilde_is_inconclusive() {
+        assert_eq!(
+            classify_telnet_response("Files are stored under ~"),
+            TelnetOutcome::Inconclusive
+        );
+        assert_eq!(classify_telnet_response("~"), TelnetOutcome::Inconclusive);
     }
 
     #[test]

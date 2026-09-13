@@ -2489,7 +2489,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "ipnetwork",
- "proptest",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

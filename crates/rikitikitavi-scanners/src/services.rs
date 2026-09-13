@@ -81,10 +81,10 @@ pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
             payload[offset + 3],
         ]) as usize;
         offset += 4;
-        if offset + len > payload.len() {
+        let Some(end) = offset.checked_add(len).filter(|&end| end <= payload.len()) else {
             break;
-        }
-        let names = String::from_utf8_lossy(&payload[offset..offset + len]);
+        };
+        let names = String::from_utf8_lossy(&payload[offset..end]);
         lists.push(
             names
                 .split(',')
@@ -92,7 +92,7 @@ pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
                 .map(ToOwned::to_owned)
                 .collect::<Vec<String>>(),
         );
-        offset += len;
+        offset = end;
     }
 
     if lists.is_empty() {
@@ -1792,6 +1792,25 @@ mod tests {
     fn test_parse_ssh_kex_init_too_short() {
         assert!(parse_ssh_kex_init(&[]).is_none());
         assert!(parse_ssh_kex_init(&[20; 10]).is_none());
+    }
+
+    #[test]
+    fn test_parse_ssh_kex_init_huge_name_list_length() {
+        let mut pkt = vec![20u8];
+        pkt.extend_from_slice(&[0u8; 16]);
+        pkt.extend_from_slice(&u32::MAX.to_be_bytes());
+        pkt.extend_from_slice(b"curve25519-sha256");
+        assert!(parse_ssh_kex_init(&pkt).is_none());
+
+        let mut pkt = vec![20u8];
+        pkt.extend_from_slice(&[0u8; 16]);
+        pkt.extend_from_slice(&4u32.to_be_bytes());
+        pkt.extend_from_slice(b"a,bb");
+        pkt.extend_from_slice(&u32::MAX.to_be_bytes());
+        pkt.extend_from_slice(b"xyz");
+        let info = parse_ssh_kex_init(&pkt).unwrap();
+        assert_eq!(info.kex_algorithms, ["a", "bb"]);
+        assert!(info.host_key_algorithms.is_empty());
     }
 
     // ── SMTP EHLO parsing tests ─────────────────────────────────────

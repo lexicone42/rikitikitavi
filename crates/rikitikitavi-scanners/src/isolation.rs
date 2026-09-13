@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use ipnetwork::IpNetwork;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::config::ExclusionSet;
+use rikitikitavi_models::{Finding, MacAddr, ScanContext};
+use rikitikitavi_network::ArpEntry;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -45,6 +47,32 @@ fn home_network(target: Option<IpNetwork>, gateway: Option<IpAddr>) -> Option<Ip
         _ => None,
     })?;
     IpNetwork::new(raw.network(), raw.prefix()).ok()
+}
+
+/// ARP entries minus excluded IPs and MACs.
+fn unexcluded_ips(entries: &[ArpEntry], exclusions: &ExclusionSet) -> Vec<IpAddr> {
+    entries
+        .iter()
+        .filter(|e| !exclusions.excludes_ip(e.ip))
+        .filter(|e| {
+            !e.mac
+                .parse::<MacAddr>()
+                .is_ok_and(|m| exclusions.excludes_mac(m))
+        })
+        .map(|e| e.ip)
+        .collect()
+}
+
+/// `ALTERNATE_GATEWAYS` minus the current gateway and excluded IPs.
+fn alternate_gateway_targets(
+    current: Option<Ipv4Addr>,
+    exclusions: &ExclusionSet,
+) -> Vec<Ipv4Addr> {
+    ALTERNATE_GATEWAYS
+        .iter()
+        .copied()
+        .filter(|gw| current != Some(*gw) && !exclusions.excludes_ip(IpAddr::V4(*gw)))
+        .collect()
 }
 
 /// /24 groups of IPv4 entries outside `home`.
@@ -96,10 +124,18 @@ impl Scanner for IsolationScanner {
                 scanner: "isolation".to_owned(),
                 message: format!("failed to read ARP cache: {e}"),
             })?;
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "isolation".to_owned(),
+                message: e.to_string(),
+            })?;
+        let arp_ips = unexcluded_ips(&arp_entries, &exclusions);
 
         let mut single_segment = false;
         if let Some(home) = home_network(ctx.target_network, ctx.gateway) {
-            let foreign = foreign_subnets(arp_entries.iter().map(|e| &e.ip), &home);
+            let foreign = foreign_subnets(&arp_ips, &home);
             tracing::info!(%home, foreign_count = foreign.len(), "subnet analysis");
             single_segment = foreign.is_empty();
 
@@ -129,7 +165,7 @@ impl Scanner for IsolationScanner {
                     )
                     .with_cwe("CWE-653"),
                 );
-            } else if !arp_entries.is_empty() {
+            } else if !arp_ips.is_empty() {
                 findings.push(Finding::new(
                     "isolation",
                     &format!("All devices within {home}"),
@@ -150,11 +186,7 @@ impl Scanner for IsolationScanner {
         });
 
         let mut reachable_gateways = Vec::new();
-        for &gw in ALTERNATE_GATEWAYS {
-            if current_gateway == Some(gw) {
-                continue;
-            }
-
+        for gw in alternate_gateway_targets(current_gateway, &exclusions) {
             if probe_gateway(gw).await {
                 reachable_gateways.push(gw);
             }
@@ -186,7 +218,7 @@ impl Scanner for IsolationScanner {
             );
         }
 
-        if arp_entries.len() > 50 && single_segment {
+        if arp_ips.len() > 50 && single_segment {
             findings.push(
                 Finding::new(
                     "isolation",
@@ -195,7 +227,7 @@ impl Scanner for IsolationScanner {
                         "{} devices share a single network segment. Networks with many \
                          devices benefit from VLAN segmentation to isolate IoT devices, \
                          guest access, and servers from personal devices.",
-                        arp_entries.len()
+                        arp_ips.len()
                     ),
                     Severity::Medium,
                 )
@@ -226,6 +258,51 @@ mod tests {
 
     fn net(cidr: &str) -> IpNetwork {
         cidr.parse().unwrap()
+    }
+
+    fn arp(ip: &str, mac: &str) -> ArpEntry {
+        ArpEntry {
+            ip: ip.parse().unwrap(),
+            mac: mac.to_owned(),
+            interface: "eth0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_unexcluded_ips_drops_ip_cidr_and_mac_exclusions() {
+        let entries = [
+            arp("192.168.1.10", "aa:aa:aa:aa:aa:aa"),
+            arp("192.168.1.40", "bb:bb:bb:bb:bb:bb"),
+            arp("192.168.1.41", "cc:cc:cc:cc:cc:cc"),
+            arp("10.0.0.2", "dd:dd:dd:dd:dd:dd"),
+        ];
+        let ex = ExclusionSet::parse(
+            &["10.0.0.0/30".to_owned()],
+            &["192.168.1.40".to_owned(), "CC:CC:CC:CC:CC:CC".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(unexcluded_ips(&entries, &ex), ips(&["192.168.1.10"]));
+        assert_eq!(unexcluded_ips(&entries, &ExclusionSet::default()).len(), 4);
+    }
+
+    #[test]
+    fn test_alternate_gateway_targets_skip_current_and_excluded() {
+        let ex =
+            ExclusionSet::parse(&["10.0.0.0/16".to_owned()], &["172.16.0.1".to_owned()]).unwrap();
+        let targets = alternate_gateway_targets(Some(Ipv4Addr::new(192, 168, 1, 1)), &ex);
+        assert_eq!(
+            targets,
+            vec![
+                Ipv4Addr::new(192, 168, 0, 1),
+                Ipv4Addr::new(192, 168, 2, 1),
+                Ipv4Addr::new(10, 1, 0, 1),
+                Ipv4Addr::new(172, 16, 1, 1),
+            ]
+        );
+        assert_eq!(
+            alternate_gateway_targets(None, &ExclusionSet::default()),
+            ALTERNATE_GATEWAYS
+        );
     }
 
     #[test]

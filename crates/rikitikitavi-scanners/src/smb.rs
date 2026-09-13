@@ -503,8 +503,6 @@ impl Scanner for SmbScanner {
                                 );
                             }
                         } else {
-                            // SMBv1 framing but dialect rejected: modern servers answer
-                            // SMBv1 negotiate only to steer clients to SMBv2.
                             tracing::debug!(
                                 ip = %ip,
                                 "SMBv1 response received but dialect rejected — not vulnerable"

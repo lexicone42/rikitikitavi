@@ -42,8 +42,7 @@ impl std::str::FromStr for FindingFingerprint {
     }
 }
 
-/// FNV-1a 64-bit hasher. Stable across Rust releases (unlike `DefaultHasher`),
-/// so persisted fingerprints in baseline files remain valid.
+/// FNV-1a 64-bit; stable across Rust releases.
 struct Fnv1a64(u64);
 
 impl Fnv1a64 {
@@ -68,7 +67,21 @@ impl Hasher for Fnv1a64 {
 /// Byte cap on stored evidence.
 const EVIDENCE_MAX_BYTES: usize = 256;
 
-/// Removes C0/C1 controls except `\n`/`\t`, CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ST`) and ST (`ESC \`).
+/// Zero-width, bidi and invisible-operator format controls (Unicode `Cf`) that alter rendering.
+const fn is_format_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// Removes C0/C1 controls except `\n`/`\t`, [`is_format_control`] chars, CSI (`ESC [ … final`),
+/// OSC (`ESC ] … BEL|ST`) and ST (`ESC \`).
 fn strip_controls(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -93,7 +106,7 @@ fn strip_controls(s: &str) -> String {
                 _ => {}
             },
             '\n' | '\t' => out.push(c),
-            c if c.is_control() => {}
+            c if c.is_control() || is_format_control(c) => {}
             c => out.push(c),
         }
     }
@@ -296,7 +309,6 @@ impl Finding {
     /// Hash of `(scanner, title, affected_ip, affected_port)`.
     pub fn fingerprint(&self) -> FindingFingerprint {
         // Byte layout: scanner 0xff title 0xff ip-tag [octets] port-tag [port BE].
-        // Fixed-width tags keep the digest identical across pointer width and endianness.
         let mut hasher = Fnv1a64::new();
         hasher.write(self.scanner.as_bytes());
         hasher.write_u8(0xff);
@@ -323,8 +335,8 @@ impl Finding {
         FindingFingerprint(hasher.finish())
     }
 
-    /// Builder-style setter for `PoC` evidence: control characters and ANSI escapes are
-    /// stripped, then the text is truncated to 256 bytes at a char boundary.
+    /// Builder-style setter for `PoC` evidence: control characters, Unicode format controls
+    /// and ANSI escapes are stripped, then the text is truncated to 256 bytes at a char boundary.
     #[must_use]
     pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
         let clean = strip_controls(&evidence.into());
@@ -488,6 +500,25 @@ mod tests {
     }
 
     #[test]
+    fn evidence_strips_unicode_format_controls() {
+        let cases = [
+            ("exe.\u{202E}txt", "exe.txt"),
+            ("\u{202A}\u{202B}\u{202C}\u{202D}x", "x"),
+            ("\u{2066}\u{2067}\u{2068}iso\u{2069}", "iso"),
+            ("a\u{200B}b\u{200C}c\u{200D}d\u{200E}e\u{200F}f", "abcdef"),
+            ("\u{2060}\u{2061}\u{2062}\u{2063}\u{2064}wj", "wj"),
+            ("\u{FEFF}bom", "bom"),
+            (
+                "\u{2065}\u{200A}\u{2070}kept",
+                "\u{2065}\u{200A}\u{2070}kept",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(strip_controls(input), want, "input {input:?}");
+        }
+    }
+
+    #[test]
     fn evidence_truncates_after_sanitising() {
         let s = format!("\x1b[31m{}", "x".repeat(300));
         let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s);
@@ -531,11 +562,13 @@ mod tests {
         any::<[u8; 6]>().prop_map(MacAddr::new)
     }
 
-    /// Plain text, `\n`, CSI/OSC sequences, bare controls and truncated escapes, concatenated.
+    /// Plain text, `\n`, CSI/OSC sequences, bare controls, format controls and truncated
+    /// escapes, concatenated.
     fn arb_evidence_text() -> impl Strategy<Value = String> {
         let piece = prop_oneof![
             4 => "\\PC{1,8}",
             1 => Just("\n".to_owned()),
+            1 => "[\\u{200B}-\\u{200F}\\u{202A}-\\u{202E}\\u{2060}-\\u{2064}\\u{2066}-\\u{2069}\\u{FEFF}]",
             1 => "[0-9;?]{0,6}[@-~]".prop_map(|s| format!("\x1b[{s}")),
             1 => ("[^\\x07\\x1b]{0,12}", any::<bool>()).prop_map(|(body, bel)| {
                 let end = if bel { "\x07" } else { "\x1b\\" };
@@ -775,8 +808,8 @@ mod tests {
             }
         }
 
-        /// Stored evidence never contains ESC or controls other than `\n`/`\t`, fits in 256 bytes,
-        /// and is the char-boundary prefix of the sanitised text.
+        /// Stored evidence never contains ESC, format controls or controls other than `\n`/`\t`,
+        /// fits in 256 bytes, and is the char-boundary prefix of the sanitised text.
         #[test]
         fn prop_with_evidence_is_sanitised_and_bounded(s in arb_evidence_text()) {
             let f = Finding::new("s", "t", "d", Severity::Info).with_evidence(s.clone());
@@ -784,6 +817,7 @@ mod tests {
             prop_assert!(e.len() <= 256);
             prop_assert!(!e.contains('\x1b'));
             prop_assert!(e.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+            prop_assert!(!e.chars().any(is_format_control));
             let full = strip_controls(&s);
             prop_assert!(full.starts_with(&e));
             prop_assert!(e.len() >= full.len().min(253));

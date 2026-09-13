@@ -76,8 +76,8 @@ fn unimplemented_scan_flags(args: &cli::ScanArgs) -> Vec<&'static str> {
     ignored
 }
 
-/// `--quick` wins, then `--aggressive`; a config-file `aggressive` is capped at `Active`.
-/// Second value: `true` when capped.
+/// `--quick` → Passive, `--aggressive` → Aggressive; a config-file `aggressive` is capped
+/// at `Active`. Second value: `true` when capped.
 const fn effective_intensity(
     quick: bool,
     aggressive: bool,
@@ -98,6 +98,7 @@ const fn effective_intensity(
 #[allow(clippy::too_many_lines)]
 async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<()> {
     use rikitikitavi_models::config::{PortRange, ScanIntensity, TOP_20_PORTS};
+    use std::io::Write as _;
 
     let app_config = &loaded.config;
 
@@ -126,12 +127,12 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     let suppressions = args
         .suppress
         .as_deref()
-        .map(|p| load_list(p, "suppression", parse_fingerprint))
+        .map(|p| load_list(p, "suppression", Some(BASELINE_FORMAT), parse_fingerprint))
         .transpose()?;
     let known_devices = args
         .known_devices
         .as_deref()
-        .map(|p| load_list(p, "known-devices", parse_device_identifier))
+        .map(|p| load_list(p, "known-devices", None, parse_device_identifier))
         .transpose()?;
 
     let perspective: rikitikitavi_core::Perspective = args.perspective.into();
@@ -185,7 +186,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         println!("{}", intensity.profile_name());
         println!("Discovering network...");
     }
-    // Dry run must not touch the network, so the sweep is skipped.
+    // No sweep on dry run.
     let swept = if args.dry_run {
         ctx.discovered_devices = runner::discover_network(&mut ctx);
         runner::apply_exclusions(&mut ctx.discovered_devices, &exclusions);
@@ -227,12 +228,11 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
 
     let mut results = runner::run_scan(&mut ctx).await?;
 
-    // New-device detection
     if let (Some(known), Some(path)) = (known_devices.as_ref(), args.known_devices.as_ref()) {
         let new_devices: Vec<_> = results
             .devices
             .iter()
-            .filter(|d| !known.contains(&device_identifier(d)))
+            .filter(|d| !is_known_device(d, known))
             .map(new_device_finding)
             .collect();
         if !new_devices.is_empty() && !args.quiet {
@@ -282,7 +282,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         }
     }
 
-    // Suppression is applied after the history save, so history keeps the full scan.
+    // History is saved before suppression.
     if let Some(path) = args.write_baseline.as_ref() {
         match write_baseline_file(path, &results.findings) {
             Ok(n) if !args.quiet => {
@@ -296,7 +296,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         let before = results.findings.len();
         results.findings.retain(|f| !set.contains(&f.fingerprint()));
         let suppressed = before - results.findings.len();
-        if suppressed > 0 && !args.quiet {
+        if !args.quiet {
             println!(
                 "Suppressed {suppressed} finding(s) listed in {}",
                 path.display()
@@ -311,14 +311,18 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
             cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(&results, &output)?,
             cli::ReportFormatArg::Ocsf => rikitikitavi_export::export_ocsf_json(&results, &output)?,
         }
-        println!("Results written to {}", output.display());
+        tolerate_broken_pipe(writeln!(
+            std::io::stdout().lock(),
+            "Results written to {}",
+            output.display()
+        ))?;
     } else if !args.quiet {
         tolerate_broken_pipe(print_cli_report(&results))?;
     }
 
     if let Some(prev) = previous {
         let diff = rikitikitavi_analysis::diff_scan_results(&prev, &results);
-        print_comparison_report(&diff);
+        tolerate_broken_pipe(print_comparison_report(&diff))?;
     }
 
     if let Some(note) = exit_code_note(args.quiet, args.fail_on) {
@@ -371,23 +375,8 @@ const fn exit_code_note(quiet: bool, fail_on: cli::FailOnArg) -> Option<&'static
     }
 }
 
-/// Create or truncate `path` for writing; mode `0o600` on Unix, existing files included.
-fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let file = opts.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(file)
-}
+/// Fingerprint format written to baseline `# format:` headers.
+const BASELINE_FORMAT: &str = "fnv1a-1";
 
 /// Write deduplicated fingerprints to `path`, one per line with the title as a `#`
 /// comment. Returns the count written.
@@ -396,20 +385,20 @@ fn write_baseline_file(
     findings: &[rikitikitavi_models::Finding],
 ) -> std::io::Result<usize> {
     use std::collections::BTreeMap;
-    use std::io::Write as _;
+    use std::fmt::Write as _;
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for f in findings {
         seen.entry(f.fingerprint().to_string())
             .or_insert_with(|| f.title.clone());
     }
-    let mut file = create_private(path)?;
-    writeln!(
-        file,
-        "# rikitikitavi suppression baseline — listed findings are muted with --suppress"
-    )?;
+    let mut text = format!(
+        "# rikitikitavi suppression baseline — listed findings are muted with --suppress\n\
+         # format: {BASELINE_FORMAT}\n"
+    );
     for (fp, title) in &seen {
-        writeln!(file, "{fp}  # {title}")?;
+        let _ = writeln!(text, "{fp}  # {title}");
     }
+    rikitikitavi_core::fs::write_private(path, text.as_bytes())?;
     Ok(seen.len())
 }
 
@@ -417,6 +406,8 @@ fn write_baseline_file(
 struct ListFile<T> {
     entries: std::collections::HashSet<T>,
     invalid: usize,
+    /// First `# format: <token>` header, if any.
+    format: Option<String>,
 }
 
 /// One token per line, `#` starts a comment; tokens `parse` rejects count as `invalid`.
@@ -426,7 +417,14 @@ fn parse_list_file<T: Eq + std::hash::Hash>(
 ) -> ListFile<T> {
     let mut entries = std::collections::HashSet::new();
     let mut invalid = 0;
+    let mut format = None;
     for line in contents.lines() {
+        if let Some(comment) = line.trim().strip_prefix('#')
+            && let Some(value) = comment.trim().strip_prefix("format:")
+        {
+            format.get_or_insert_with(|| value.trim().to_owned());
+            continue;
+        }
         let token = line.split('#').next().unwrap_or("").trim();
         if token.is_empty() {
             continue;
@@ -438,20 +436,49 @@ fn parse_list_file<T: Eq + std::hash::Hash>(
             None => invalid += 1,
         }
     }
-    ListFile { entries, invalid }
+    ListFile {
+        entries,
+        invalid,
+        format,
+    }
+}
+
+/// Warning when `expected` is set and the file's `# format:` header is absent or differs.
+fn format_warning(
+    what: &str,
+    path: &std::path::Path,
+    found: Option<&str>,
+    expected: Option<&str>,
+) -> Option<String> {
+    let expected = expected?;
+    (found != Some(expected)).then(|| {
+        let found = found.map_or_else(
+            || "no `# format:` header".to_owned(),
+            |f| format!("fingerprint format {f}"),
+        );
+        format!(
+            "Warning: {what} file {} has {found}, expected {expected}; \
+             regenerate with --write-baseline",
+            path.display()
+        )
+    })
 }
 
 /// Read a `--suppress` / `--known-devices` file. Unreadable, or invalid lines with no
-/// valid entry, is an error; other invalid lines are counted on stderr.
+/// valid entry, is an error; other invalid lines and a format mismatch are warned on stderr.
 fn load_list<T: Eq + std::hash::Hash>(
     path: &std::path::Path,
     what: &str,
+    expected_format: Option<&str>,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<std::collections::HashSet<T>> {
     use anyhow::Context as _;
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read {what} file {}", path.display()))?;
     let parsed = parse_list_file(&contents, parse);
+    if let Some(warning) = format_warning(what, path, parsed.format.as_deref(), expected_format) {
+        eprintln!("{warning}");
+    }
     if parsed.invalid > 0 {
         if parsed.entries.is_empty() {
             anyhow::bail!(
@@ -489,6 +516,14 @@ fn device_identifier(d: &rikitikitavi_models::Device) -> String {
     d.mac.map_or_else(|| d.ip.to_string(), |m| m.to_string())
 }
 
+/// Listed by identifier or by IP.
+fn is_known_device(
+    d: &rikitikitavi_models::Device,
+    known: &std::collections::HashSet<String>,
+) -> bool {
+    known.contains(&device_identifier(d)) || known.contains(&d.ip.to_string())
+}
+
 /// Build a "new device on network" finding for an unrecognized device.
 fn new_device_finding(d: &rikitikitavi_models::Device) -> rikitikitavi_models::Finding {
     use rikitikitavi_core::{Confidence, Severity};
@@ -516,20 +551,18 @@ fn write_known_devices_file(
     devices: &[rikitikitavi_models::Device],
 ) -> std::io::Result<usize> {
     use std::collections::BTreeMap;
-    use std::io::Write as _;
+    use std::fmt::Write as _;
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for d in devices {
         seen.entry(device_identifier(d))
             .or_insert_with(|| device_identity_label(d));
     }
-    let mut file = create_private(path)?;
-    writeln!(
-        file,
-        "# rikitikitavi known devices — absent devices are flagged as new"
-    )?;
+    let mut text =
+        String::from("# rikitikitavi known devices — absent devices are flagged as new\n");
     for (id, label) in &seen {
-        writeln!(file, "{id}  # {label}")?;
+        let _ = writeln!(text, "{id}  # {label}");
     }
+    rikitikitavi_core::fs::write_private(path, text.as_bytes())?;
     Ok(seen.len())
 }
 
@@ -767,58 +800,69 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) -> std::io::Resu
     Ok(())
 }
 
-fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) {
+fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut out = std::io::stdout().lock();
+    macro_rules! out {
+        () => { writeln!(out)?; };
+        ($($t:tt)*) => { writeln!(out, $($t)*)?; };
+    }
+
     if let Some(baseline) = diff.baseline_time {
-        println!("Since last scan ({}):", baseline.format("%Y-%m-%d %H:%M"));
+        out!("Since last scan ({}):", baseline.format("%Y-%m-%d %H:%M"));
     } else {
-        println!("Comparison with previous scan:");
+        out!("Comparison with previous scan:");
     }
 
     if !diff.has_changes() {
-        println!("  No changes detected.");
-        println!();
-        return;
+        out!("  No changes detected.");
+        out!();
+        return Ok(());
     }
 
-    println!(
+    out!(
         "  +{} new findings, -{} resolved, {} severity changes",
         diff.new_findings.len(),
         diff.resolved_findings.len(),
         diff.severity_changes.len(),
     );
-    println!(
+    out!(
         "  +{} new devices, -{} disappeared",
         diff.new_devices.len(),
         diff.disappeared_devices.len(),
     );
-    println!();
+    out!();
 
     if !diff.new_findings.is_empty() {
-        println!("  New:");
+        out!("  New:");
         for f in &diff.new_findings {
-            println!("    [{:8}] {}", f.severity, f.title);
+            out!("    [{:8}] {}", f.severity, f.title);
         }
-        println!();
+        out!();
     }
 
     if !diff.resolved_findings.is_empty() {
-        println!("  Resolved:");
+        out!("  Resolved:");
         for f in &diff.resolved_findings {
-            println!("    [{:8}] {}", f.severity, f.title);
+            out!("    [{:8}] {}", f.severity, f.title);
         }
-        println!();
+        out!();
     }
 
     if !diff.severity_changes.is_empty() {
-        println!("  Changed:");
+        out!("  Changed:");
         for sc in &diff.severity_changes {
-            println!(
+            out!(
                 "    {} ({} -> {})",
-                sc.finding.title, sc.old_severity, sc.new_severity,
+                sc.finding.title,
+                sc.old_severity,
+                sc.new_severity,
             );
         }
-        println!();
+        out!();
     }
+    Ok(())
 }
 
 /// Discovery plus the full scanner run; used by the initial TUI scan and re-scans.
@@ -868,6 +912,19 @@ fn finish_rescan(
     app.scan_status = String::new();
 }
 
+/// Watch mode, idle, no re-scan in flight, and the interval elapsed since the last scan finished.
+#[cfg(feature = "tui")]
+fn watch_rescan_due(
+    app: &rikitikitavi_tui::App,
+    rescan_in_flight: bool,
+    since_last_scan: std::time::Duration,
+) -> bool {
+    app.config.watch_mode
+        && !app.scanning
+        && !rescan_in_flight
+        && since_last_scan >= std::time::Duration::from_secs(app.config.watch_interval_secs)
+}
+
 #[cfg(feature = "tui")]
 #[allow(clippy::too_many_lines)]
 async fn cmd_tui(
@@ -877,6 +934,8 @@ async fn cmd_tui(
     use crossterm::{execute, terminal};
     use ratatui::Terminal;
     use ratatui::backend::CrosstermBackend;
+
+    config::validate_scan_config(&app_config.scan)?;
 
     let theme = match args.theme {
         cli::ThemeArg::Dark => rikitikitavi_tui::app::Theme::Dark,
@@ -935,6 +994,7 @@ async fn cmd_tui(
     }
     app.scanning = false;
     app.scan_progress = 1.0;
+    let mut last_scan_done = std::time::Instant::now();
 
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -959,6 +1019,17 @@ async fn cmd_tui(
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("re-scan task aborted: {e}")));
             finish_rescan(&mut app, history.as_ref(), outcome);
+            last_scan_done = std::time::Instant::now();
+        }
+
+        if watch_rescan_due(&app, rescan.is_some(), last_scan_done.elapsed()) {
+            app.scanning = true;
+            "Scanning...".clone_into(&mut app.scan_status);
+            app.status_message = Some(format!(
+                "Watch re-scan (every {}s)",
+                app.config.watch_interval_secs
+            ));
+            rescan = Some(tokio::spawn(tui_scan(scan_config.clone())));
         }
 
         app.tick = app.tick.wrapping_add(1);
@@ -1496,7 +1567,7 @@ fn rustc_version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_secret, redacted_for_display};
+    use super::{BASELINE_FORMAT, redact_secret, redacted_for_display};
     use rikitikitavi_models::config::{AppConfig, UniFiCloudConfig, UniFiControllerConfig};
 
     #[cfg(feature = "tui")]
@@ -1654,6 +1725,7 @@ mod tests {
         );
         assert_eq!(parsed.entries.len(), 2);
         assert_eq!(parsed.invalid, 1);
+        assert_eq!(parsed.format, None);
 
         let parsed = parse_list_file(
             "AA-BB-CC-DD-EE-FF\n192.168.1.5 # printer\nkitchen-tv\n",
@@ -1669,14 +1741,14 @@ mod tests {
         use crate::{load_list, parse_fingerprint};
 
         let missing = temp_path("missing-baseline");
-        let msg = load_list(&missing, "suppression", parse_fingerprint)
+        let msg = load_list(&missing, "suppression", None, parse_fingerprint)
             .unwrap_err()
             .to_string();
         assert!(msg.starts_with("cannot read suppression file "), "{msg}");
 
         let garbled = temp_path("garbled-baseline");
         std::fs::write(&garbled, "not-hex\nalso bad\n").unwrap();
-        let msg = load_list(&garbled, "suppression", parse_fingerprint)
+        let msg = load_list(&garbled, "suppression", None, parse_fingerprint)
             .unwrap_err()
             .to_string();
         std::fs::remove_file(&garbled).ok();
@@ -1687,13 +1759,13 @@ mod tests {
 
         let header_only = temp_path("empty-baseline");
         std::fs::write(&header_only, "# rikitikitavi suppression baseline\n").unwrap();
-        let set = load_list(&header_only, "suppression", parse_fingerprint).unwrap();
+        let set = load_list(&header_only, "suppression", None, parse_fingerprint).unwrap();
         std::fs::remove_file(&header_only).ok();
         assert!(set.is_empty());
 
         let mixed = temp_path("mixed-baseline");
         std::fs::write(&mixed, "01a2b3c4d5e6f708\nnot-hex\n").unwrap();
-        let set = load_list(&mixed, "suppression", parse_fingerprint).unwrap();
+        let set = load_list(&mixed, "suppression", None, parse_fingerprint).unwrap();
         std::fs::remove_file(&mixed).ok();
         assert_eq!(set.len(), 1);
     }
@@ -1813,9 +1885,89 @@ mod tests {
             write_baseline_file(&path, std::slice::from_ref(&f)).unwrap(),
             1
         );
-        let set = load_list(&path, "suppression", parse_fingerprint).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let set = load_list(
+            &path,
+            "suppression",
+            Some(BASELINE_FORMAT),
+            parse_fingerprint,
+        )
+        .unwrap();
         std::fs::remove_file(&path).ok();
         assert!(set.contains(&f.fingerprint()));
+        assert!(contents.contains("\n# format: fnv1a-1\n"), "{contents}");
+    }
+
+    #[test]
+    fn baseline_format_header_is_parsed_and_checked() {
+        use crate::{format_warning, parse_fingerprint, parse_list_file};
+
+        let with = parse_list_file(
+            "# note\n#  format:  fnv1a-1 \n01a2b3c4d5e6f708\n",
+            parse_fingerprint,
+        );
+        assert_eq!(with.format.as_deref(), Some("fnv1a-1"));
+        assert_eq!(with.entries.len(), 1);
+        let without = parse_list_file("01a2b3c4d5e6f708\n", parse_fingerprint);
+        assert_eq!(without.format, None);
+
+        let path = std::path::Path::new("b.txt");
+        assert_eq!(
+            format_warning("suppression", path, Some("fnv1a-1"), Some("fnv1a-1")),
+            None
+        );
+        assert_eq!(format_warning("known-devices", path, None, None), None);
+        let missing = format_warning("suppression", path, None, Some("fnv1a-1")).unwrap();
+        assert_eq!(
+            missing,
+            "Warning: suppression file b.txt has no `# format:` header, expected fnv1a-1; regenerate with --write-baseline"
+        );
+        let other = format_warning("suppression", path, Some("v1"), Some("fnv1a-1")).unwrap();
+        assert!(other.contains("format v1, expected fnv1a-1"), "{other}");
+    }
+
+    #[test]
+    fn known_device_matches_by_identifier_or_ip() {
+        use crate::is_known_device;
+        use std::collections::HashSet;
+
+        let ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let with_mac = rikitikitavi_models::Device::new(ip).with_mac("aa:bb:cc:dd:ee:ff");
+        let by_mac: HashSet<String> = HashSet::from(["aa:bb:cc:dd:ee:ff".to_owned()]);
+        let by_ip: HashSet<String> = HashSet::from(["10.0.0.5".to_owned()]);
+        let other: HashSet<String> = HashSet::from(["10.0.0.6".to_owned()]);
+        assert!(is_known_device(&with_mac, &by_mac));
+        assert!(is_known_device(&with_mac, &by_ip));
+        assert!(!is_known_device(&with_mac, &other));
+        assert!(is_known_device(
+            &rikitikitavi_models::Device::new(ip),
+            &by_ip
+        ));
+        assert!(!is_known_device(
+            &rikitikitavi_models::Device::new(ip),
+            &by_mac
+        ));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn watch_rescan_due_requires_idle_and_elapsed_interval() {
+        use crate::watch_rescan_due;
+        use std::time::Duration;
+
+        let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig {
+            watch_mode: true,
+            watch_interval_secs: 5,
+            ..Default::default()
+        });
+        assert!(watch_rescan_due(&app, false, Duration::from_secs(5)));
+        assert!(!watch_rescan_due(&app, false, Duration::from_secs(4)));
+        assert!(!watch_rescan_due(&app, true, Duration::from_secs(60)));
+        app.scanning = true;
+        assert!(!watch_rescan_due(&app, false, Duration::from_secs(60)));
+        app.scanning = false;
+        app.config.watch_mode = false;
+        assert!(!watch_rescan_due(&app, false, Duration::from_secs(60)));
     }
 
     #[test]

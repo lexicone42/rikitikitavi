@@ -410,7 +410,6 @@ impl Scanner for MgmtPlaneScanner {
         tracing::info!("running management-plane exposure scan");
         let mut findings = Vec::new();
 
-        // Skip below Active intensity — these actively connect to control-plane APIs.
         if !ctx
             .config
             .intensity

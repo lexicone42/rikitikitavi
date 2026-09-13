@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
+use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -186,11 +187,16 @@ fn resolve_control_url(location: &str, control_url: &str) -> Option<String> {
 /// `http://192.168.1.1:49152/desc.xml`).
 ///
 /// `IPv4`-only; a bracketed `IPv6` literal fails to parse and yields `None`.
-fn extract_host_ip(location: &str) -> Option<IpAddr> {
+pub(crate) fn extract_host_ip(location: &str) -> Option<IpAddr> {
     let after_scheme = location.split("://").nth(1)?;
     let host_port = after_scheme.split('/').next()?;
     let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
     host.parse().ok()
+}
+
+/// IGD host from `location`; `None` when unparsable or excluded.
+fn igd_target(location: &str, exclusions: &ExclusionSet) -> Option<IpAddr> {
+    extract_host_ip(location).filter(|ip| !exclusions.excludes_ip(*ip))
 }
 
 /// Fetch and return a `UPnP` device description document, or `None` on any
@@ -456,7 +462,6 @@ impl Scanner for UpnpIgdScanner {
         tracing::info!("running UPnP IGD port-forward scan");
         let mut findings = Vec::new();
 
-        // Skip below Active intensity — this performs SSDP discovery and SOAP calls.
         if !ctx
             .config
             .intensity
@@ -465,6 +470,14 @@ impl Scanner for UpnpIgdScanner {
             tracing::info!("skipping UPnP IGD scan in quick scan mode");
             return Ok(findings);
         }
+
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "upnp_igd".to_owned(),
+                message: e.to_string(),
+            })?;
 
         let locations = discover_igd_locations().await;
         if locations.is_empty() {
@@ -480,8 +493,8 @@ impl Scanner for UpnpIgdScanner {
         };
 
         for location in &locations {
-            let Some(router_ip) = extract_host_ip(location) else {
-                tracing::debug!(%location, "could not parse host IP from LOCATION");
+            let Some(router_ip) = igd_target(location, &exclusions) else {
+                tracing::debug!(%location, "IGD skipped: unparsable LOCATION or excluded host");
                 continue;
             };
             let Some(desc_xml) = fetch_device_description(&client, location).await else {
@@ -710,6 +723,19 @@ mod tests {
     fn test_extract_host_ip_malformed() {
         assert!(extract_host_ip("not-a-url").is_none());
         assert!(extract_host_ip("").is_none());
+    }
+
+    #[test]
+    fn test_igd_target_skips_excluded_host() {
+        let ex =
+            ExclusionSet::parse(&["10.0.0.0/24".to_owned()], &["192.168.1.1".to_owned()]).unwrap();
+        assert!(igd_target("http://192.168.1.1:49152/desc.xml", &ex).is_none());
+        assert!(igd_target("http://10.0.0.1/desc.xml", &ex).is_none());
+        assert_eq!(
+            igd_target("http://192.168.2.1:49152/desc.xml", &ex),
+            Some("192.168.2.1".parse().unwrap())
+        );
+        assert!(igd_target("not-a-url", &ExclusionSet::default()).is_none());
     }
 
     // ── SOAP request builder ─────────────────────────────────────────

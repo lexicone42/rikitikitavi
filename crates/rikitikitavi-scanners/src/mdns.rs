@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
+use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use rikitikitavi_network::MdnsService;
 use std::collections::{HashMap, HashSet};
@@ -172,13 +173,18 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
     findings
 }
 
+/// Responder `ip` or the LOCATION host is excluded.
+fn upnp_target_excluded(ip: IpAddr, location: &str, exclusions: &ExclusionSet) -> bool {
+    exclusions.excludes_ip(ip)
+        || crate::upnp_igd::extract_host_ip(location).is_some_and(|h| exclusions.excludes_ip(h))
+}
+
 /// Fetch a `UPnP` device description XML from a LOCATION URL.
 async fn fetch_upnp_description(location: &str) -> Option<UpnpDeviceInfo> {
     let client =
         unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::default()).ok()?;
 
     let resp = client.get(location).send().await.ok()?;
-    // Body read is capped (untrusted device).
     let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
     let info = parse_upnp_device_xml(&body);
 
@@ -588,6 +594,14 @@ impl Scanner for MdnsScanner {
         tracing::info!("running mDNS/SSDP discovery scan");
         let mut findings = Vec::new();
 
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "mdns".to_owned(),
+                message: e.to_string(),
+            })?;
+
         let ssdp_results = discover_ssdp().await;
         tracing::info!(ssdp_count = ssdp_results.len(), "SSDP discovery complete");
 
@@ -620,6 +634,10 @@ impl Scanner for MdnsScanner {
             }
 
             for (ip, location) in device_groups.keys() {
+                if upnp_target_excluded(*ip, location, &exclusions) {
+                    tracing::debug!(%ip, %location, "UPnP description fetch skipped: excluded");
+                    continue;
+                }
                 if let Some(device_info) = fetch_upnp_description(location).await {
                     tracing::debug!(
                         ip = %ip,
@@ -689,6 +707,30 @@ mod tests {
     fn test_parse_ssdp_response_empty() {
         let response = "HTTP/1.1 200 OK\r\n\r\n";
         assert!(parse_ssdp_response(response).is_none());
+    }
+
+    #[test]
+    fn test_upnp_target_excluded() {
+        let ex =
+            ExclusionSet::parse(&["10.0.0.0/24".to_owned()], &["192.168.1.40".to_owned()]).unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(upnp_target_excluded(
+            ip("192.168.1.40"),
+            "http://192.168.1.40:1900/d.xml",
+            &ex
+        ));
+        assert!(upnp_target_excluded(
+            ip("192.168.1.10"),
+            "http://10.0.0.7:1900/d.xml",
+            &ex
+        ));
+        assert!(upnp_target_excluded(ip("10.0.0.3"), "not-a-url", &ex));
+        assert!(!upnp_target_excluded(
+            ip("192.168.1.10"),
+            "http://192.168.1.10:1900/d.xml",
+            &ex
+        ));
+        assert!(!upnp_target_excluded(ip("192.168.1.10"), "not-a-url", &ex));
     }
 
     // ── SSDP response collection tests ───────────────────────────
