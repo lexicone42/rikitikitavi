@@ -554,4 +554,16 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn example_config_parses_and_matches_defaults() {
+        let cfg: AppConfig =
+            serde_yaml_ng::from_str(include_str!("../../../config.example.yaml")).unwrap();
+        let defaults = AppConfig::default();
+        assert_eq!(cfg.scan.intensity, defaults.scan.intensity);
+        assert_eq!(cfg.scan.parallelism, defaults.scan.parallelism);
+        assert_eq!(cfg.scan.timeout_seconds, defaults.scan.timeout_seconds);
+        assert_eq!(cfg.scan.perspective, defaults.scan.perspective);
+        assert!(cfg.scan.excluded_devices.is_empty() && cfg.scan.excluded_networks.is_empty());
+        assert_eq!(cfg.unifi.controller.unwrap().site, "default");
+    }
 }

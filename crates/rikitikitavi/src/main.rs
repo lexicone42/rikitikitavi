@@ -135,7 +135,9 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         .map(|p| load_list(p, "known-devices", None, parse_device_identifier))
         .transpose()?;
 
-    let perspective: rikitikitavi_core::Perspective = args.perspective.into();
+    let perspective = args
+        .perspective
+        .map_or(app_config.scan.perspective, Into::into);
 
     let (intensity, capped) =
         effective_intensity(args.quick, args.aggressive, app_config.scan.intensity);
@@ -957,7 +959,9 @@ async fn cmd_tui(
         .as_ref()
         .and_then(|h| h.load_latest().ok().flatten());
 
-    let perspective = rikitikitavi_core::Perspective::Authenticated;
+    let perspective = args
+        .perspective
+        .map_or(app_config.scan.perspective, Into::into);
     let (intensity, capped) = effective_intensity(false, false, app_config.scan.intensity);
     if capped {
         eprintln!(

@@ -1,0 +1,62 @@
+# rikitikitavi configuration. Copy to ./config.yaml (or /etc/rikitikitavi/config.yaml),
+# or pass --config <path> / RIKITIKITAVI_CONFIG. Every key is optional; values shown are the defaults.
+# Keys marked "reserved" are parsed but not used yet.
+
+scan:
+  perspective: unauthenticated   # neighbor | unauthenticated | authenticated | privileged
+                                 # (the --perspective flag overrides this)
+  intensity: active              # passive | active | aggressive
+                                 # aggressive from a file is capped at active; login attempts need `scan --aggressive`
+  parallelism: 100               # 1..=4096, outside that range is a startup error
+  timeout_seconds: 0             # 0 = unbounded; otherwise the whole scan aborts after N seconds
+  port_scan_range: common        # common | extended | full, or a list: [22, 80, 443]
+  attack_paths: true
+  modules: null                  # e.g. [ports, services, ssl]; null = every scanner for the perspective
+  excluded_networks: []          # CIDRs never probed, e.g. ["192.168.50.0/24"]
+  excluded_devices: []           # IPs never probed; MACs once the ARP cache knows them, e.g. ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]
+  network_mode: { type: auto }   # reserved
+
+unifi:
+  mode: auto                     # auto | local | remote | cloud
+  controller:
+    url: null                    # https://192.168.1.1
+    username: null
+    password: null               # stored in plaintext; chmod 600 this file
+    api_token: null              # UniFi OS API key (alternative to username/password)
+    site: default
+    insecure: false              # true skips TLS validation and prints the same warning as --insecure
+  cloud:
+    enabled: false               # reserved
+    api_key: null
+    site_id: null
+
+organization:                    # reserved
+  name: null
+  identifier: null
+
+agent:                           # reserved
+  user_email: null
+  device_id: null
+  location: null
+
+security_lake:                   # reserved: validated by `config validate`, upload not implemented
+  enabled: false
+  region: null
+  account_id: null
+  bucket: null
+  custom_source_name: null
+  role_arn: null
+
+apis:                            # reserved
+  shodan_api_key: null
+  censys_api_id: null
+  censys_api_secret: null
+
+output:                          # reserved; use `scan --output <path> --format <json|csv|html|ocsf>`
+  local_report: true
+  report_format: html
+  report_path: ./rikitikitavi-report
+
+logging:                         # reserved; use --log-level
+  level: info
+  format: json

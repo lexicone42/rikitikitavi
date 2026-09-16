@@ -68,9 +68,9 @@ pub enum Command {
 #[derive(Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ScanArgs {
-    /// Attacker perspective to simulate.
-    #[arg(long, default_value = "unauthenticated")]
-    pub perspective: PerspectiveArg,
+    /// Attacker perspective to simulate [default: config `scan.perspective`, else unauthenticated].
+    #[arg(long)]
+    pub perspective: Option<PerspectiveArg>,
 
     /// Network access mode. Not yet implemented: only `auto` is accepted.
     #[arg(long, default_value = "auto")]
@@ -174,9 +174,9 @@ pub struct TuiArgs {
     #[arg(long, default_value = "dark")]
     pub theme: ThemeArg,
 
-    /// Attacker perspective.
-    #[arg(long, default_value = "unauthenticated")]
-    pub perspective: PerspectiveArg,
+    /// Attacker perspective [default: config `scan.perspective`, else unauthenticated].
+    #[arg(long)]
+    pub perspective: Option<PerspectiveArg>,
 
     /// Network mode.
     #[arg(long, default_value = "auto")]
