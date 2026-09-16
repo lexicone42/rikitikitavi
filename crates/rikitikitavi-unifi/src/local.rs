@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 use crate::models::UniFiDevice;
