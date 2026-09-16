@@ -48,6 +48,19 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
