@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(any(target_os = "linux", test))]
+use anyhow::Context;
+use anyhow::Result;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
