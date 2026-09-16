@@ -526,6 +526,7 @@ fn classify_airport_security(security: &str) -> WifiEncryption {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Parse `iwconfig` output for the currently connected `WiFi` network.
 #[allow(clippy::similar_names)]
 fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
@@ -614,6 +615,7 @@ fn parse_iwconfig_output(contents: &str) -> Vec<WifiNetwork> {
     networks
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// One `iwlist scan` cell under construction.
 struct IwlistCell {
     ssid: String,
@@ -623,6 +625,7 @@ struct IwlistCell {
     encryption: WifiEncryption,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl IwlistCell {
     const fn new(bssid: String) -> Self {
         Self {
@@ -657,6 +660,7 @@ impl IwlistCell {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Parse `iwlist scan` output for nearby `WiFi` networks.
 fn parse_iwlist_output(contents: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
@@ -726,6 +730,7 @@ const fn channel_to_frequency(channel: u32) -> u32 {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Convert frequency in MHz to channel number.
 const fn frequency_to_channel(freq_mhz: u32) -> u32 {
     match freq_mhz {

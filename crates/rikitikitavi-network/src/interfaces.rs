@@ -14,6 +14,7 @@ pub struct NetworkInterface {
     pub is_loopback: bool,
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// A parsed route entry from `/proc/net/route`.
 #[derive(Debug, Clone)]
 struct RouteEntry {
@@ -23,6 +24,7 @@ struct RouteEntry {
     mask: Ipv4Addr,
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Parse a little-endian hex IP from `/proc/net/route` into an `Ipv4Addr`.
 fn parse_hex_ip(hex: &str) -> Result<Ipv4Addr> {
     let val =
@@ -31,6 +33,7 @@ fn parse_hex_ip(hex: &str) -> Result<Ipv4Addr> {
     Ok(Ipv4Addr::from(val.to_be()))
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Parse the contents of `/proc/net/route` into route entries.
 fn parse_proc_route(contents: &str) -> Vec<RouteEntry> {
     contents
@@ -54,6 +57,7 @@ fn parse_proc_route(contents: &str) -> Vec<RouteEntry> {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Default gateway from `/proc/net/route` text.
 fn detect_gateway_from_proc(contents: &str) -> Option<IpAddr> {
     let routes = parse_proc_route(contents);
@@ -63,6 +67,7 @@ fn detect_gateway_from_proc(contents: &str) -> Option<IpAddr> {
         .map(|r| IpAddr::V4(r.gateway))
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// LAN CIDR of the default-route interface from `/proc/net/route` text.
 fn detect_network_from_proc(contents: &str) -> Option<IpNetwork> {
     let routes = parse_proc_route(contents);
@@ -84,6 +89,7 @@ fn detect_network_from_proc(contents: &str) -> Option<IpNetwork> {
         })
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Default-route interface name from `/proc/net/route` text.
 fn detect_default_interface_from_proc(contents: &str) -> Option<String> {
     let routes = parse_proc_route(contents);

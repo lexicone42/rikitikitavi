@@ -11,8 +11,6 @@ feature-depth = 1
 # Advisory database — deny known vulnerabilities
 [advisories]
 ignore = [
-    # paste is unmaintained but pulled in transitively by ratatui — no action possible until ratatui migrates
-    { id = "RUSTSEC-2024-0436", reason = "transitive dep via ratatui; awaiting upstream migration to pastey" },
 ]
 
 # License allowlist — common permissive licenses

@@ -68,6 +68,7 @@ fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
     Ok(Vec::new())
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Parse Linux `/proc/net/arp`: `IP address  HW type  Flags  HW address  Mask  Device`.
 /// Incomplete entries (flags `0x0` or MAC `00:00:00:00:00:00`) are dropped.
 fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> {
