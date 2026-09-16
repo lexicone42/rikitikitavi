@@ -1737,3 +1737,6 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-9198",
     "CVE-2026-9586",
 ];
+
+#[cfg(test)]
+mod tests;

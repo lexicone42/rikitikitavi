@@ -60,7 +60,7 @@ static KEV_CVES: &[&str] = &[
         escaped = cve.replace("\\", "\\\\").replace('"', '\\"')
         out.write(f'    "{escaped}",\n')
 
-    out.write("];\n")
+    out.write("];\n\n#[cfg(test)]\nmod tests;\n")
 
 
 if __name__ == "__main__":
