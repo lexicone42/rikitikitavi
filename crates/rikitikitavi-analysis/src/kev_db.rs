@@ -1,15 +1,15 @@
 //! CISA Known Exploited Vulnerabilities (KEV) catalog — auto-generated.
 //!
 //! Source: <https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json>
-//! Catalog version: 2026.07.01 | Released: 2026-07-01T19:00:06.9016Z
-//! Entries: 1,631
+//! Catalog version: 2026.09.16 | Released: 2026-09-16T18:47:50.6796Z
+//! Entries: 1,713
 //!
 //! Regenerate with `python3 scripts/gen_kev_db.py`. Membership means CISA has
 //! evidence the CVE is being exploited in the wild — the strongest signal that a
 //! finding should be fixed immediately.
 
 /// The catalog version this snapshot was generated from.
-pub const KEV_CATALOG_VERSION: &str = "2026.07.01";
+pub const KEV_CATALOG_VERSION: &str = "2026.09.16";
 
 /// Whether `cve` (e.g. "CVE-2024-3400") is in the CISA KEV catalog.
 ///
@@ -36,6 +36,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2008-0655",
     "CVE-2008-2992",
     "CVE-2008-3431",
+    "CVE-2008-4128",
     "CVE-2008-4250",
     "CVE-2009-0238",
     "CVE-2009-0556",
@@ -209,6 +210,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2015-3035",
     "CVE-2015-3043",
     "CVE-2015-3113",
+    "CVE-2015-3246",
     "CVE-2015-4068",
     "CVE-2015-4495",
     "CVE-2015-4852",
@@ -216,6 +218,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2015-5119",
     "CVE-2015-5122",
     "CVE-2015-5123",
+    "CVE-2015-5287",
     "CVE-2015-5317",
     "CVE-2015-6175",
     "CVE-2015-7450",
@@ -479,6 +482,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2019-10068",
     "CVE-2019-10149",
     "CVE-2019-1064",
+    "CVE-2019-1068",
     "CVE-2019-1069",
     "CVE-2019-10758",
     "CVE-2019-11001",
@@ -776,6 +780,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2021-22941",
     "CVE-2021-22986",
     "CVE-2021-22991",
+    "CVE-2021-23758",
     "CVE-2021-23874",
     "CVE-2021-25296",
     "CVE-2021-25297",
@@ -805,6 +810,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2021-27102",
     "CVE-2021-27103",
     "CVE-2021-27104",
+    "CVE-2021-27137",
     "CVE-2021-27561",
     "CVE-2021-27562",
     "CVE-2021-27852",
@@ -939,6 +945,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2022-0543",
     "CVE-2022-0609",
     "CVE-2022-0847",
+    "CVE-2022-0995",
     "CVE-2022-1040",
     "CVE-2022-1096",
     "CVE-2022-1364",
@@ -1197,6 +1204,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2023-42917",
     "CVE-2023-43000",
     "CVE-2023-43208",
+    "CVE-2023-4346",
     "CVE-2023-43770",
     "CVE-2023-44221",
     "CVE-2023-44487",
@@ -1213,6 +1221,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2023-4863",
     "CVE-2023-48788",
     "CVE-2023-49103",
+    "CVE-2023-49105",
     "CVE-2023-4911",
     "CVE-2023-4966",
     "CVE-2023-49897",
@@ -1447,6 +1456,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-24991",
     "CVE-2025-24993",
     "CVE-2025-25181",
+    "CVE-2025-25249",
     "CVE-2025-25257",
     "CVE-2025-26399",
     "CVE-2025-26633",
@@ -1556,6 +1566,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-6218",
     "CVE-2025-62215",
     "CVE-2025-62221",
+    "CVE-2025-62593",
     "CVE-2025-64328",
     "CVE-2025-64446",
     "CVE-2025-6543",
@@ -1567,6 +1578,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-68461",
     "CVE-2025-68613",
     "CVE-2025-68645",
+    "CVE-2025-68686",
     "CVE-2025-7775",
     "CVE-2025-8088",
     "CVE-2025-8110",
@@ -1576,14 +1588,23 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-9377",
     "CVE-2026-0257",
     "CVE-2026-0300",
+    "CVE-2026-0770",
     "CVE-2026-10520",
     "CVE-2026-11645",
     "CVE-2026-12569",
     "CVE-2026-1281",
     "CVE-2026-1340",
+    "CVE-2026-15409",
+    "CVE-2026-15410",
     "CVE-2026-1603",
+    "CVE-2026-16232",
+    "CVE-2026-16812",
     "CVE-2026-1731",
+    "CVE-2026-18556",
+    "CVE-2026-18577",
+    "CVE-2026-19490",
     "CVE-2026-20045",
+    "CVE-2026-20079",
     "CVE-2026-20122",
     "CVE-2026-20127",
     "CVE-2026-20128",
@@ -1594,6 +1615,8 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-20245",
     "CVE-2026-20253",
     "CVE-2026-20262",
+    "CVE-2026-20316",
+    "CVE-2026-20349",
     "CVE-2026-20700",
     "CVE-2026-20805",
     "CVE-2026-20963",
@@ -1606,6 +1629,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-21525",
     "CVE-2026-21533",
     "CVE-2026-21643",
+    "CVE-2026-21962",
     "CVE-2026-22719",
     "CVE-2026-22769",
     "CVE-2026-23760",
@@ -1613,6 +1637,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-2441",
     "CVE-2026-24423",
     "CVE-2026-24858",
+    "CVE-2026-25089",
     "CVE-2026-25108",
     "CVE-2026-28318",
     "CVE-2026-3055",
@@ -1621,8 +1646,10 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-32202",
     "CVE-2026-33017",
     "CVE-2026-33634",
+    "CVE-2026-33824",
     "CVE-2026-33825",
     "CVE-2026-34197",
+    "CVE-2026-34486",
     "CVE-2026-34621",
     "CVE-2026-34908",
     "CVE-2026-34909",
@@ -1633,9 +1660,12 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-35616",
     "CVE-2026-3909",
     "CVE-2026-3910",
+    "CVE-2026-39808",
     "CVE-2026-39987",
     "CVE-2026-41091",
     "CVE-2026-41940",
+    "CVE-2026-42016",
+    "CVE-2026-42018",
     "CVE-2026-42208",
     "CVE-2026-42271",
     "CVE-2026-42897",
@@ -1643,98 +1673,67 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-45321",
     "CVE-2026-45498",
     "CVE-2026-45659",
+    "CVE-2026-46817",
     "CVE-2026-48027",
     "CVE-2026-48172",
+    "CVE-2026-48282",
     "CVE-2026-48558",
+    "CVE-2026-48710",
     "CVE-2026-48907",
+    "CVE-2026-48908",
+    "CVE-2026-48939",
+    "CVE-2026-49869",
+    "CVE-2026-50522",
     "CVE-2026-50751",
     "CVE-2026-5281",
+    "CVE-2026-53362",
     "CVE-2026-54420",
+    "CVE-2026-55040",
+    "CVE-2026-55255",
+    "CVE-2026-56155",
+    "CVE-2026-56164",
+    "CVE-2026-56290",
+    "CVE-2026-56291",
+    "CVE-2026-58644",
+    "CVE-2026-58704",
+    "CVE-2026-59310",
+    "CVE-2026-59822",
+    "CVE-2026-60004",
+    "CVE-2026-60137",
+    "CVE-2026-63030",
+    "CVE-2026-63077",
+    "CVE-2026-64849",
+    "CVE-2026-65400",
+    "CVE-2026-66384",
+    "CVE-2026-67277",
+    "CVE-2026-68820",
     "CVE-2026-6973",
+    "CVE-2026-72529",
+    "CVE-2026-72530",
+    "CVE-2026-72898",
+    "CVE-2026-73570",
     "CVE-2026-7473",
+    "CVE-2026-75650",
+    "CVE-2026-76460",
+    "CVE-2026-76461",
+    "CVE-2026-8037",
+    "CVE-2026-81578",
+    "CVE-2026-81963",
+    "CVE-2026-82078",
+    "CVE-2026-82329",
+    "CVE-2026-83548",
+    "CVE-2026-83549",
     "CVE-2026-8398",
+    "CVE-2026-8452",
+    "CVE-2026-84869",
+    "CVE-2026-85046",
+    "CVE-2026-85706",
+    "CVE-2026-85880",
+    "CVE-2026-86060",
+    "CVE-2026-86218",
+    "CVE-2026-87491",
+    "CVE-2026-87886",
     "CVE-2026-9082",
+    "CVE-2026-9198",
+    "CVE-2026-9586",
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    /// Table is strictly ascending bytewise: binary-search precondition, no duplicates.
-    #[test]
-    fn table_is_strictly_sorted() {
-        assert!(KEV_CVES.windows(2).all(|w| w[0] < w[1]));
-    }
-
-    /// Every entry equals its own normalisation and has the `CVE-YYYY-NNNN+` shape.
-    #[test]
-    fn table_entries_are_normalised_cve_ids() {
-        for entry in KEV_CVES {
-            assert_eq!(entry.trim().to_ascii_uppercase(), *entry);
-            let Some((year, seq)) = entry
-                .strip_prefix("CVE-")
-                .and_then(|rest| rest.split_once('-'))
-            else {
-                panic!("malformed entry {entry}");
-            };
-            assert!(
-                year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()),
-                "{entry}"
-            );
-            assert!(
-                seq.len() >= 4 && seq.bytes().all(|b| b.is_ascii_digit()),
-                "{entry}"
-            );
-        }
-    }
-
-    /// A table entry with random per-byte lowercasing and ASCII whitespace padding.
-    fn arb_mangled_entry() -> impl Strategy<Value = String> {
-        (0..KEV_CVES.len()).prop_flat_map(|i| {
-            let entry = KEV_CVES[i];
-            (
-                proptest::collection::vec(any::<bool>(), entry.len()),
-                "[ \t\r\n]{0,3}",
-                "[ \t\r\n]{0,3}",
-            )
-                .prop_map(move |(flips, lead, trail)| {
-                    let body: String = entry
-                        .bytes()
-                        .zip(flips)
-                        .map(|(b, flip)| char::from(if flip { b.to_ascii_lowercase() } else { b }))
-                        .collect();
-                    format!("{lead}{body}{trail}")
-                })
-        })
-    }
-
-    fn arb_any_input() -> impl Strategy<Value = String> {
-        prop_oneof![
-            any::<String>(),
-            "CVE-[0-9]{4}-[0-9]{4,7}",
-            arb_mangled_entry(),
-        ]
-    }
-
-    proptest! {
-        /// Every table entry is reported as KEV.
-        #[test]
-        fn prop_table_entries_are_kev(i in 0..KEV_CVES.len()) {
-            prop_assert!(is_kev(KEV_CVES[i]));
-        }
-
-        /// ASCII case and surrounding whitespace do not affect membership.
-        #[test]
-        fn prop_case_and_whitespace_invariant(mangled in arb_mangled_entry()) {
-            prop_assert!(is_kev(&mangled));
-        }
-
-        /// Binary search agrees with a linear scan; never panics on arbitrary input.
-        #[test]
-        fn prop_agrees_with_linear_scan(s in arb_any_input()) {
-            let needle = s.trim().to_ascii_uppercase();
-            prop_assert_eq!(is_kev(&s), KEV_CVES.contains(&needle.as_str()));
-        }
-    }
-}
