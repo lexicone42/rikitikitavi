@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", test))]
 use std::path::Path;
 
 use crate::models::UniFiDevice;
@@ -47,6 +48,7 @@ impl UniFiEnvironment {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Board name → `UniFiDevice` mapping.
 fn classify_board(board_name: &str) -> UniFiDevice {
     let name = board_name.trim().to_lowercase();
@@ -74,6 +76,7 @@ fn classify_board(board_name: &str) -> UniFiDevice {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// `board.name` or `board.shortname` value from `board.info` content.
 fn parse_board_info(contents: &str) -> Option<String> {
     for line in contents.lines() {
