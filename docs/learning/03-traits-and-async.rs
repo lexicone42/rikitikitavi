@@ -42,6 +42,7 @@ impl Animal for Dog {
 //     // These have default implementations (notice the body):
 //     fn estimated_duration_secs(&self) -> u64 { 30 }
 //     fn requires_privileges(&self) -> bool { false }
+//     fn relevant_ports(&self) -> &[u16] { &[] }   // empty = always run
 // }
 // ```
 //
@@ -59,6 +60,11 @@ impl Animal for Dog {
 // 3. `async fn scan(...)` — An async method. The `#[async_trait]` macro
 //    is needed because Rust traits can't natively have async methods
 //    that work with dynamic dispatch (Box<dyn Scanner>).
+//
+// 4. `relevant_ports()` is what makes Phase 2 adaptive. A scanner that
+//    returns `&[3306, 5432]` is skipped when no discovered host has one of
+//    those ports open; the default `&[]` means "always run". Overriding a
+//    defaulted method is optional, so most scanners never mention it.
 
 // ── IMPLEMENTING THE TRAIT ────────────────────────────────────────────────
 //

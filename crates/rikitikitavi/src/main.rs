@@ -52,6 +52,17 @@ async fn main() -> Result<()> {
 }
 
 /// `scan` flags that were set but are not yet wired into the scan.
+fn unimplemented_tui_flags(args: &cli::TuiArgs) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if !matches!(args.network, cli::NetworkArg::Auto) {
+        ignored.push("--network");
+    }
+    if args.ssid.is_some() {
+        ignored.push("--ssid");
+    }
+    ignored
+}
+
 fn unimplemented_scan_flags(args: &cli::ScanArgs) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     if !matches!(args.network, cli::NetworkArg::Auto) {
@@ -936,6 +947,10 @@ async fn cmd_tui(
     use crossterm::{execute, terminal};
     use ratatui::Terminal;
     use ratatui::backend::CrosstermBackend;
+    let ignored = unimplemented_tui_flags(&args);
+    if !ignored.is_empty() {
+        anyhow::bail!("not yet implemented: {}", ignored.join(", "));
+    }
 
     config::validate_scan_config(&app_config.scan)?;
 
@@ -1653,6 +1668,23 @@ mod tests {
             unset, None,
             "unset secrets must stay None, not become a marker"
         );
+    }
+
+    #[test]
+    fn unimplemented_tui_flags_reports_set_no_ops() {
+        use crate::{Cli, Command, unimplemented_tui_flags};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["rikitikitavi", "tui", "--ssid", "x", "--network", "wifi"])
+            .unwrap();
+        let Command::Tui(args) = cli.command else {
+            panic!("expected tui")
+        };
+        assert_eq!(unimplemented_tui_flags(&args), vec!["--network", "--ssid"]);
+        let cli = Cli::try_parse_from(["rikitikitavi", "tui"]).unwrap();
+        let Command::Tui(args) = cli.command else {
+            panic!("expected tui")
+        };
+        assert!(unimplemented_tui_flags(&args).is_empty());
     }
 
     #[test]

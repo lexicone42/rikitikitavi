@@ -90,6 +90,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **WiFi Security** | Nearby network encryption grading (Open/WEP/WPA/WPA2/WPA3) |
 | **External Exposure** | Public IP detection, port forwarding (NAT traversal) checks |
 | **Credential Hygiene** | Anonymous FTP, SMB exposure, Telnet, RDP, HTTP admin no-auth |
+| **Neighbor/Proximity** | Stub: registered for the `neighbor` perspective, returns no findings yet |
 | **Network Isolation** | Flat network detection, inter-VLAN routing, subnet analysis |
 | **Service Banners** | SSH version, HTTP headers, banner grabbing |
 | **SSL/TLS Certificates** | Self-signed, expired, weak keys, TLS 1.0/1.1 |
@@ -106,7 +107,10 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **TR-069 / CWMP** | ISP remote-management (7547) reachable on the LAN |
 | **RTSP / ONVIF** | IP-camera streams reachable without authentication |
 | **UPnP-IGD** | Router WAN→LAN port forwards ("what's exposed to the internet?") |
-| **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(feature: `monitor`)* |
+| **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(`rikitikitavi monitor`, feature `monitor`)* |
+
+The 25 registered scanners are every row except Passive WiFi, which is not in
+`ScannerRegistry` and runs only through the `monitor` command.
 
 ### Exploit Intelligence & Confidence
 
@@ -141,10 +145,11 @@ rikitikitavi scan --compare-previous
 rikitikitavi scan --no-save
 ```
 
-Comparison uses fingerprint-based diffing — findings are tracked by
-`(scanner, title, ip, port)`, so they survive DHCP address changes when
-devices keep their MAC. Severity changes are tracked separately from
-new/resolved findings.
+Comparison uses fingerprint-based diffing. Findings are keyed on
+`(scanner, title, ip, port)`, so a finding on a host whose DHCP address changed
+shows up as one resolved plus one new. Devices are keyed on MAC (IP only when
+the MAC is unknown), so they survive address changes. Severity changes are
+tracked separately from new/resolved findings.
 
 ### UniFi Integration
 
@@ -161,6 +166,7 @@ rikitikitavi unifi scan --controller https://192.168.1.1 \
 
 # Self-signed controller cert? Opt out of TLS validation explicitly.
 # By default the client validates the certificate before sending credentials.
+# `unifi.controller.insecure: true` in config.yaml does the same and prints the same warning.
 rikitikitavi unifi scan --controller https://192.168.1.1 --user admin --password secret --insecure
 ```
 
@@ -202,13 +208,19 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 │  INFO ███████  7             │ `:::\ w  /::;   │            │
 │                              │   ';:`. .':;'   │            │
 │                              │      ~§>        │            │
-├───────────┬──────────────────┴─────────────────┤            │
-│ D Dashboard │ N Network │ F Findings │ A Attacks │          │
+├─────────────┬───────────┬───┴────────┬────────┴──┬───────────┤
+│ D Dashboard │ N Network │ F Findings │ A Attacks │ T Actions │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- Full mouse support: click tabs, rows, right-click for detail
-- Keyboard: `D`ashboard, `N`etwork, `F`indings, `A`ttacks, `S`can, `E`xport, `Q`uit
+- Full mouse support: click tabs and rows, right-click for detail, scroll wheel
+  moves the selection
+- Keyboard: `D`ashboard, `N`etwork, `F`indings, `A`ttacks, `T`op actions,
+  `S`can (re-scan), `L` toggle severity filter, `E`xport, `Enter` device
+  detail / `Esc` back, `Tab`/`Shift+Tab` or `←`/`→` cycle screens,
+  `↑`/`↓`/`j`/`k`, `PageUp`/`PageDown`, `Home`/`End` move the selection, `Q`uit
+- Watch mode: `tui --watch --interval 300` re-scans every N seconds (see
+  [TUI Options](#tui-options))
 - Scan diff badges: **NEW** and **CHG** markers on changed findings
 - ASCII mongoose with animated snake (because why not)
 
@@ -225,16 +237,25 @@ rikitikitavi <COMMAND>
 Commands:
   scan        Run network security scan
   tui         Launch interactive terminal UI
-  report      Generate report from saved scan
+  report      Print the last saved scan (--latest); other modes not yet implemented
   unifi       UniFi controller commands
-  aws         AWS Security Lake commands
+  aws         AWS Security Lake commands (not yet implemented; every subcommand exits non-zero)
   modules     List available scanner modules
   monitor     Passive WiFi monitoring (requires --features monitor)
   config      Show/validate configuration (secrets redacted)
-  init        Interactive setup wizard
-  update-db   Update vulnerability databases
+  init        Interactive setup wizard (not yet implemented; points at config.example.yaml)
+  update-db   Update vulnerability databases (not yet implemented)
   version     Show version info
 ```
+
+### Global Options
+
+```
+  -c, --config <PATH>    Config file [env: RIKITIKITAVI_CONFIG]; skips the default search
+  -l, --log-level <L>    error, warn, info, debug, trace [default: warn]
+```
+
+Both apply to every subcommand.
 
 ### Scan Options
 
@@ -243,7 +264,10 @@ rikitikitavi scan [OPTIONS]
 
 Options:
   --perspective <P>      Attacker model: neighbor, unauthenticated,
-                         authenticated, privileged [default: unauthenticated]
+                         authenticated, privileged [default: config
+                         scan.perspective, else unauthenticated]. Only `wifi`
+                         and the `neighbor` stub accept neighbor, so that
+                         perspective is effectively a WiFi-only scan
   --quick                Passive scan (top 20 ports only)
   --aggressive           Deep scan (extended port range)
   --modules <M>          Comma-separated scanner list
@@ -258,10 +282,37 @@ Options:
   --write-baseline <F>   Write current findings' fingerprints to a baseline file
   --known-devices <F>    Flag any device not in this file as a "new device"
   --write-known-devices <F>  Write current devices to a known-devices file
-  --quiet                Suppress progress output and the consent notice
+  --quiet                Suppress progress output and the consent notice; with
+                         no --output the findings report is suppressed too
+                         (stderr then notes if --fail-on is unset)
   --no-save              Don't save to scan history
   --dry-run              Show what would be scanned (no active probing)
+  --network <M>, --ssid, --password, --interface, --upload, --unifi-local
+                         Parsed but not implemented: any of these (--network
+                         other than auto) exits with "not yet implemented"
 ```
+
+### TUI Options
+
+```
+rikitikitavi tui [OPTIONS]
+
+Options:
+  --watch                Re-scan automatically every --interval seconds
+  --interval <SECS>      Watch interval [default: 300]; values below 5 are rejected
+  --theme <T>            dark, light, hacker, accessible [default: dark]
+  --perspective <P>      As for scan [default: config scan.perspective, else unauthenticated]
+  --network, --ssid      Not yet implemented; passing them is an error
+```
+
+The TUI runs at the config intensity (capped at active), always with attack
+paths, and saves every scan to history. `S` re-scans on demand.
+
+### Report
+
+`rikitikitavi report --latest` prints the most recent saved scan. Without
+`--latest`, `report` only prints "not yet implemented"; `--format`, `--output`
+and `--attack-paths` are parsed but unused.
 
 > **Log level:** defaults to `warn` so the report stays readable; use
 > `--log-level info` for scan progress detail.
@@ -277,24 +328,40 @@ rikitikitavi scan --suppress .rikitikitavi-baseline \
                   --known-devices .rikitikitavi-devices --fail-on high
 ```
 
+Order after a scan: new-device findings are appended and `--write-known-devices`
+written; history is saved; `--write-baseline` is written; `--suppress`
+filtering is applied; the report, then the `--compare-previous` diff, are
+printed; `--fail-on` is evaluated last, on the filtered set. History and a
+baseline written in the same run as `--suppress` therefore contain the full,
+unfiltered set.
+
 > **Consent:** rikitikitavi prints a one-line reminder that you should only scan
-> networks you own or are authorized to test. Active default-credential *login
-> attempts* are gated behind `--aggressive`; the default scan detects and flags
-> exposures without attempting logins.
+> networks you own or are authorized to test. *Password-guessing* telnet logins
+> are gated behind `--aggressive`. The default (Active) scan still performs
+> unauthenticated protocol logins that need no secret: anonymous FTP
+> (`USER anonymous`, plus a PASV `LIST` when accepted), SNMP `public`/`private`
+> community probes, and an anonymous MQTT `CONNECT`. `--quick` (Passive) limits
+> the credential scanner to the gateway and skips the SNMP and MQTT probes.
 
 ### Configuration File
 
-`rikitikitavi` loads `./config.yaml`, `./config.yml`, or `/etc/rikitikitavi/config.yaml` (first found) and prints the path it used. Safety-relevant keys under `scan`:
+`rikitikitavi` loads the file given by `--config`/`-c` (or `RIKITIKITAVI_CONFIG`); otherwise the first of `./config.yaml`, `./config.yml`, `/etc/rikitikitavi/config.yaml`; otherwise built-in defaults. An explicit path that does not exist is an error. `scan` prints `Config: <path>` unless `--quiet`.
+
+[`config.example.yaml`](config.example.yaml) documents every key with its default. Keys that parse but are not read yet (`logging.*`, `output.*`, `scan.network_mode`, `security_lake.*`, and others) are marked "reserved" there. `scan.perspective` is the default for `--perspective` on `scan` and `tui`; `scan.modules` and `scan.attack_paths` are overridden by `--modules`/`--attack-paths` or their absence. Safety-relevant keys under `scan`:
 
 ```yaml
 scan:
   intensity: active            # passive | active | aggressive; a file value of aggressive is capped
                                # at active, login attempts require `scan --aggressive`
-  parallelism: 64              # 1..=4096
+  parallelism: 100             # default 100; 1..=4096, outside that range is a startup error
   timeout_seconds: 0           # 0 = unbounded; otherwise the whole scan aborts after N seconds
   excluded_networks: ["192.168.50.0/24"]                    # CIDRs never probed
   excluded_devices: ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]  # IPs never probed; MACs once the ARP cache knows them
 ```
+
+Exclusion semantics: MAC entries are resolved to IPs through the ARP cache before the host sweep and re-applied after the sweep fills in MACs. Findings on excluded hosts are dropped after the scan, except `arp` findings, so spoofing that involves an excluded host is still reported. If every discovered host is excluded, the six ARP-fallback scanners (`credentials`, `services`, `smb`, `snmp`, `database`, `mgmt-plane`) are skipped; if the gateway is excluded, `router` is skipped.
+
+Independently of `scan.timeout_seconds`, each scanner runs under its own budget of 4× its estimated duration, clamped to 60–600 s; a scanner that exceeds it is skipped with a warning and contributes no findings.
 
 Reports, baseline and known-device files are written with mode `0600`; the scan-history directory with `0700`.
 
@@ -361,7 +428,8 @@ host/port/service, CWE reference, and remediation steps with estimated effort:
 ```
 
 This is a 9-crate Rust workspace. The dependency graph flows downward — `core`
-is the foundation with zero dependencies, `models` builds on it, and everything
+has no intra-workspace dependencies (its runtime deps are thiserror, anyhow,
+tracing, serde, chrono, uuid, ipnetwork), `models` builds on it, and everything
 else builds on those two.
 
 ### Design Deep Dive
@@ -431,16 +499,28 @@ parameters.
 #### Fingerprint-Based Identity
 
 Findings need stable identity across scans for comparison. A fingerprint is
-derived from `(scanner, title, affected_ip, affected_port)`:
+derived from `(scanner, title, affected_ip, affected_port)` with a hand-rolled
+FNV-1a 64 hasher, because `DefaultHasher` (SipHash) is not guaranteed stable
+across Rust releases and fingerprints are persisted in baseline files:
 
 ```rust
 impl Finding {
     pub fn fingerprint(&self) -> FindingFingerprint {
-        let mut hasher = DefaultHasher::new();
-        self.scanner.hash(&mut hasher);
-        self.title.hash(&mut hasher);
-        self.affected_ip.hash(&mut hasher);
-        self.affected_port.hash(&mut hasher);
+        // Byte layout: scanner 0xff title 0xff ip-tag [octets] port-tag [port BE].
+        let mut hasher = Fnv1a64::new();
+        hasher.write(self.scanner.as_bytes());
+        hasher.write_u8(0xff);
+        hasher.write(self.title.as_bytes());
+        hasher.write_u8(0xff);
+        match self.affected_ip {
+            None => hasher.write_u8(0),
+            Some(IpAddr::V4(v4)) => { hasher.write_u8(4); hasher.write(&v4.octets()); }
+            Some(IpAddr::V6(v6)) => { hasher.write_u8(6); hasher.write(&v6.octets()); }
+        }
+        match self.affected_port {
+            None => hasher.write_u8(0),
+            Some(port) => { hasher.write_u8(1); hasher.write(&port.to_be_bytes()); }
+        }
         FindingFingerprint(hasher.finish())
     }
 }
@@ -451,8 +531,13 @@ port are the same, it's the *same* finding with updated details — not a new
 one. This lets scan comparison correctly report "severity changed from Medium to
 High" rather than "old one resolved, new one appeared."
 
-Devices use MAC address (preferred) or IP as their fingerprint, so they survive
-DHCP address changes.
+Baseline files written by `--write-baseline` carry a `# format: fnv1a-1`
+header. `--suppress` warns when the header is missing or different and asks
+for a regenerate with `--write-baseline`; baselines from before the FNV-1a
+hasher must be regenerated.
+
+Devices use MAC address (preferred) or IP as their fingerprint
+(`DeviceFingerprint::{Mac, Ip}`), so they survive DHCP address changes.
 
 #### Cross-Platform Network Layer
 
@@ -505,19 +590,28 @@ The runner (`runner.rs`) coordinates scanning:
 The `From<&Finding>` trait converts findings to OCSF schema structs:
 
 ```rust
+#[derive(Serialize, Deserialize)]
+pub struct OcsfFinding {
+    pub class_uid: u32,
+    // ...
+    #[serde(serialize_with = "serialize_epoch_ms", deserialize_with = "deserialize_epoch_ms")]
+    pub time: DateTime<Utc>,  // stays a DateTime in Rust, epoch ms on the wire
+}
+
 impl From<&Finding> for OcsfFinding {
     fn from(f: &Finding) -> Self {
         Self {
             class_uid: 2002,  // Vulnerability Finding
             severity_id: f.severity.ocsf_id(),
-            time: f.discovered_at.timestamp_millis(),  // epoch ms
+            time: f.discovered_at,
             // ... CWE → analytic, CVEs → vulnerabilities, IP/port → resources
         }
     }
 }
 ```
 
-Timestamps are epoch milliseconds (OCSF `timestamp_t`), not RFC 3339 strings.
+Timestamps are epoch milliseconds (OCSF `timestamp_t`), not RFC 3339 strings;
+the conversion lives in the serde attribute, not in `From`.
 NDJSON output (one JSON object per line) is what Glue/Athena prefer for
 parallel processing.
 
@@ -547,6 +641,10 @@ proptest! {
 This catches edge cases that example-based tests miss — serialization
 roundtrips, diff category coverage, fingerprint stability.
 
+The parsers that consume network-sourced bytes (DNS packets, 802.11 frames,
+SSH KEX, service banners, HTTP headers, SSDP/UPnP, X.509 DER, identifiers)
+also have libFuzzer harnesses under `fuzz/fuzz_targets/`; see `fuzz/README.md`.
+
 #### Error Handling
 
 The crate uses a two-level error strategy:
@@ -570,11 +668,17 @@ strip = true              # Strip debug symbols
 opt-level = "z"           # Optimize for size
 
 [profile.release-fast]    # When you want speed over size
+inherits = "release"
 opt-level = 3
 
 [profile.release-embedded]  # For UniFi device deployment
+inherits = "release"
 opt-level = "z"
 lto = "fat"
+
+[profile.release-unifi]   # Size/speed middle ground for UniFi gateways
+inherits = "release"
+opt-level = "s"
 ```
 
 The default release profile optimizes for size (`opt-level = "z"`) because this
@@ -600,7 +704,7 @@ performance.
 ## Development
 
 ```bash
-# Run all tests (~1050 tests including property-based)
+# Run all tests (1322 tests across 17 binaries, incl. ~200 proptest invariants)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)
@@ -623,7 +727,11 @@ cargo build --release
 cargo build --profile release-embedded
 ```
 
-CI runs all of the above on every push to `main` and every PR.
+CI (`.github/workflows/ci.yml`) runs six jobs on every push to `main` and
+every PR: `check` (fmt + clippy), `test` (Linux), `test-macos`, `msrv`
+(`cargo check` on Rust 1.88), `deny`, and `fuzz-build` (nightly `cargo fuzz
+build`; the fuzzers are built, not run). Release-profile builds are not part
+of CI.
 
 ## License
 

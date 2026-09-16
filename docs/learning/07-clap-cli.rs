@@ -50,7 +50,7 @@ pub enum Command {
     Scan(ScanArgs),
 
     /// Launch the interactive TUI.
-    Tui,
+    Tui(TuiArgs),
 
     /// List scanner modules.
     Modules(ModulesArgs),
@@ -68,10 +68,11 @@ pub enum Command {
 /// Arguments for the `scan` subcommand.
 #[derive(Args)]
 pub struct ScanArgs {
-    /// Attacker perspective to simulate.
-    #[arg(long, default_value = "unauthenticated")]
-    //          ↑ Default value if not provided
-    pub perspective: PerspectiveArg,
+    /// Attacker perspective to simulate [default: config `scan.perspective`, else unauthenticated].
+    #[arg(long)]
+    //  ↑ No default_value: `None` means "flag not given", so main() can fall
+    //    back to the config file instead of clap picking a value.
+    pub perspective: Option<PerspectiveArg>,
 
     /// Comma-separated list of scanner modules.
     #[arg(long, value_delimiter = ',')]
@@ -83,12 +84,38 @@ pub struct ScanArgs {
     pub output: Option<PathBuf>,
 
     /// Quick scan (fewer checks).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "aggressive")]
+    //          ↑ clap rejects `--quick --aggressive` before main() runs
     pub quick: bool,
+
+    /// Aggressive scan (thorough, may trigger alerts).
+    #[arg(long)]
+    pub aggressive: bool,
 
     /// Dry run — show what would happen.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments for the `tui` subcommand.
+#[derive(Args)]
+pub struct TuiArgs {
+    /// Re-scan automatically every `--interval` seconds.
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Scan interval in seconds (watch mode), minimum 5.
+    #[arg(long, default_value = "300", value_parser = clap::value_parser!(u64).range(5..))]
+    //                                 ↑ typed parser with a range: 0..=4 is a parse error
+    pub interval: u64,
+
+    /// TUI color theme.
+    #[arg(long, default_value = "dark")]
+    pub theme: ThemeArg,
+
+    /// Attacker perspective; `None` = take it from the config file.
+    #[arg(long)]
+    pub perspective: Option<PerspectiveArg>,
 }
 
 // ── NESTED SUBCOMMANDS ────────────────────────────────────────────────────
@@ -115,7 +142,7 @@ pub enum ModulesCommand {
 // ── VALUE ENUMS ───────────────────────────────────────────────────────────
 
 /// clap can parse enum values from strings automatically!
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum PerspectiveArg {
     Neighbor,
     Unauthenticated,
@@ -124,6 +151,14 @@ pub enum PerspectiveArg {
 }
 // With this, clap accepts: --perspective neighbor, --perspective authenticated, etc.
 // Invalid values show a nice error message listing valid options.
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ThemeArg {
+    Dark,
+    Light,
+    Hacker,
+    Accessible,
+}
 
 // ── HOW IT ALL FITS TOGETHER ──────────────────────────────────────────────
 
@@ -135,7 +170,7 @@ fn main() {
     match cli.command {
         Command::Scan(args) => {
             if args.dry_run {
-                println!("Dry run — would scan with perspective: {:?}", args.perspective as u8);
+                println!("Dry run — would scan with perspective: {:?}", args.perspective);
                 if let Some(modules) = &args.modules {
                     println!("Modules: {}", modules.join(", "));
                 }
@@ -143,7 +178,9 @@ fn main() {
                 println!("Scanning...");
             }
         }
-        Command::Tui => println!("Launching TUI..."),
+        Command::Tui(args) => {
+            println!("Launching TUI (theme {:?}, watch: {})", args.theme, args.watch);
+        }
         Command::Modules(args) => {
             match args.command {
                 ModulesCommand::List => println!("All modules: dns, ports, wifi, ..."),
@@ -167,6 +204,9 @@ fn main() {
 //   cargo run -- scan --help
 //   cargo run -- scan --dry-run
 //   cargo run -- scan --perspective neighbor --modules dns,ports
+//   cargo run -- scan --quick --aggressive     # rejected: conflicts_with
+//   cargo run -- tui --watch --interval 30 --theme hacker
+//   cargo run -- tui --interval 4              # rejected: range(5..)
 //   cargo run -- modules list
 //   cargo run -- modules info dns
 //   cargo run -- version --verbose

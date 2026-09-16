@@ -178,11 +178,11 @@ pub struct TuiArgs {
     #[arg(long)]
     pub perspective: Option<PerspectiveArg>,
 
-    /// Network mode.
+    /// Network access mode. Not yet implemented: only `auto` is accepted.
     #[arg(long, default_value = "auto")]
     pub network: NetworkArg,
 
-    /// `WiFi` SSID.
+    /// `WiFi` SSID. Not yet implemented; passing it is an error.
     #[arg(long)]
     pub ssid: Option<String>,
 }

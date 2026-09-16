@@ -9,8 +9,8 @@ or have authorization to test. It is not an offensive security tool.
 
 | Version | Supported |
 |---------|-----------|
-| 0.2.x   | Yes       |
-| < 0.2   | No        |
+| 0.3.x   | Yes       |
+| < 0.3   | No        |
 
 ## Reporting a Vulnerability
 
@@ -58,8 +58,21 @@ warnings). This catches common security-relevant issues:
 check:
 
 - **Advisories**: Known vulnerabilities in dependencies (RustSec advisory database)
-- **Licenses**: Only permissive licenses allowed (MIT, Apache-2.0, BSD, ISC, MPL-2.0, Zlib)
-- **Sources**: Dependencies must come from crates.io (no unknown registries or git sources)
+- **Licenses**: Allowlist of permissive licenses (MIT, Apache-2.0,
+  Apache-2.0 WITH LLVM-exception, BSD-2/3-Clause, ISC, MPL-2.0, OpenSSL,
+  Unicode-3.0, Unicode-DFS-2016, Zlib, CDLA-Permissive-2.0)
+- **Sources**: crates.io is the only allowed registry; unknown registries and
+  git sources are set to `warn`, not `deny` (`deny.toml`)
+
+### Fuzzing and Property Tests
+
+Eight libFuzzer harnesses under `fuzz/fuzz_targets/` cover the parsers that
+consume network-sourced bytes: `dns_packet`, `wifi_frame`, `ssh_kex`,
+`service_banners`, `http_headers`, `ssdp_upnp`, `x509_der`, `identifiers`. CI
+builds every target on nightly (`fuzz-build` job) but does not run them; run
+them locally per `fuzz/README.md`. The workspace also carries ~200 `proptest`
+invariants (no panic on arbitrary input, counting invariants, serialization and
+fingerprint round-trips).
 
 ### Network Scanning Safety
 
@@ -74,13 +87,16 @@ check:
   SYN/half-open scans), which don't require raw sockets or root privileges.
 - **No exploitation**: Rikitikitavi detects vulnerabilities but never exploits
   them. It reports "Redis has no auth" but doesn't read or write Redis data.
-- **Credential testing**: By default the credential scanner only *detects*
-  anonymous/default access (anonymous FTP, no-auth Redis) and flags cleartext
-  Telnet. **Only with `--aggressive`** does it attempt default-credential Telnet
-  logins against a small dictionary of canonical pairs (`admin/admin`, etc.) to
-  *confirm* the exposure. That is bounded default-credential testing — it does
-  send passwords and log in on success — not full brute force, and it is never
-  on by default.
+- **Credential testing**: Password-guessing Telnet logins run **only with
+  `--aggressive`**, against a small dictionary of canonical pairs
+  (`admin/admin`, etc.), and log in on success to *confirm* the exposure —
+  bounded, not brute force, never on by default. The default (Active) scan
+  still performs unauthenticated protocol logins that need no secret:
+  anonymous FTP (`USER anonymous`, then a PASV `LIST` if accepted), SNMP
+  `public`/`private` community probes, and an anonymous MQTT `CONNECT`. It
+  flags cleartext Telnet and no-auth Redis without logging in. `--quick`
+  (Passive) limits the credential scanner to the gateway and skips the SNMP and
+  MQTT probes.
 - **Rate limiting**: Scanners use connection timeouts and semaphore-based
   concurrency to avoid flooding the network.
 
@@ -96,8 +112,15 @@ only:
 
 ### Data Handling
 
-- **Scan history** is stored locally in the XDG data directory
-  (`~/.local/share/rikitikitavi/scans/`) as JSON files.
+- **Scan history** is stored locally as JSON under the platform data
+  directory (`~/.local/share/rikitikitavi/scans/` on Linux,
+  `~/Library/Application Support/rikitikitavi/scans/` on macOS), pruned to the
+  10 most recent scans.
+- **File permissions**: every file rikitikitavi writes — scan history,
+  JSON/CSV/HTML/OCSF exports, baselines, known-devices files — goes through
+  `core::fs::write_private`, which creates with mode `0600` and re-chmods an
+  existing file; the history directory is created with `create_private_dir`
+  (`0700`).
 - **No telemetry**: Rikitikitavi does not phone home or transmit scan results
   anywhere.
 - **Outbound calls**: rikitikitavi makes a small number of external calls beyond
@@ -108,7 +131,7 @@ only:
   - *EPSS enrichment*: when a scan turns up CVEs, their exploitation-probability
     scores are fetched best-effort from `api.first.org` (FIRST.org). Skipped
     automatically when offline.
-  - *`update-db`*: fetches vulnerability databases when you run it.
+  - *`update-db`*: not yet implemented; makes no network calls.
   The CISA KEV catalog is **embedded** (a versioned static snapshot in
   `kev_db.rs`, regenerated with `scripts/gen_kev_db.py`) — no runtime fetch.
 - **No telemetry**: none of these transmit your scan results anywhere.
@@ -124,16 +147,27 @@ only:
   in plaintext YAML.
 - The UniFi client supports both cookie-based session auth and API token auth.
 - **TLS certificate validation is on by default** — the client validates the
-  controller cert before sending credentials. The `--insecure` flag (for
-  self-signed certs) must be explicitly passed to opt out, and it prints a loud
-  warning when it does.
+  controller cert before sending credentials. Validation is disabled by the
+  `--insecure` flag or by `unifi.controller.insecure: true` in the config file;
+  both go through `UniFiClient::connect`, which prints the same loud stderr
+  warning whenever validation is off, whichever source set it.
 
 ### TLS Configuration
 
-All HTTPS connections use `rustls` (pure Rust TLS) with:
-- TLS 1.2+ only (no SSLv3, TLS 1.0, TLS 1.1)
-- Mozilla's trusted root certificates via `webpki-roots`
-- No system certificate store dependencies
+HTTPS uses `rustls` (pure Rust TLS), TLS 1.2+ only, with Mozilla's roots via
+`webpki-roots` and no system certificate store. Whether the peer certificate
+is *validated* depends on the caller:
+
+- **Validated**: outbound internet calls (public-IP providers, EPSS) and the
+  UniFi controller client (unless `--insecure` /
+  `unifi.controller.insecure`).
+- **Not validated, by design**: unauthenticated LAN probes. Scanners that must
+  tolerate self-signed device certificates build their client through
+  `http_util::unauthenticated_probe_client`, which sets
+  `danger_accept_invalid_certs(true)` and must never carry credentials; a test
+  asserts that flag appears in no other scanner file. The TLS scanner installs
+  a no-op certificate verifier so it can inspect self-signed and expired
+  certificates instead of failing the handshake.
 
 ## Threat Model
 
@@ -142,15 +176,24 @@ Rikitikitavi trusts:
 - **The local machine**: It reads `/proc`, executes network commands, and binds
   sockets. A compromised host can feed it false data.
 - **The local network** (partially): Scan results reflect what the network
-  reports. ARP spoofing or rogue DHCP could cause incorrect results (though
-  rikitikitavi also detects these attacks).
+  reports. ARP spoofing could cause incorrect results; rikitikitavi flags
+  duplicate-IP/MAC and broadcast-MAC anomalies in the ARP cache, but it sends
+  no DHCP traffic and does not detect rogue DHCP servers (the `dhcp` scanner
+  only reports APIPA addresses and gateway-less interfaces).
 - **crates.io**: Rust dependencies are pulled from the public registry.
   `cargo-deny` mitigates known supply chain risks.
 
 Rikitikitavi does **not** trust:
 
 - **Network services**: All service responses (banners, certificates, HTTP
-  headers) are treated as untrusted input and parsed defensively.
+  headers) are treated as untrusted input and parsed defensively; the
+  network-facing parsers are fuzzed (see above). HTTP bodies are read through
+  a 2 MiB cap.
+- **Evidence text**: `Finding::with_evidence` strips control characters,
+  Unicode format controls (zero-width, bidi) and ANSI escapes, then truncates
+  to 256 bytes on a char boundary, so device-supplied bytes cannot inject
+  terminal escapes or hide text in reports. A property test enforces both
+  bounds.
 - **WiFi frames**: The 802.11 frame parser validates all lengths before
   accessing offsets. Malformed frames are silently dropped, never cause panics.
 

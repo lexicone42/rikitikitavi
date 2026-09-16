@@ -13,17 +13,24 @@ use serde::{Deserialize, Serialize};
 // `#[derive(...)]` auto-generates trait implementations. Instead of writing
 // hundreds of lines of boilerplate, the compiler generates it for you.
 
-/// A network device discovered during scanning.
+/// A network device — simplified for this guide.
+///
+/// The real `Device` (crates/rikitikitavi-models/src/device.rs) uses
+/// `mac: Option<MacAddr>` and `open_ports: Vec<OpenPort>`. `MacAddr` is a
+/// newtype whose `FromStr` canonicalises "AA-BB-..", "aabb.cc.." and
+/// "aa:bb:.." to the same six octets, so one device never fingerprints as two.
+/// A raw `String` MAC, as below, is exactly the bug that newtype prevents;
+/// it is kept here only to keep the example dependency-free.
 #[derive(Debug,                  // Enables println!("{:?}", device)
          Clone,                  // Enables device.clone()
          Serialize,              // Enables serde_json::to_string(&device)
          Deserialize)]           // Enables serde_json::from_str::<Device>(json)
 pub struct Device {
-    pub ip: String,
-    pub mac: Option<String>,       // Option = nullable field
+    pub ip: std::net::IpAddr,      // serde serializes IpAddr as a string
+    pub mac: Option<String>,       // Option = nullable field (real code: Option<MacAddr>)
     pub hostname: Option<String>,
     pub device_type: DeviceType,
-    pub open_ports: Vec<u16>,      // Dynamic array of port numbers
+    pub open_ports: Vec<u16>,      // Dynamic array (real code: Vec<OpenPort>)
 }
 
 /// Device classification with serde rename.
@@ -45,7 +52,7 @@ pub enum DeviceType {
 
 fn serialization_demo() {
     let device = Device {
-        ip: "192.168.1.100".to_string(),
+        ip: "192.168.1.100".parse().unwrap(),
         mac: Some("AA:BB:CC:DD:EE:FF".to_string()),
         hostname: Some("my-laptop".to_string()),
         device_type: DeviceType::Laptop,

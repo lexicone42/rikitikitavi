@@ -54,17 +54,30 @@ constructor" problem and the "mutable builder struct" pattern.
 
 ```rust
 // Pure function: takes &str, fully testable
-fn parse_proc_net_arp(contents: &str) -> Vec<ArpEntry> {
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> {
     contents.lines().skip(1).filter_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
         // ... parse fields ...
     }).collect()
 }
 
-// I/O wrapper: reads file, delegates to pure function
+// I/O wrapper: reads the file, delegates to the pure function
+#[cfg(target_os = "linux")]
+fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
+    let contents = match std::fs::read_to_string("/proc/net/arp") {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("cannot read /proc/net/arp: {e}");
+            return Ok(Vec::new());
+        }
+    };
+    Ok(parse_linux_arp_cache(&contents))
+}
+
+// Public entry point, identical on every platform
 pub fn read_arp_cache() -> Result<Vec<ArpEntry>> {
-    let contents = std::fs::read_to_string("/proc/net/arp")?;
-    Ok(parse_proc_net_arp(&contents))
+    read_arp_cache_platform()
 }
 ```
 
@@ -74,10 +87,10 @@ temp files, mock filesystems). By separating the *parsing logic* from the
 
 ```rust
 #[test]
-fn test_parse_proc_net_arp() {
+fn test_parse_linux_arp_cache() {
     let contents = "IP address       HW type     Flags       HW address            Mask     Device\n\
                     192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0\n";
-    let entries = parse_proc_net_arp(contents);
+    let entries = parse_linux_arp_cache(contents);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].mac, "aa:bb:cc:dd:ee:ff");
 }
@@ -295,30 +308,41 @@ for `Clone`, look at whether you can reorder operations.
 ```rust
 #[cfg(target_os = "linux")]
 fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
-    let contents = std::fs::read_to_string("/proc/net/arp")?;
-    Ok(parse_proc_net_arp(&contents))
+    // read /proc/net/arp, then parse_linux_arp_cache(&contents)
 }
 
 #[cfg(target_os = "macos")]
 fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
-    let output = std::process::Command::new("arp").arg("-a").output()?;
-    let contents = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_arp_command_output(&contents))
+    let output = std::process::Command::new("arp").arg("-a").output();
+    // on success: parse_macos_arp(&String::from_utf8_lossy(&out.stdout))
 }
 
-// Make the macOS parser available in tests even on Linux
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> {
+    tracing::warn!("ARP cache reading not supported on this platform");
+    Ok(Vec::new())
+}
+
+// Each parser is compiled on its own OS AND under `cargo test` on any OS
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_arp_cache(contents: &str) -> Vec<ArpEntry> { ... }
+
 #[cfg(any(target_os = "macos", test))]
-fn parse_arp_command_output(contents: &str) -> Vec<ArpEntry> { ... }
+fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> { ... }
 ```
 
 **Why it's interesting**: `#[cfg(target_os = "linux")]` makes the function
 *only exist* on Linux — it's not even compiled on other platforms. This is
-zero-cost: no runtime checks, no dead code in the binary.
+zero-cost: no runtime checks, no dead code in the binary. `pub fn
+read_arp_cache()` just calls whichever `read_arp_cache_platform` exists; the
+third `cfg(not(any(...)))` arm returns an empty list on other OSes instead of
+failing to compile.
 
 The clever bit is `#[cfg(any(target_os = "macos", test))]` — the macOS parser
 function is compiled on macOS AND during `cargo test` on any platform. This
 means we can test the macOS parsing logic from a Linux CI server, because
-the parser is a pure function taking `&str`.
+the parser is a pure function taking `&str`. The Linux parser gets the same
+treatment so macOS CI covers it too.
 
 **When to use**: Cross-platform code. Also useful with `#[cfg(test)]` for
 test-only helper functions.
@@ -330,19 +354,21 @@ test-only helper functions.
 **File**: `crates/rikitikitavi-scanners/src/arp.rs`
 
 ```rust
-let mut ip_to_macs: HashMap<IpAddr, Vec<&str>> = HashMap::new();
+// Dedupe per IP: macOS `arp -a` lists the same IP+MAC once per interface.
+let mut ip_to_macs: HashMap<IpAddr, HashSet<&str>> = HashMap::new();
 for entry in entries {
-    ip_to_macs
-        .entry(entry.ip)
-        .or_default()
-        .push(&entry.mac);
+    ip_to_macs.entry(entry.ip).or_default().insert(&entry.mac);
 }
 ```
 
 **Why it's interesting**: The entry API avoids the classic "check if key
 exists, then insert or update" pattern. `.entry(key)` gives you a handle that
-is either `Occupied` or `Vacant`. `.or_default()` inserts `Vec::new()` if
-vacant, then returns `&mut Vec`. One hash lookup instead of two.
+is either `Occupied` or `Vacant`. `.or_default()` inserts `HashSet::new()` if
+vacant, then returns `&mut HashSet`. One hash lookup instead of two.
+
+The value is a `HashSet`, not a `Vec`, on purpose: macOS `arp -a` repeats an
+IP once per interface, and a `Vec` would report every multi-homed host as an
+ARP-spoofing duplicate. Picking the collection type is part of the grouping.
 
 This is idiomatic for "group by" operations. The alternative with
 `if let Some(v) = map.get_mut(&key)` is verbose and double-hashes.
@@ -446,22 +472,33 @@ something fails.
 
 ## 13. Newtype Pattern for Type Safety
 
-**File**: `crates/rikitikitavi-models/src/finding.rs`
+**File**: `crates/rikitikitavi-models/src/finding.rs`, `device.rs`
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FindingFingerprint(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FindingFingerprint(u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceFingerprint(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceFingerprint {
+    Mac(MacAddr),
+    Ip(IpAddr),
+}
 ```
 
-**Why it's interesting**: Both are wrappers around `u64`, but Rust treats them
-as completely different types. You can't accidentally pass a `DeviceFingerprint`
-where a `FindingFingerprint` is expected — the compiler catches it.
+**Why it's interesting**: `FindingFingerprint` wraps a `u64`, but Rust treats
+it as a distinct type: you can't pass a raw hash, or a `DeviceFingerprint`,
+where a `FindingFingerprint` is expected. The field is private, so a value
+only comes from `Finding::fingerprint()` or from parsing the hex form written
+to baseline files.
 
 This is zero-cost: `FindingFingerprint(42)` has the same memory layout as
 `42_u64`. The wrapping only exists at compile time.
+
+`DeviceFingerprint` is the same idea as a sum type. Device identity needs no
+hash: the enum holds the identifying value itself — MAC when known, IP
+otherwise — and derived `Eq`/`Hash` make it a map key. An `Ip` never compares
+equal to a `Mac`, so a device whose MAC is unknown can't be confused with one
+whose MAC is.
 
 The `Copy` derive means these are passed by value (like integers), not moved.
 Small types (up to ~128 bits) should usually be `Copy` to avoid unnecessary
@@ -625,6 +662,51 @@ chunked reads (a hostile device can't OOM the scanner with an endless body);
 *inconclusive*, never "closed". Concurrency is bounded with `buffer_unordered`
 rather than spawning a task per `(host, port)` up front.
 
+## 20. Stable Hashing for Persisted Digests
+
+**File**: `crates/rikitikitavi-models/src/finding.rs`, `crates/rikitikitavi/src/main.rs`
+
+`Finding::fingerprint()` is written to baseline files and compared across
+runs, so it must not change between Rust releases. std's `DefaultHasher`
+(SipHash, randomly keyed per process, algorithm unspecified) is unusable for
+that; the code implements `Hasher` for a fixed algorithm instead:
+
+```rust
+/// FNV-1a 64-bit; stable across Rust releases.
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    const fn new() -> Self { Self(0xcbf2_9ce4_8422_2325) }
+}
+
+impl Hasher for Fnv1a64 {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+```
+
+`fingerprint()` feeds it explicit bytes — `scanner`, `0xff`, `title`, `0xff`,
+an IP tag byte plus octets, a port tag byte plus big-endian `u16` — rather
+than calling `.hash()` on the fields. Derived `Hash` impls write enum
+discriminants as native-endian `isize`, so `Option<u16>::hash` would give a
+different digest on a 32-bit or big-endian machine and a baseline file would
+not be portable.
+
+The file format carries its own version: `--write-baseline` emits a
+`# format: fnv1a-1` header, and `--suppress` warns when the header is missing
+or differs ("regenerate with `--write-baseline`"). Changing the byte layout
+means bumping the token, and old files are detected instead of silently
+matching nothing.
+
+**When to use**: any digest that leaves the process — cache keys on disk,
+dedup files, IDs in exported data. Keep `DefaultHasher` for in-memory
+`HashMap`s, where per-process randomization is a feature (HashDoS resistance).
+
 ## Summary: Principles at Work
 
 | Principle | Pattern | Benefit |
@@ -637,3 +719,4 @@ rather than spawning a task per `(host, port)` up front.
 | Borrow, don't clone | Deferred mutation, slices | No unnecessary allocations |
 | Type safety at zero cost | Newtype pattern, `From` trait | Compiler prevents mixing up types |
 | Optional complexity | Feature flags, `#[cfg]` | Users only pay for what they use |
+| Stable identity | Fixed-algorithm `Hasher` + format header | Persisted digests survive upgrades |
