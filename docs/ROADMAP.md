@@ -682,17 +682,9 @@ Notes:
 Found while grounding the roadmap against the code; none are in scope for the
 roadmap itself but all are actionable.
 
-1. **`epss.rs` silently drops CVEs past the first 100.**
-   `crates/rikitikitavi-network/src/epss.rs:41` joins every unique CVE into one
-   `?cve=` URL and never sends `limit` or paginates. FIRST's API defaults to
-   `limit=100`, so a scan with >100 distinct CVEs gets scores for only the first
-   100 (sorted order, so the dropped set is deterministic but arbitrary). Past
-   ~140 CVEs the URL exceeds request-line limits and the API returns
-   `{"total":0}` — all enrichment lost. Both failures deserialise cleanly, so the
-   `tracing::debug!` arms never fire. A live scan already yields 144 findings and
-   OpenSSH banner correlation alone maps 5 CVEs per host. Fix: chunk into batches
-   of ≤100, pass `limit`, check HTTP status before `.json()`, and warn when the
-   returned count is less than requested.
+1. **`epss.rs` dropped CVEs past the first 100** (the API's row cap). Fixed
+   2026-09-17: requests are batched in groups of 100.
+
 2. **`device_type` renders two different ways** — `smart_tv` in JSON (serde
    `rename_all`), `SmartTv` in HTML (`format!("{:?}")` at `html.rs:414`). There is
    no `Display` impl. Same field, two spellings, depending on export format.
