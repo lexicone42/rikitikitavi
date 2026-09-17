@@ -693,16 +693,9 @@ roadmap itself but all are actionable.
    OpenSSH banner correlation alone maps 5 CVEs per host. Fix: chunk into batches
    of ≤100, pass `limit`, check HTTP status before `.json()`, and warn when the
    returned count is less than requested.
-2. **`certpl.html` is untracked in the repo root** (860 lines) — a verbatim scrape
-   of a "© 2026 NASK, all rights reserved" advisory, and `.gitignore` does not
-   cover it. One `git add -A` would ship third-party copyrighted prose inside an
-   Apache-2.0 repository. `.playwright-mcp/` is likewise untracked and unignored.
-3. **MEMORY.md is stale on two numbers this roadmap had to correct:** the OUI DB
-   is 40,157 entries (recorded as 38,899) and the KEV catalog is 2026.09.16
-   (recorded as 2026-07-01).
-4. **`device_type` renders two different ways** — `smart_tv` in JSON (serde
+2. **`device_type` renders two different ways** — `smart_tv` in JSON (serde
    `rename_all`), `SmartTv` in HTML (`format!("{:?}")` at `html.rs:414`). There is
    no `Display` impl. Same field, two spellings, depending on export format.
-5. **`THIRD-PARTY-NOTICES.md` does not exist.** Several items above (Recog,
+3. **`THIRD-PARTY-NOTICES.md` does not exist.** Several items above (Recog,
    nuclei, SecLists, DefaultCreds, routersploit, HA tables, KEV, EPSS) create
    attribution obligations that need somewhere to live.

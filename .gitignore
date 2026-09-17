@@ -36,3 +36,6 @@ tarpaulin-report.html
 
 # libFuzzer -jobs worker logs
 fuzz-*.log
+
+# Playwright MCP scratch
+.playwright-mcp/
