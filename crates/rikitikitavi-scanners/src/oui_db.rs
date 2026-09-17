@@ -1,7 +1,7 @@
 //! IEEE OUI (MA-L) database — auto-generated.
 //!
 //! Source: <https://standards-oui.ieee.org/oui/oui.csv>
-//! Generated: 2026-02-14
+//! Generated: 2026-09-16
 //! Entries: 40,157 | Unique vendors: 19,830
 //!
 //! Each entry is a 3-byte OUI prefix paired with a vendor name.

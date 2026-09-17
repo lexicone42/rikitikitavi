@@ -6,6 +6,7 @@ and produces a sorted Rust array with binary-search lookup.
 """
 
 import csv
+import datetime
 import sys
 import unicodedata
 from collections import defaultdict
@@ -208,10 +209,11 @@ def main():
 
     # Generate Rust source
     out = sys.stdout
+    today = datetime.date.today().isoformat()
     out.write(f"""//! IEEE OUI (MA-L) database — auto-generated.
 //!
 //! Source: <https://standards-oui.ieee.org/oui/oui.csv>
-//! Generated: 2026-02-14
+//! Generated: {today}
 //! Entries: {len(entries):,} | Unique vendors: {unique_vendors:,}
 //!
 //! Each entry is a 3-byte OUI prefix paired with a vendor name.
