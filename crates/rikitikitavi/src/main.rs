@@ -599,9 +599,9 @@ fn device_identity_label(d: &rikitikitavi_models::Device) -> String {
     let name = d.vendor.as_deref().or(d.hostname.as_deref());
     match (name, d.device_type) {
         (Some(n), DeviceType::Unknown) => format!("({n})"),
-        (Some(n), k) => format!("{n} ({k:?})"),
+        (Some(n), k) => format!("{n} ({k})"),
         (None, DeviceType::Unknown) => String::new(),
-        (None, k) => format!("({k:?})"),
+        (None, k) => format!("({k})"),
     }
 }
 

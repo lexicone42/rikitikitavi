@@ -45,8 +45,30 @@ pub enum DeviceType {
     SmartTv,    // Serializes as "smart_tv" due to rename_all
     IoT,        // Serializes as "io_t" (hmm, not perfect!)
     Printer,
+    Hub,        // Hubs hold every other device's credentials
+    SmartLock,
+    EvCharger,
     Unknown,
 }
+
+// ── WHY THE REAL `DeviceType` DROPPED THE DERIVE ──────────────────────────
+//
+// The real enum (crates/rikitikitavi-models/src/device.rs) hand-writes
+// `Serialize`/`Deserialize` instead. Two things the derive could not give it:
+//
+//  1. A single source of truth for the name. `DeviceType::as_str` feeds serde,
+//     `Display`, and the HTML report, so JSON and HTML cannot spell the same
+//     device type differently (they used to: "smart_tv" vs "SmartTv").
+//  2. Forward compatibility. The derive rejects an unknown variant name, so a
+//     scan file written by a newer build failed to load entirely. The hand
+//     written `Deserialize` maps an unrecognised name to `Unknown`.
+//
+// `#[serde(other)]` looks like the fix for (2) but does not apply: serde only
+// allows it on internally- or adjacently-tagged enums, not on a plain enum
+// serialized as a string.
+//
+// The cost of hand-writing is that `as_str` must keep the legacy spellings,
+// `io_t` included — the wire format is data other people already have on disk.
 
 // ── SERDE IN ACTION ───────────────────────────────────────────────────────
 

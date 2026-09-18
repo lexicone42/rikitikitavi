@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Roadmap wave 1 (see docs/ROADMAP.md).
+
+- Six new scanners: Google Cast, PaperCut NG/MF (CVE-2026-81578/82078), TP-Link
+  Kasa (unauthenticated local control on 9999), Tuya local protocol, Hikvision
+  SADP discovery, Modbus/SunSpec on solar, battery and EV equipment. All probes
+  are read-only and honour exclusions.
+- ASUS "AyySSHush" backdoor check: SSH on TCP 53282 (CVE-2023-39780, KEV) and
+  SSH banners on non-standard gateway ports.
+- `DeviceType` gains 13 variants (hub, smart lock, thermostat, EV charger,
+  inverter, NVR, doorbell, vacuum, smart plug, speaker, appliance, 3D printer,
+  sensor) plus a free-text `device_subtype`; one canonical snake_case spelling
+  in JSON, HTML, TUI and terminal output; unknown names read as `unknown`.
+- CISA Vulnrichment SSVC (CC0) embedded for the CVEs the scanners emit: the
+  `poc` exploitation tier and CWE backfill feed risk scoring.
+- 14 ports added to the common scan list; THIRD-PARTY-NOTICES.md added.
+
 ## 0.3.0 — 2026-09-16
 
 Hardening pass before the first shared release. Every change below is covered by

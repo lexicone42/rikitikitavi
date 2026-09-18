@@ -72,6 +72,12 @@ impl ScannerRegistry {
                 Box::new(crate::snmp::SnmpScanner),
                 Box::new(crate::rtsp::RtspScanner),
                 Box::new(crate::upnp_igd::UpnpIgdScanner),
+                Box::new(crate::cast::CastScanner),
+                Box::new(crate::kasa::KasaScanner),
+                Box::new(crate::modbus::ModbusScanner),
+                Box::new(crate::papercut::PaperCutScanner),
+                Box::new(crate::sadp::SadpScanner),
+                Box::new(crate::tuya::TuyaScanner),
             ],
         }
     }

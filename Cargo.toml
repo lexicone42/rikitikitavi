@@ -20,6 +20,7 @@ license = "Apache-2.0"
 repository = "https://github.com/lexicone42/rikitikitavi"
 
 [workspace.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

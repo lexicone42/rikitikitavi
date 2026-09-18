@@ -32,6 +32,10 @@ chrono.workspace = true
 x509-parser.workspace = true
 pcap = { workspace = true, optional = true }
 
+serde_json.workspace = true
+
+aws-lc-rs.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 

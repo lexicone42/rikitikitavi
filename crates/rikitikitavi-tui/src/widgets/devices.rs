@@ -49,6 +49,19 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                 rikitikitavi_models::DeviceType::IoT => "🏠",
                 rikitikitavi_models::DeviceType::GameConsole => "🎮",
                 rikitikitavi_models::DeviceType::MediaPlayer => "🎵",
+                rikitikitavi_models::DeviceType::Hub => "🔗",
+                rikitikitavi_models::DeviceType::SmartLock => "🔒",
+                rikitikitavi_models::DeviceType::Thermostat => "🌡",
+                rikitikitavi_models::DeviceType::EvCharger => "🚗",
+                rikitikitavi_models::DeviceType::Inverter => "☀",
+                rikitikitavi_models::DeviceType::Nvr => "📼",
+                rikitikitavi_models::DeviceType::Doorbell => "🔔",
+                rikitikitavi_models::DeviceType::Vacuum => "🧹",
+                rikitikitavi_models::DeviceType::SmartPlug => "🔌",
+                rikitikitavi_models::DeviceType::Speaker => "🔊",
+                rikitikitavi_models::DeviceType::Appliance => "🧺",
+                rikitikitavi_models::DeviceType::Printer3d => "⚙",
+                rikitikitavi_models::DeviceType::Sensor => "📊",
                 rikitikitavi_models::DeviceType::Unknown => "❓",
             };
 
@@ -57,7 +70,11 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                 .mac
                 .map_or_else(|| "Unknown".to_owned(), |m| m.to_string());
             let display_name = device.hostname.as_deref().unwrap_or(&ip_str).to_owned();
-            let type_str = format!("{:?}", device.device_type);
+            // `Display` is the JSON spelling, so the TUI and the report agree.
+            let type_str = device.device_subtype.as_ref().map_or_else(
+                || device.device_type.to_string(),
+                |sub| format!("{} ({sub})", device.device_type),
+            );
 
             let mut lines = vec![
                 Line::from(""),

@@ -727,31 +727,54 @@ const fn detail_score(f: &Finding) -> u32 {
     score
 }
 
-/// Classify device type based on which ports are open.
-fn classify_by_ports(open_ports: &[u16]) -> Option<DeviceType> {
-    if open_ports.contains(&9100) || open_ports.contains(&631) {
-        return Some(DeviceType::Printer);
+/// Classify device type from open ports, with a free-text subtype naming the
+/// signature that matched. Product-specific signatures are tested before generic
+/// service ports.
+fn classify_by_ports(open_ports: &[u16]) -> Option<(DeviceType, Option<&'static str>)> {
+    let has = |port: u16| open_ports.contains(&port);
+
+    if has(37777) || has(34567) {
+        return Some((DeviceType::Nvr, Some("dahua_xmeye")));
     }
-    if open_ports.contains(&554) || open_ports.contains(&8554) {
-        return Some(DeviceType::Camera);
+    if has(8123) {
+        return Some((DeviceType::Hub, Some("home_assistant")));
     }
-    if open_ports.contains(&1883) || open_ports.contains(&8883) {
-        return Some(DeviceType::IoT);
+    if has(1400) {
+        return Some((DeviceType::Speaker, Some("sonos")));
     }
-    if open_ports.contains(&62078) {
-        return Some(DeviceType::Phone);
+    if has(7125) {
+        return Some((DeviceType::Printer3d, Some("moonraker")));
     }
-    if open_ports.contains(&5000) && open_ports.contains(&5001) {
-        return Some(DeviceType::Nas);
+    if has(502) {
+        // Modbus/TCP on a home LAN is solar, battery or EVSE gear.
+        return Some((DeviceType::Inverter, Some("modbus_tcp")));
     }
-    if open_ports.contains(&8443) && open_ports.contains(&8880) {
-        return Some(DeviceType::Server);
+    if has(32400) {
+        return Some((DeviceType::MediaPlayer, Some("plex")));
     }
-    if open_ports.contains(&3689) || open_ports.contains(&5353) {
-        return Some(DeviceType::MediaPlayer);
+    if has(9100) || has(631) {
+        return Some((DeviceType::Printer, None));
     }
-    if open_ports.contains(&3389) {
-        return Some(DeviceType::Desktop);
+    if has(554) || has(8554) {
+        return Some((DeviceType::Camera, None));
+    }
+    if has(1883) || has(8883) {
+        return Some((DeviceType::IoT, Some("mqtt_broker")));
+    }
+    if has(62078) {
+        return Some((DeviceType::Phone, Some("ios_lockdownd")));
+    }
+    if has(5000) && has(5001) {
+        return Some((DeviceType::Nas, None));
+    }
+    if has(8443) && has(8880) {
+        return Some((DeviceType::Server, Some("unifi_controller")));
+    }
+    if has(3689) || has(5353) {
+        return Some((DeviceType::MediaPlayer, None));
+    }
+    if has(3389) {
+        return Some((DeviceType::Desktop, Some("windows_rdp")));
     }
     None
 }
@@ -805,14 +828,24 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
             {
                 device.device_type = dt;
             }
+            if let Some(subtype) = &hint.device_subtype
+                && device.device_subtype.is_none()
+            {
+                device.device_subtype = Some(subtype.clone());
+            }
         }
     }
 
     for device in &mut ctx.discovered_devices {
         if device.device_type == DeviceType::Unknown && !device.open_ports.is_empty() {
             let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
-            if let Some(dt) = classify_by_ports(&ports) {
+            if let Some((dt, subtype)) = classify_by_ports(&ports) {
                 device.device_type = dt;
+                if let Some(subtype) = subtype
+                    && device.device_subtype.is_none()
+                {
+                    device.device_subtype = Some(subtype.to_owned());
+                }
             }
         }
     }
@@ -896,6 +929,10 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
                 device.device_type = dt;
                 changed = true;
             }
+            if let Some(subtype) = &hint.device_subtype {
+                subtype.clone_into(device.device_subtype.get_or_insert_with(String::new));
+                changed = true;
+            }
             if let Some(os) = &hint.os_guess {
                 os.clone_into(device.os_guess.get_or_insert_with(String::new));
                 changed = true;
@@ -945,35 +982,43 @@ fn dedup_devices(devices: &mut Vec<Device>) {
     *devices = keep.into_iter().map(|i| devices[i].clone()).collect();
 }
 
-/// Copy `device_type`, `vendor`, `hostname`, and `os_guess` between devices sharing a MAC
+/// Identity fields shared by devices behind one MAC.
+#[derive(Default)]
+struct MacSiblingInfo {
+    device_type: DeviceType,
+    device_subtype: Option<String>,
+    vendor: Option<String>,
+    hostname: Option<String>,
+    os_guess: Option<String>,
+}
+
+/// Copy `device_type`, `device_subtype`, `vendor`, `hostname`, and `os_guess` between devices sharing a MAC
 /// (same host seen at several IPs). Only fills fields that are unset/Unknown.
 fn propagate_mac_siblings(devices: &mut [Device]) {
     use std::collections::HashMap;
 
     // Keyed by canonical `MacAddr` so textual MAC variants merge.
-    let mut mac_info: HashMap<
-        rikitikitavi_models::MacAddr,
-        (DeviceType, Option<String>, Option<String>, Option<String>),
-    > = HashMap::new();
+    let mut mac_info: HashMap<rikitikitavi_models::MacAddr, MacSiblingInfo> = HashMap::new();
 
     for device in devices.iter() {
         let Some(mac) = device.mac else {
             continue;
         };
-        let entry = mac_info
-            .entry(mac)
-            .or_insert((DeviceType::Unknown, None, None, None));
-        if device.device_type != DeviceType::Unknown && entry.0 == DeviceType::Unknown {
-            entry.0 = device.device_type;
+        let entry = mac_info.entry(mac).or_default();
+        if device.device_type != DeviceType::Unknown && entry.device_type == DeviceType::Unknown {
+            entry.device_type = device.device_type;
         }
-        if entry.1.is_none() {
-            entry.1.clone_from(&device.vendor);
+        if entry.device_subtype.is_none() {
+            entry.device_subtype.clone_from(&device.device_subtype);
         }
-        if entry.2.is_none() {
-            entry.2.clone_from(&device.hostname);
+        if entry.vendor.is_none() {
+            entry.vendor.clone_from(&device.vendor);
         }
-        if entry.3.is_none() {
-            entry.3.clone_from(&device.os_guess);
+        if entry.hostname.is_none() {
+            entry.hostname.clone_from(&device.hostname);
+        }
+        if entry.os_guess.is_none() {
+            entry.os_guess.clone_from(&device.os_guess);
         }
     }
 
@@ -981,18 +1026,22 @@ fn propagate_mac_siblings(devices: &mut [Device]) {
         let Some(mac) = device.mac else {
             continue;
         };
-        if let Some((dt, vendor, hostname, os)) = mac_info.get(&mac) {
-            if device.device_type == DeviceType::Unknown && *dt != DeviceType::Unknown {
-                device.device_type = *dt;
+        if let Some(info) = mac_info.get(&mac) {
+            if device.device_type == DeviceType::Unknown && info.device_type != DeviceType::Unknown
+            {
+                device.device_type = info.device_type;
+            }
+            if device.device_subtype.is_none() {
+                device.device_subtype.clone_from(&info.device_subtype);
             }
             if device.vendor.is_none() {
-                device.vendor.clone_from(vendor);
+                device.vendor.clone_from(&info.vendor);
             }
             if device.hostname.is_none() {
-                device.hostname.clone_from(hostname);
+                device.hostname.clone_from(&info.hostname);
             }
             if device.os_guess.is_none() {
-                device.os_guess.clone_from(os);
+                device.os_guess.clone_from(&info.os_guess);
             }
         }
     }
@@ -1365,42 +1414,110 @@ mod tests {
         assert_eq!(result.len(), 2);
     }
 
+    /// Type only; the subtype is asserted separately where it carries information.
+    fn port_type(ports: &[u16]) -> Option<DeviceType> {
+        classify_by_ports(ports).map(|(dt, _)| dt)
+    }
+
     #[test]
     fn test_classify_by_ports_printer() {
-        assert_eq!(
-            classify_by_ports(&[80, 443, 9100, 631]),
-            Some(DeviceType::Printer)
-        );
+        assert_eq!(port_type(&[80, 443, 9100, 631]), Some(DeviceType::Printer));
     }
 
     #[test]
     fn test_classify_by_ports_camera() {
-        assert_eq!(classify_by_ports(&[80, 554]), Some(DeviceType::Camera));
+        assert_eq!(port_type(&[80, 554]), Some(DeviceType::Camera));
     }
 
     #[test]
     fn test_classify_by_ports_iot() {
-        assert_eq!(classify_by_ports(&[1883]), Some(DeviceType::IoT));
+        assert_eq!(port_type(&[1883]), Some(DeviceType::IoT));
     }
 
     #[test]
     fn test_classify_by_ports_nas() {
-        assert_eq!(classify_by_ports(&[5000, 5001, 443]), Some(DeviceType::Nas));
+        assert_eq!(port_type(&[5000, 5001, 443]), Some(DeviceType::Nas));
     }
 
     #[test]
     fn test_classify_by_ports_phone() {
-        assert_eq!(classify_by_ports(&[62078]), Some(DeviceType::Phone));
+        assert_eq!(port_type(&[62078]), Some(DeviceType::Phone));
     }
 
     #[test]
     fn test_classify_by_ports_desktop() {
-        assert_eq!(classify_by_ports(&[3389]), Some(DeviceType::Desktop));
+        assert_eq!(port_type(&[3389]), Some(DeviceType::Desktop));
     }
 
     #[test]
     fn test_classify_by_ports_none() {
         assert_eq!(classify_by_ports(&[80, 443]), None);
+    }
+
+    #[test]
+    fn classify_by_ports_widened_classes() {
+        assert_eq!(
+            classify_by_ports(&[80, 37777]),
+            Some((DeviceType::Nvr, Some("dahua_xmeye")))
+        );
+        assert_eq!(
+            classify_by_ports(&[8123]),
+            Some((DeviceType::Hub, Some("home_assistant")))
+        );
+        assert_eq!(
+            classify_by_ports(&[1400, 5353]),
+            Some((DeviceType::Speaker, Some("sonos")))
+        );
+        assert_eq!(
+            classify_by_ports(&[7125]),
+            Some((DeviceType::Printer3d, Some("moonraker")))
+        );
+        assert_eq!(
+            classify_by_ports(&[502]),
+            Some((DeviceType::Inverter, Some("modbus_tcp")))
+        );
+        assert_eq!(
+            classify_by_ports(&[32400]),
+            Some((DeviceType::MediaPlayer, Some("plex")))
+        );
+    }
+
+    /// A camera port on an NVR must not downgrade it to `Camera`.
+    #[test]
+    fn classify_by_ports_prefers_specific_signature() {
+        assert_eq!(port_type(&[554, 80, 37777]), Some(DeviceType::Nvr));
+        assert_eq!(port_type(&[5353, 1400]), Some(DeviceType::Speaker));
+    }
+
+    #[test]
+    fn propagate_mac_siblings_copies_subtype() {
+        let mut devices = vec![
+            Device::new(ip("10.0.0.1"))
+                .with_mac("aa:bb:cc:dd:ee:ff")
+                .with_device_type(DeviceType::Hub)
+                .with_device_subtype("home_assistant"),
+            Device::new(ip("10.0.0.2")).with_mac("AA-BB-CC-DD-EE-FF"),
+        ];
+        propagate_mac_siblings(&mut devices);
+        assert_eq!(devices[1].device_type, DeviceType::Hub);
+        assert_eq!(devices[1].device_subtype.as_deref(), Some("home_assistant"));
+    }
+
+    #[test]
+    fn post_enrich_devices_applies_subtype_hint() {
+        let mut devices = vec![Device::new(ip("10.0.0.5"))];
+        let findings = vec![
+            Finding::new("mdns", "hint", "desc", Severity::Info)
+                .with_ip(ip("10.0.0.5"))
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_device_type(DeviceType::Speaker)
+                        .with_device_subtype("sonos"),
+                ),
+        ];
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].device_type, DeviceType::Speaker);
+        assert_eq!(devices[0].device_subtype.as_deref(), Some("sonos"));
     }
 
     #[test]

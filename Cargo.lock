@@ -2549,6 +2549,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "chrono",
  "futures",
  "hickory-resolver",
@@ -2561,6 +2562,7 @@ dependencies = [
  "rikitikitavi-network",
  "rustls",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "tokio",
  "tokio-rustls",

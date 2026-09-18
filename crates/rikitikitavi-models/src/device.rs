@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::net::IpAddr;
 
 use crate::mac::MacAddr;
@@ -24,6 +25,9 @@ pub struct Device {
     pub vendor: Option<String>,
     /// Classified device type.
     pub device_type: DeviceType,
+    /// Free-text refinement of `device_type` (model family or role), e.g. `"hue_bridge"`.
+    #[serde(default)]
+    pub device_subtype: Option<String>,
     /// Open ports discovered.
     pub open_ports: Vec<OpenPort>,
     /// When first seen on the network.
@@ -35,9 +39,15 @@ pub struct Device {
 }
 
 /// Classified device type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
+///
+/// The wire name is the serde `snake_case` spelling of the variant (`smart_tv`,
+/// `access_point`, and the legacy `io_t`). [`DeviceType::as_str`] and the
+/// [`Display`](fmt::Display) impl emit that same string, so JSON, HTML and text
+/// output spell a type identically.
+///
+/// Deserialization is lenient: an unrecognised name becomes [`DeviceType::Unknown`]
+/// rather than an error, so scan history written by a newer build still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DeviceType {
     Router,
     Switch,
@@ -54,8 +64,126 @@ pub enum DeviceType {
     IoT,
     GameConsole,
     MediaPlayer,
+    /// Aggregation point holding other devices' credentials (`SmartThings`, Hue, Caseta).
+    Hub,
+    SmartLock,
+    Thermostat,
+    EvCharger,
+    /// Solar / battery inverter or gateway.
+    Inverter,
+    /// Network video recorder.
+    Nvr,
+    Doorbell,
+    Vacuum,
+    SmartPlug,
+    Speaker,
+    /// Networked white goods.
+    Appliance,
+    Printer3d,
+    Sensor,
     #[default]
     Unknown,
+}
+
+impl DeviceType {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 29] = [
+        Self::Router,
+        Self::Switch,
+        Self::AccessPoint,
+        Self::Desktop,
+        Self::Laptop,
+        Self::Phone,
+        Self::Tablet,
+        Self::Server,
+        Self::Nas,
+        Self::Printer,
+        Self::Camera,
+        Self::SmartTv,
+        Self::IoT,
+        Self::GameConsole,
+        Self::MediaPlayer,
+        Self::Hub,
+        Self::SmartLock,
+        Self::Thermostat,
+        Self::EvCharger,
+        Self::Inverter,
+        Self::Nvr,
+        Self::Doorbell,
+        Self::Vacuum,
+        Self::SmartPlug,
+        Self::Speaker,
+        Self::Appliance,
+        Self::Printer3d,
+        Self::Sensor,
+        Self::Unknown,
+    ];
+
+    /// Wire and display name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Router => "router",
+            Self::Switch => "switch",
+            Self::AccessPoint => "access_point",
+            Self::Desktop => "desktop",
+            Self::Laptop => "laptop",
+            Self::Phone => "phone",
+            Self::Tablet => "tablet",
+            Self::Server => "server",
+            Self::Nas => "nas",
+            Self::Printer => "printer",
+            Self::Camera => "camera",
+            Self::SmartTv => "smart_tv",
+            // Legacy spelling from `rename_all = "snake_case"`; kept so stored
+            // scan history still reads.
+            Self::IoT => "io_t",
+            Self::GameConsole => "game_console",
+            Self::MediaPlayer => "media_player",
+            Self::Hub => "hub",
+            Self::SmartLock => "smart_lock",
+            Self::Thermostat => "thermostat",
+            Self::EvCharger => "ev_charger",
+            Self::Inverter => "inverter",
+            Self::Nvr => "nvr",
+            Self::Doorbell => "doorbell",
+            Self::Vacuum => "vacuum",
+            Self::SmartPlug => "smart_plug",
+            Self::Speaker => "speaker",
+            Self::Appliance => "appliance",
+            Self::Printer3d => "printer3d",
+            Self::Sensor => "sensor",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a wire name. `iot` is accepted as an alias for the legacy `io_t`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        if name == "iot" {
+            return Some(Self::IoT);
+        }
+        Self::ALL.into_iter().find(|t| t.as_str() == name)
+    }
+}
+
+impl fmt::Display for DeviceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for DeviceType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeviceType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&name).unwrap_or(Self::Unknown))
+    }
 }
 
 impl Device {
@@ -68,6 +196,7 @@ impl Device {
             hostname: None,
             vendor: None,
             device_type: DeviceType::Unknown,
+            device_subtype: None,
             open_ports: Vec::new(),
             first_seen: now,
             last_seen: now,
@@ -94,6 +223,13 @@ impl Device {
     #[must_use]
     pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
         self.hostname = Some(hostname.into());
+        self
+    }
+
+    /// Builder-style setter for device subtype.
+    #[must_use]
+    pub fn with_device_subtype(mut self, subtype: impl Into<String>) -> Self {
+        self.device_subtype = Some(subtype.into());
         self
     }
 
@@ -137,6 +273,9 @@ pub struct DeviceHint {
     /// Classified device type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_type: Option<DeviceType>,
+    /// Free-text refinement of `device_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_subtype: Option<String>,
     /// Operating system guess from banners / service probes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_guess: Option<String>,
@@ -177,6 +316,13 @@ impl DeviceHint {
         self
     }
 
+    /// Builder-style setter for device subtype.
+    #[must_use]
+    pub fn with_device_subtype(mut self, subtype: impl Into<String>) -> Self {
+        self.device_subtype = Some(subtype.into());
+        self
+    }
+
     /// Builder-style setter for OS guess.
     #[must_use]
     pub fn with_os_guess(mut self, os_guess: impl Into<String>) -> Self {
@@ -191,6 +337,7 @@ impl DeviceHint {
             && self.model.is_none()
             && self.hostname.is_none()
             && self.device_type.is_none()
+            && self.device_subtype.is_none()
             && self.os_guess.is_none()
     }
 }
@@ -247,30 +394,151 @@ mod tests {
 
     #[test]
     fn test_device_type_serialization() {
-        let variants = [
-            DeviceType::Router,
-            DeviceType::Switch,
-            DeviceType::AccessPoint,
-            DeviceType::Desktop,
-            DeviceType::Laptop,
-            DeviceType::Phone,
-            DeviceType::Tablet,
-            DeviceType::Server,
-            DeviceType::Nas,
-            DeviceType::Printer,
-            DeviceType::Camera,
-            DeviceType::SmartTv,
-            DeviceType::IoT,
-            DeviceType::GameConsole,
-            DeviceType::MediaPlayer,
-            DeviceType::Unknown,
-        ];
-
-        for variant in &variants {
-            let json = serde_json::to_string(variant).unwrap();
+        for variant in DeviceType::ALL {
+            let json = serde_json::to_string(&variant).unwrap();
             let recovered: DeviceType = serde_json::from_str(&json).unwrap();
-            assert_eq!(recovered, *variant);
+            assert_eq!(recovered, variant);
         }
+    }
+
+    /// Wire names of the pre-widening variants are frozen: stored scan history
+    /// and suppression baselines depend on them.
+    #[test]
+    fn device_type_legacy_wire_names_unchanged() {
+        let legacy = [
+            (DeviceType::Router, "router"),
+            (DeviceType::Switch, "switch"),
+            (DeviceType::AccessPoint, "access_point"),
+            (DeviceType::Desktop, "desktop"),
+            (DeviceType::Laptop, "laptop"),
+            (DeviceType::Phone, "phone"),
+            (DeviceType::Tablet, "tablet"),
+            (DeviceType::Server, "server"),
+            (DeviceType::Nas, "nas"),
+            (DeviceType::Printer, "printer"),
+            (DeviceType::Camera, "camera"),
+            (DeviceType::SmartTv, "smart_tv"),
+            (DeviceType::IoT, "io_t"),
+            (DeviceType::GameConsole, "game_console"),
+            (DeviceType::MediaPlayer, "media_player"),
+            (DeviceType::Unknown, "unknown"),
+        ];
+        for (variant, name) in legacy {
+            assert_eq!(variant.as_str(), name);
+            assert_eq!(
+                serde_json::to_string(&variant).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn device_type_new_variants_have_wire_names() {
+        let added = [
+            (DeviceType::Hub, "hub"),
+            (DeviceType::SmartLock, "smart_lock"),
+            (DeviceType::Thermostat, "thermostat"),
+            (DeviceType::EvCharger, "ev_charger"),
+            (DeviceType::Inverter, "inverter"),
+            (DeviceType::Nvr, "nvr"),
+            (DeviceType::Doorbell, "doorbell"),
+            (DeviceType::Vacuum, "vacuum"),
+            (DeviceType::SmartPlug, "smart_plug"),
+            (DeviceType::Speaker, "speaker"),
+            (DeviceType::Appliance, "appliance"),
+            (DeviceType::Printer3d, "printer3d"),
+            (DeviceType::Sensor, "sensor"),
+        ];
+        for (variant, name) in added {
+            assert_eq!(variant.as_str(), name);
+            assert_eq!(DeviceType::from_name(name), Some(variant));
+        }
+    }
+
+    /// `Display` is the JSON spelling, so HTML and text output cannot drift from JSON.
+    #[test]
+    fn device_type_display_matches_json() {
+        for variant in DeviceType::ALL {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(format!("\"{variant}\""), json);
+        }
+    }
+
+    #[test]
+    fn device_type_all_names_are_unique() {
+        let mut names: Vec<&str> = DeviceType::ALL.iter().map(|t| t.as_str()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total);
+    }
+
+    #[test]
+    fn device_type_from_name_roundtrips_all() {
+        for variant in DeviceType::ALL {
+            assert_eq!(DeviceType::from_name(variant.as_str()), Some(variant));
+        }
+        assert_eq!(DeviceType::from_name("no_such_type"), None);
+    }
+
+    #[test]
+    fn device_type_iot_alias_accepted() {
+        assert_eq!(DeviceType::from_name("iot"), Some(DeviceType::IoT));
+        let d: DeviceType = serde_json::from_str("\"iot\"").unwrap();
+        assert_eq!(d, DeviceType::IoT);
+    }
+
+    /// A type written by a newer build must not fail the whole scan-history load.
+    #[test]
+    fn device_type_unknown_variant_deserializes_to_unknown() {
+        let d: DeviceType = serde_json::from_str("\"quantum_toaster\"").unwrap();
+        assert_eq!(d, DeviceType::Unknown);
+    }
+
+    #[test]
+    fn device_reads_json_without_device_subtype() {
+        let json = r#"{"ip":"192.168.1.5","mac":null,"hostname":null,"vendor":null,
+            "device_type":"io_t","open_ports":[],
+            "first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-01-01T00:00:00Z",
+            "os_guess":null}"#;
+        let device: Device = serde_json::from_str(json).unwrap();
+        assert_eq!(device.device_type, DeviceType::IoT);
+        assert!(device.device_subtype.is_none());
+    }
+
+    #[test]
+    fn device_reads_json_with_unknown_device_type() {
+        let json = r#"{"ip":"192.168.1.5","mac":null,"hostname":null,"vendor":null,
+            "device_type":"hovercraft","device_subtype":"eel",
+            "open_ports":[],
+            "first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-01-01T00:00:00Z",
+            "os_guess":null}"#;
+        let device: Device = serde_json::from_str(json).unwrap();
+        assert_eq!(device.device_type, DeviceType::Unknown);
+        assert_eq!(device.device_subtype.as_deref(), Some("eel"));
+    }
+
+    #[test]
+    fn device_subtype_roundtrip() {
+        let device = Device::new("10.0.0.7".parse().unwrap())
+            .with_device_type(DeviceType::Hub)
+            .with_device_subtype("hue_bridge");
+        let json = serde_json::to_string(&device).unwrap();
+        assert!(json.contains("\"device_subtype\":\"hue_bridge\""));
+        let recovered: Device = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.device_type, DeviceType::Hub);
+        assert_eq!(recovered.device_subtype.as_deref(), Some("hue_bridge"));
+    }
+
+    #[test]
+    fn device_hint_carries_subtype() {
+        let hint = DeviceHint::new()
+            .with_device_type(DeviceType::EvCharger)
+            .with_device_subtype("wall_connector");
+        assert!(!hint.is_empty());
+        let json = serde_json::to_string(&hint).unwrap();
+        let recovered: DeviceHint = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered, hint);
     }
 
     #[test]
@@ -413,6 +681,16 @@ mod tests {
             assert_eq!(device.ip, ip);
             assert_eq!(device.mac.map(|m| m.to_string()).as_deref(), Some(mac.as_str()));
             assert_eq!(device.hostname.as_deref(), Some(hostname.as_str()));
+        }
+
+        /// Any string deserializes to a `DeviceType` without panicking, and only
+        /// a real wire name yields a non-`Unknown` variant.
+        #[test]
+        fn prop_device_type_deserialize_never_panics(name in ".{0,40}") {
+            let json = serde_json::to_string(&name).unwrap();
+            let parsed: DeviceType = serde_json::from_str(&json).unwrap();
+            let expected = DeviceType::from_name(&name).unwrap_or(DeviceType::Unknown);
+            assert_eq!(parsed, expected);
         }
 
         /// Device JSON roundtrip preserves data

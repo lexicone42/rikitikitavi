@@ -58,7 +58,7 @@ sudo rikitikitavi monitor --interface wlan0
 
 ## Features
 
-### 25 Security Scanners
+### 31 Security Scanners
 
 Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
@@ -90,6 +90,12 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **WiFi Security** | Nearby network encryption grading (Open/WEP/WPA/WPA2/WPA3) |
 | **External Exposure** | Public IP detection, port forwarding (NAT traversal) checks |
 | **Credential Hygiene** | Anonymous FTP, SMB exposure, Telnet, RDP, HTTP admin no-auth |
+| **Google Cast** | Cast device identification via `eureka_info`, exposed setup endpoint (8008/8443) |
+| **PaperCut** | NG/MF build and edition from 9191 asset paths, CVE-2026-81578/82078 correlation |
+| **TP-Link Kasa** | Unauthenticated local control on 9999 (read-only `get_sysinfo`), geolocation disclosure |
+| **Tuya local** | Passive broadcast leak on UDP 6666/6667, control port 6668 |
+| **Hikvision SADP** | UDP 37020 discovery, firmware build date floor, CVE correlation |
+| **Modbus/SunSpec** | Inverters, batteries and EV chargers on 502, SunSpec identification (read-only) |
 | **Neighbor/Proximity** | Stub: registered for the `neighbor` perspective, returns no findings yet |
 | **Network Isolation** | Flat network detection, inter-VLAN routing, subnet analysis |
 | **Service Banners** | SSH version, HTTP headers, banner grabbing |
@@ -109,7 +115,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **UPnP-IGD** | Router WAN→LAN port forwards ("what's exposed to the internet?") |
 | **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(`rikitikitavi monitor`, feature `monitor`)* |
 
-The 25 registered scanners are every row except Passive WiFi, which is not in
+The 31 registered scanners are every row except Passive WiFi, which is not in
 `ScannerRegistry` and runs only through the `monitor` command.
 
 ### Exploit Intelligence & Confidence
@@ -199,7 +205,7 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 │  RIKITIKITAVI ─ Home Network Security Auditor                │
 ├──────────────────────────────────────────────────────────────┤
 │  Risk Score: 72/100 (C)      Scan: 2m 14s                   │
-│  ████████████████░░░░░░░░    25 scanners, 47 findings        │
+│  ████████████████░░░░░░░░    31 scanners, 47 findings        │
 │                                                              │
 │  CRIT ██  3    NEW   5       ┌─────────────────┐            │
 │  HIGH ████  7  CHG   2       │   ,:::::::,     │            │
@@ -410,7 +416,7 @@ host/port/service, CWE reference, and remediation steps with estimated effort:
           │                    │                     │
    ┌──────┴──────┐   ┌────────┴────────┐   ┌───────┴───────┐
    │   scanners  │   │    analysis     │   │    export     │
-   │ 25 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
+   │ 31 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
    │ + registry  │   │ attack paths    │   │ HTML, OCSF    │
    └──────┬──────┘   └────────┬────────┘   └───────────────┘
           │                    │
@@ -579,7 +585,7 @@ The runner (`runner.rs`) coordinates scanning:
    the previous results)
 2. **Enrichment** — discovered ports are grouped by IP to build device
    profiles, then injected into `ScanContext`
-3. **Phase 2** — remaining 22 scanners run concurrently via
+3. **Phase 2** — remaining 28 scanners run concurrently via
    `futures::future::join_all`, filtered by `relevant_ports()`
 4. **Deduplication** — when Phase 1 and Phase 2 produce findings for the same
    `(ip, port)`, the one with more detail wins (scored by evidence, CWE,
@@ -704,7 +710,7 @@ performance.
 ## Development
 
 ```bash
-# Run all tests (1322 tests across 17 binaries, incl. ~200 proptest invariants)
+# Run all tests (1608 tests across 17 binaries, incl. ~200 proptest invariants)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)

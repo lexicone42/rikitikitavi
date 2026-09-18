@@ -1,6 +1,10 @@
 use async_trait::async_trait;
-use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
+use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
+use rikitikitavi_models::config::ExclusionSet;
+use rikitikitavi_models::{
+    Device, DeviceHint, DeviceType, Finding, MacAddr, Remediation, ScanContext,
+};
+use rikitikitavi_network::ArpEntry;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -498,7 +502,7 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
 }
 
 /// Ports that send a banner immediately upon connection.
-const BANNER_PORTS: &[u16] = &[21, 22, 23, 25, 110, 143, 3306, 5432, 6379];
+const BANNER_PORTS: &[u16] = &[21, 22, 23, 25, 110, 143, 3306, 5432, 6379, 53282];
 
 /// Ports probed with an HTTP `HEAD` request.
 const HTTP_PORTS: &[u16] = &[80, 8080, 8443, 8888];
@@ -729,6 +733,319 @@ fn is_date_past(date_str: &str) -> bool {
         .is_some_and(|eol| eol < chrono::Utc::now().date_naive())
 }
 
+/// ASUS `AyySSHush` backdoor listener port (CVE-2023-39780, KEV 2025-06-02).
+const AYYSSHUSH_PORT: u16 = 53282;
+
+/// Alternate SSH ports an administrator commonly picks deliberately.
+const COMMON_ALT_SSH_PORTS: &[u16] = &[222, 2022, 2222, 22222];
+
+/// True if any early line is an RFC 4253 section 4.2 identification string.
+///
+/// `SSH-<protoversion>-<software>`, and protoversion always starts with a digit
+/// ("SSH-2.0-", "SSH-1.99-"). The digit check is what separates an identification
+/// string from public-key material (`ssh-rsa AAAA...`, `ssh-ed25519 ...`), which
+/// some services push unsolicited.
+fn is_ssh_banner(banner: &str) -> bool {
+    banner.lines().take(8).any(|line| {
+        line.trim_start()
+            .as_bytes()
+            .first_chunk::<5>()
+            .is_some_and(|p| p[..4].eq_ignore_ascii_case(b"SSH-") && p[4].is_ascii_digit())
+    })
+}
+
+/// What the scan knows about a host's routing role. The `AyySSHush` attribution
+/// needs more than an open port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostRole {
+    /// The host is this network's default gateway.
+    pub is_gateway: bool,
+    /// Device type or OUI vendor says router, access point or ASUS hardware.
+    pub router_like: bool,
+}
+
+impl HostRole {
+    /// The default gateway.
+    pub const GATEWAY: Self = Self {
+        is_gateway: true,
+        router_like: true,
+    };
+
+    /// A host with no known routing role.
+    pub const UNKNOWN: Self = Self {
+        is_gateway: false,
+        router_like: false,
+    };
+
+    /// Role of a discovered device.
+    fn of_device(device: &Device, is_gateway: bool) -> Self {
+        let router_like = is_gateway
+            || matches!(
+                device.device_type,
+                DeviceType::Router | DeviceType::AccessPoint
+            )
+            || device
+                .vendor
+                .as_deref()
+                .is_some_and(|v| v.to_lowercase().contains("asus"));
+        Self {
+            is_gateway,
+            router_like,
+        }
+    }
+}
+
+/// Remediation for an `AyySSHush`-style NVRAM SSH backdoor.
+fn ayysshush_remediation() -> Remediation {
+    Remediation {
+        description: "A firmware update does not evict the attacker's key: the authorized \
+                      key lives in NVRAM and survives both reboot and upgrade. Only a factory \
+                      reset followed by manual reconfiguration clears it."
+            .to_owned(),
+        steps: vec![
+            "Disconnect the router's WAN link before working on it.".to_owned(),
+            "Factory reset with the hardware reset button. Do not restore a settings \
+             backup — a backup re-imports the NVRAM entry."
+                .to_owned(),
+            "Reconfigure by hand: new admin password, SSH disabled, remote/WAN \
+             administration disabled, AiCloud disabled."
+                .to_owned(),
+            "Update to the latest firmware, then confirm SSH is off and no authorized \
+             key is listed in the administration UI."
+                .to_owned(),
+            "Rotate credentials and keys that were used across this router while the \
+             backdoor was reachable."
+                .to_owned(),
+        ],
+        effort: Some("30-60 minutes; the device loses its configuration".to_owned()),
+    }
+}
+
+/// Remediation when TCP/53282 answers on a host the scan cannot tie to ASUS
+/// hardware: identify the listener before acting on either reading.
+fn unattributed_port_remediation() -> Remediation {
+    Remediation {
+        description: "A relocated SSH server and a compromised router look identical from \
+                      outside. Identify what holds the port before acting."
+            .to_owned(),
+        steps: vec![
+            "On the host, name the listener: `ss -tlnp | grep 53282` (Linux) or \
+             `lsof -iTCP:53282 -sTCP:LISTEN` (macOS)."
+                .to_owned(),
+            "If it is a service or container port you published, record it in the baseline \
+             file so later scans stay quiet."
+                .to_owned(),
+            "If the host is in fact an ASUS router or access point, treat it as the \
+             AyySSHush backdoor: factory reset and reconfigure by hand. A firmware update \
+             leaves the attacker's NVRAM key in place."
+                .to_owned(),
+        ],
+        effort: Some("10 minutes to identify the listener".to_owned()),
+    }
+}
+
+/// Remediation for SSH on an unexpected port of the gateway: establish intent
+/// before the destructive step. The finding is `Probable`, not `Confirmed`.
+fn gateway_ssh_remediation(port: u16) -> Remediation {
+    Remediation {
+        description: "Consumer routers ship with SSH off. Establish whether you moved it \
+                      here before treating the router as compromised; the recovery is \
+                      destructive."
+            .to_owned(),
+        steps: vec![
+            format!(
+                "In the router's administration UI, check whether SSH is enabled and on port {port}."
+            ),
+            "Check the authorized-key list in the same UI. A key you do not recognise means \
+             the router is compromised."
+                .to_owned(),
+            "If SSH is deliberate, turn off remote/WAN administration for it and record the \
+             port in the baseline file so later scans stay quiet."
+                .to_owned(),
+            "If it is not deliberate, factory reset and reconfigure by hand. A firmware \
+             update leaves the attacker's NVRAM key in place, and a settings backup \
+             re-imports it."
+                .to_owned(),
+        ],
+        effort: Some("15 minutes to check; 30-60 more if a reset is needed".to_owned()),
+    }
+}
+
+/// TCP/53282 answering SSH on a router-shaped host: the campaign artefact.
+fn ayysshush_finding(ip: IpAddr, banner: &str) -> Finding {
+    Finding::new(
+        "services",
+        "ASUS AyySSHush SSH backdoor listener on TCP/53282",
+        &format!(
+            "An SSH server answered on {ip}:{AYYSSHUSH_PORT}. That port is the only \
+             network-visible artefact of the AyySSHush campaign against ASUS routers \
+             (CVE-2023-39780, CISA KEV 2025-06-02): the attacker enables SSH there and \
+             stores an authorized key in NVRAM. Logging is disabled and no malware is \
+             dropped, so nothing else shows. Treat the device as compromised until it \
+             has been factory reset and reconfigured by hand."
+        ),
+        Severity::Critical,
+    )
+    .with_ip(ip)
+    .with_port(AYYSSHUSH_PORT)
+    .with_service("SSH")
+    .with_cwe("CWE-78")
+    .with_confidence(Confidence::Confirmed)
+    .with_cve_ids(vec!["CVE-2023-39780".to_owned()])
+    .with_references(refs![
+        "https://www.greynoise.io/blog/stealthy-backdoor-campaign-affecting-asus-routers",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-39780",
+    ])
+    .with_evidence(banner)
+    .with_remediation(ayysshush_remediation())
+}
+
+/// TCP/53282 answering SSH on a host the scan cannot tie to ASUS hardware. The
+/// port is the campaign's; the attribution is not. A relocated SSH server or a
+/// published container port lands here too, so it stays `Probable` and the title
+/// claims only what the protocol answered.
+fn unattributed_port_finding(ip: IpAddr, banner: &str) -> Finding {
+    Finding::new(
+        "services",
+        "SSH server on TCP/53282, the AyySSHush backdoor port",
+        &format!(
+            "An SSH server answered on {ip}:{AYYSSHUSH_PORT}. That is the listener the \
+             AyySSHush campaign opens on compromised ASUS routers (CVE-2023-39780, CISA KEV \
+             2025-06-02), but this host does not look like an ASUS router or access point, so \
+             a deliberately relocated SSH server or a published container port explains it \
+             equally well. Identify the listener before acting."
+        ),
+        Severity::High,
+    )
+    .with_ip(ip)
+    .with_port(AYYSSHUSH_PORT)
+    .with_service("SSH")
+    .with_cwe("CWE-912")
+    .with_confidence(Confidence::Probable)
+    .with_references(refs![
+        "https://www.greynoise.io/blog/stealthy-backdoor-campaign-affecting-asus-routers",
+    ])
+    .with_evidence(banner)
+    .with_remediation(unattributed_port_remediation())
+}
+
+/// SSH answering on a port it has no business listening on.
+///
+/// TCP/53282 is the `AyySSHush` artefact: the attacker enables SSH there and writes a
+/// key into NVRAM, so it outlives reboots and firmware updates. The campaign
+/// attribution — and its destructive remediation — is asserted only for a
+/// router-shaped host; elsewhere the same answer is reported neutrally. SSH on any
+/// other non-22 port of the gateway is the same shape with a benign explanation
+/// available, so it stays `Probable`.
+pub fn classify_backdoor_ssh(
+    ip: IpAddr,
+    port: u16,
+    banner: &str,
+    role: HostRole,
+) -> Option<Finding> {
+    if !is_ssh_banner(banner) {
+        return None;
+    }
+
+    if port == AYYSSHUSH_PORT {
+        return Some(if role.router_like {
+            ayysshush_finding(ip, banner)
+        } else {
+            unattributed_port_finding(ip, banner)
+        });
+    }
+
+    if !role.is_gateway || port == 22 {
+        return None;
+    }
+
+    let severity = if COMMON_ALT_SSH_PORTS.contains(&port) {
+        Severity::Medium
+    } else {
+        Severity::High
+    };
+
+    Some(
+        Finding::new(
+            "services",
+            "SSH listening on a non-standard port on the gateway",
+            &format!(
+                "An SSH server answered on the gateway at {ip}:{port}. Consumer routers ship \
+                 with SSH off, and campaigns such as AyySSHush (CVE-2023-39780) enable it on an \
+                 arbitrary high port with an attacker key stored in NVRAM. If you did not move \
+                 SSH to this port yourself, treat the router as compromised: a firmware update \
+                 does not remove such a key."
+            ),
+            severity,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("SSH")
+        .with_cwe("CWE-912")
+        .with_confidence(Confidence::Probable)
+        .with_references(refs![
+            "https://www.greynoise.io/blog/stealthy-backdoor-campaign-affecting-asus-routers",
+        ])
+        .with_evidence(banner)
+        .with_remediation(gateway_ssh_remediation(port)),
+    )
+}
+
+/// Banner-grab one TCP port directly and classify what answers. Used for ports no
+/// scan list reaches, where the answering port is itself the signal.
+async fn probe_ssh_port(ip: IpAddr, port: u16, role: HostRole) -> Option<Finding> {
+    let banner = grab_banner(ip, port).await?;
+    classify_backdoor_ssh(ip, port, &banner, role)
+}
+
+/// True when `entries` resolve `ip` to at least one MAC and none of them, nor the
+/// IP itself, is excluded.
+fn arp_clears_ip(entries: &[ArpEntry], ip: IpAddr, exclusions: &ExclusionSet) -> bool {
+    if exclusions.excludes_ip(ip) {
+        return false;
+    }
+    let mut resolved = false;
+    for entry in entries.iter().filter(|e| e.ip == ip) {
+        let Ok(mac) = entry.mac.parse::<MacAddr>() else {
+            continue;
+        };
+        if exclusions.excludes_mac(mac) {
+            return false;
+        }
+        resolved = true;
+    }
+    resolved
+}
+
+/// May we connect to an address that no discovered device vouched for? With
+/// exclusions configured, the ARP cache must resolve it to a MAC that is not
+/// excluded: `ExclusionSet` excludes by MAC as well as by IP, an excluded device is
+/// simply absent from `discovered_devices`, and an unresolved MAC cannot be cleared.
+fn unvouched_probe_allowed(ip: IpAddr, exclusions: &ExclusionSet) -> bool {
+    exclusions.is_empty()
+        || rikitikitavi_network::read_arp_cache()
+            .is_ok_and(|entries| arp_clears_ip(&entries, ip, exclusions))
+}
+
+/// ARP entries in scope and excluded by neither IP nor MAC.
+fn select_banner_targets(
+    entries: &[ArpEntry],
+    in_scope: impl Fn(IpAddr) -> bool,
+    exclusions: &ExclusionSet,
+) -> Vec<IpAddr> {
+    entries
+        .iter()
+        .filter(|e| in_scope(e.ip))
+        .filter(|e| !exclusions.excludes_ip(e.ip))
+        .filter(|e| {
+            !e.mac
+                .parse::<MacAddr>()
+                .is_ok_and(|m| exclusions.excludes_mac(m))
+        })
+        .map(|e| e.ip)
+        .collect()
+}
+
 /// Classify a banner finding based on the service and version info.
 #[allow(clippy::too_many_lines)]
 fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
@@ -801,7 +1118,7 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         );
     }
 
-    if port == 22 && banner_lower.contains("ssh") {
+    if is_ssh_banner(banner) || (port == 22 && banner_lower.contains("ssh")) {
         if banner_lower.contains("dropbear") {
             let hint = DeviceHint::new()
                 .with_device_type(DeviceType::IoT)
@@ -1381,11 +1698,14 @@ const fn is_likely_http_port(port: u16) -> bool {
 }
 
 /// Run deep protocol-specific probes on a port based on its well-known service.
-async fn deep_probe(ip: IpAddr, port: u16) -> Vec<Finding> {
-    match port {
-        22 => probe_ssh_kex(ip, port)
+async fn deep_probe(ip: IpAddr, port: u16, banner: Option<&str>) -> Vec<Finding> {
+    if port == 22 || banner.is_some_and(is_ssh_banner) {
+        return probe_ssh_kex(ip, port)
             .await
-            .map_or_else(Vec::new, |kex| classify_ssh_kex(ip, port, &kex)),
+            .map_or_else(Vec::new, |kex| classify_ssh_kex(ip, port, &kex));
+    }
+
+    match port {
         25 | 587 => probe_smtp_ehlo(ip, port)
             .await
             .map_or_else(Vec::new, |ehlo| classify_smtp_ehlo(ip, port, &ehlo)),
@@ -1394,6 +1714,46 @@ async fn deep_probe(ip: IpAddr, port: u16) -> Vec<Finding> {
             .map_or_else(Vec::new, |feat| classify_ftp_feat(ip, port, &feat)),
         _ => Vec::new(),
     }
+}
+
+/// Banner and protocol probes for one discovered device.
+async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Finding> {
+    let ip = device.ip;
+    let mut findings = Vec::new();
+
+    // TCP/53282 is in no port list, so reach it deliberately on router-shaped
+    // hosts — unless the port scanner was configured wide enough to find it first.
+    if active && role.router_like && !device.open_ports.iter().any(|p| p.port == AYYSSHUSH_PORT) {
+        findings.extend(probe_ssh_port(ip, AYYSSHUSH_PORT, role).await);
+    }
+
+    for open_port in &device.open_ports {
+        let port = open_port.port;
+        if BANNER_PORTS.contains(&port) {
+            let banner = grab_banner(ip, port).await;
+            if let Some(banner) = banner.as_deref() {
+                findings.extend(classify_banner(ip, port, banner));
+                findings.extend(check_os_eol(ip, port, banner));
+                findings.extend(classify_backdoor_ssh(ip, port, banner, role));
+            }
+            if active {
+                findings.extend(deep_probe(ip, port, banner.as_deref()).await);
+            }
+        } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
+            if let Some(server) = grab_http_server(ip, port).await {
+                findings.push(classify_http_server(ip, port, &server));
+            }
+        } else {
+            // Unknown port: plain banner grab
+            if let Some(banner) = grab_banner(ip, port).await {
+                findings.extend(classify_banner(ip, port, &banner));
+                findings.extend(check_os_eol(ip, port, &banner));
+                findings.extend(classify_backdoor_ssh(ip, port, &banner, role));
+            }
+        }
+    }
+
+    findings
 }
 
 #[async_trait]
@@ -1418,6 +1778,18 @@ impl Scanner for ServicesScanner {
         tracing::info!("running service banner scan");
         let mut findings = Vec::new();
 
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "services".to_owned(),
+                message: e.to_string(),
+            })?;
+        let active = ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active);
+
         if !ctx.discovered_devices.is_empty() {
             tracing::info!(
                 device_count = ctx.discovered_devices.len(),
@@ -1425,41 +1797,22 @@ impl Scanner for ServicesScanner {
             );
 
             for device in &ctx.discovered_devices {
-                let ip = device.ip;
-                for open_port in &device.open_ports {
-                    let port = open_port.port;
-                    if BANNER_PORTS.contains(&port) {
-                        if let Some(banner) = grab_banner(ip, port).await {
-                            if let Some(finding) = classify_banner(ip, port, &banner) {
-                                findings.push(finding);
-                            }
-                            if let Some(os_finding) = check_os_eol(ip, port, &banner) {
-                                findings.push(os_finding);
-                            }
-                        }
-                        if ctx
-                            .config
-                            .intensity
-                            .at_least(rikitikitavi_models::config::ScanIntensity::Active)
-                        {
-                            findings.extend(deep_probe(ip, port).await);
-                        }
-                    } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
-                        if let Some(server) = grab_http_server(ip, port).await {
-                            findings.push(classify_http_server(ip, port, &server));
-                        }
-                    } else {
-                        // Unknown port: plain banner grab
-                        if let Some(banner) = grab_banner(ip, port).await {
-                            if let Some(finding) = classify_banner(ip, port, &banner) {
-                                findings.push(finding);
-                            }
-                            if let Some(os_finding) = check_os_eol(ip, port, &banner) {
-                                findings.push(os_finding);
-                            }
-                        }
-                    }
+                if exclusions.excludes_device(device) {
+                    continue;
                 }
+                let role = HostRole::of_device(device, ctx.gateway == Some(device.ip));
+                findings.extend(probe_device(device, role, active).await);
+            }
+
+            // Discovery can miss the gateway; it is the highest-value target here.
+            // An excluded gateway is also missing from `discovered_devices` — by MAC
+            // as well as by IP — so clear it against the ARP cache before connecting.
+            if let Some(gateway) = ctx.gateway
+                && active
+                && !ctx.discovered_devices.iter().any(|d| d.ip == gateway)
+                && unvouched_probe_allowed(gateway, &exclusions)
+            {
+                findings.extend(probe_ssh_port(gateway, AYYSSHUSH_PORT, HostRole::GATEWAY).await);
             }
 
             tracing::info!(
@@ -1475,15 +1828,10 @@ impl Scanner for ServicesScanner {
                 message: format!("failed to read ARP cache: {e}"),
             })?;
 
-        let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
-            || arp_entries.iter().map(|e| e.ip).collect(),
-            |network| {
-                arp_entries
-                    .iter()
-                    .filter(|e| network.contains(e.ip))
-                    .map(|e| e.ip)
-                    .collect()
-            },
+        let targets = select_banner_targets(
+            &arp_entries,
+            |ip| ctx.target_network.as_ref().is_none_or(|n| n.contains(ip)),
+            &exclusions,
         );
 
         if targets.is_empty() {
@@ -1494,14 +1842,20 @@ impl Scanner for ServicesScanner {
         tracing::info!(target_count = targets.len(), "banner grabbing targets");
 
         for &ip in &targets {
+            let role = if ctx.gateway == Some(ip) {
+                HostRole::GATEWAY
+            } else {
+                HostRole::UNKNOWN
+            };
             for &port in BANNER_PORTS {
+                // Nothing suggested 53282 was open; only reach for it at Active+.
+                if port == AYYSSHUSH_PORT && !active {
+                    continue;
+                }
                 if let Some(banner) = grab_banner(ip, port).await {
-                    if let Some(finding) = classify_banner(ip, port, &banner) {
-                        findings.push(finding);
-                    }
-                    if let Some(os_finding) = check_os_eol(ip, port, &banner) {
-                        findings.push(os_finding);
-                    }
+                    findings.extend(classify_banner(ip, port, &banner));
+                    findings.extend(check_os_eol(ip, port, &banner));
+                    findings.extend(classify_backdoor_ssh(ip, port, &banner, role));
                 }
             }
 
@@ -1522,7 +1876,7 @@ impl Scanner for ServicesScanner {
 
     fn relevant_ports(&self) -> &[u16] {
         &[
-            21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1883, 3389, 5900, 8080,
+            21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1883, 3389, 5900, 8080, 53282,
         ]
     }
 }
@@ -2623,6 +2977,385 @@ mod prop_tests {
             let future = format!("{future_year:04}-{month:02}-{day:02}");
             prop_assert!(is_date_past(&past));
             prop_assert!(!is_date_past(&future));
+        }
+    }
+}
+
+#[cfg(test)]
+mod backdoor_ssh_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    const GW: &str = "192.168.1.1";
+    const HOST: &str = "192.168.1.50";
+    const CVE: &str = "CVE-2023-39780";
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Real ASUS/Dropbear identification string (RT-AX55 firmware line).
+    const DROPBEAR_BANNER: &str = "SSH-2.0-dropbear_2020.81";
+
+    /// A host that looks like ASUS hardware but is not the gateway.
+    const ASUS_AP: HostRole = HostRole {
+        is_gateway: false,
+        router_like: true,
+    };
+
+    #[test]
+    fn ssh_banner_recognised() {
+        assert!(is_ssh_banner("SSH-2.0-OpenSSH_9.6"));
+        assert!(is_ssh_banner(DROPBEAR_BANNER));
+        assert!(is_ssh_banner("SSH-1.99-Cisco-1.25"));
+        // Pre-identification lines are allowed before the ident string.
+        assert!(is_ssh_banner(
+            "Authorized users only\r\nSSH-2.0-OpenSSH_8.4"
+        ));
+        // Case-insensitive per RFC 4253 readers in the wild.
+        assert!(is_ssh_banner("ssh-2.0-x"));
+    }
+
+    #[test]
+    fn non_ssh_banner_rejected() {
+        assert!(!is_ssh_banner(""));
+        assert!(!is_ssh_banner("220 ProFTPD Server ready"));
+        assert!(!is_ssh_banner("HTTP/1.0 200 OK"));
+        assert!(!is_ssh_banner("SSH"));
+        assert!(!is_ssh_banner("SSH-"));
+        // "SSH" must lead the line, not merely appear in it.
+        assert!(!is_ssh_banner("welcome to SSH-2.0"));
+    }
+
+    #[test]
+    fn public_key_material_is_not_an_identification_string() {
+        // RFC 4253 protoversion is numeric; key-type prefixes are not.
+        assert!(!is_ssh_banner(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB user@host"
+        ));
+        assert!(!is_ssh_banner("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI"));
+        assert!(!is_ssh_banner("ssh-dss AAAAB3NzaC1kc3MAAACB"));
+        assert!(!is_ssh_banner("Ssh-rsa AAAAB3NzaC1yc2E"));
+        assert!(!is_ssh_banner("ecdsa-sha2-nistp256 AAAAE2VjZHNh"));
+    }
+
+    #[test]
+    fn ssh_banner_multibyte_prefix_does_not_panic() {
+        assert!(!is_ssh_banner("İSSH-2.0-OpenSSH_8.2"));
+        assert!(!is_ssh_banner("İİ"));
+    }
+
+    #[test]
+    fn ayysshush_port_on_router_is_critical_and_confirmed() {
+        let f = classify_backdoor_ssh(ip(GW), 53282, DROPBEAR_BANNER, HostRole::GATEWAY).unwrap();
+        assert_eq!(f.title, "ASUS AyySSHush SSH backdoor listener on TCP/53282");
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.confidence, Confidence::Confirmed);
+        assert_eq!(f.affected_port, Some(53282));
+        assert_eq!(f.cwe_id.as_deref(), Some("CWE-78"));
+        assert!(f.cve_ids.iter().any(|c| c == CVE));
+        assert_eq!(f.evidence.as_deref(), Some(DROPBEAR_BANNER));
+        // Firmware update is not remediation: the key lives in NVRAM.
+        let rem = f.remediation.unwrap();
+        assert!(rem.steps.iter().any(|s| s.contains("Factory reset")));
+    }
+
+    #[test]
+    fn ayysshush_port_on_asus_access_point_is_also_critical() {
+        let f = classify_backdoor_ssh(ip(HOST), 53282, DROPBEAR_BANNER, ASUS_AP).unwrap();
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn ayysshush_port_on_an_ordinary_host_is_not_attributed() {
+        // A published container port reaches 53282 too; the protocol answer only
+        // confirms "SSH listens here", not "this router is backdoored".
+        let f = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-OpenSSH_9.6", HostRole::UNKNOWN)
+            .unwrap();
+        assert_eq!(
+            f.title,
+            "SSH server on TCP/53282, the AyySSHush backdoor port"
+        );
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert_eq!(f.affected_port, Some(53282));
+        assert!(f.cve_ids.is_empty(), "no CVE asserted without attribution");
+        let rem = f.remediation.unwrap();
+        assert!(!rem.steps.iter().any(|s| s.starts_with("Factory reset")));
+    }
+
+    #[test]
+    fn ayysshush_port_without_ssh_banner_is_not_flagged() {
+        for role in [HostRole::GATEWAY, HostRole::UNKNOWN] {
+            assert!(classify_backdoor_ssh(ip(GW), 53282, "HTTP/1.1 404 Not Found", role).is_none());
+            assert!(classify_backdoor_ssh(ip(GW), 53282, "", role).is_none());
+        }
+    }
+
+    #[test]
+    fn gateway_ssh_on_odd_high_port_is_high_probable() {
+        let f = classify_backdoor_ssh(ip(GW), 41253, DROPBEAR_BANNER, HostRole::GATEWAY).unwrap();
+        assert_eq!(
+            f.title,
+            "SSH listening on a non-standard port on the gateway"
+        );
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert_eq!(f.affected_port, Some(41253));
+        assert_eq!(f.cwe_id.as_deref(), Some("CWE-912"));
+        // Probable, so the remediation checks intent before the destructive step.
+        let rem = f.remediation.unwrap();
+        assert!(rem.steps[0].contains("administration UI"));
+        assert!(rem.steps[0].contains("41253"));
+        assert!(rem.steps.iter().any(|s| s.contains("factory reset")));
+    }
+
+    #[test]
+    fn gateway_ssh_on_conventional_alt_port_is_only_medium() {
+        for port in [222, 2022, 2222, 22222] {
+            let f = classify_backdoor_ssh(ip(GW), port, "SSH-2.0-OpenSSH_9.6", HostRole::GATEWAY)
+                .unwrap();
+            assert_eq!(f.severity, Severity::Medium, "port {port}");
+            assert_eq!(f.confidence, Confidence::Probable, "port {port}");
+        }
+    }
+
+    #[test]
+    fn gateway_ssh_on_port_22_is_not_flagged() {
+        assert!(
+            classify_backdoor_ssh(ip(GW), 22, "SSH-2.0-OpenSSH_9.6", HostRole::GATEWAY).is_none()
+        );
+    }
+
+    #[test]
+    fn non_gateway_ssh_on_odd_port_is_not_flagged() {
+        // Moving SSH on an ordinary host is routine; only the gateway matters here.
+        for role in [HostRole::UNKNOWN, ASUS_AP] {
+            assert!(classify_backdoor_ssh(ip(HOST), 2222, "SSH-2.0-OpenSSH_9.6", role).is_none());
+            assert!(classify_backdoor_ssh(ip(HOST), 41253, DROPBEAR_BANNER, role).is_none());
+        }
+    }
+
+    #[test]
+    fn titles_are_stable_across_hosts_and_ports() {
+        let a = classify_backdoor_ssh(ip(GW), 53282, "SSH-2.0-A", HostRole::GATEWAY).unwrap();
+        let b = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-B", ASUS_AP).unwrap();
+        assert_eq!(a.title, b.title);
+
+        let c = classify_backdoor_ssh(ip(GW), 41253, "SSH-2.0-A", HostRole::GATEWAY).unwrap();
+        let d = classify_backdoor_ssh(ip(GW), 8022, "SSH-2.0-B", HostRole::GATEWAY).unwrap();
+        assert_eq!(c.title, d.title);
+        assert_ne!(c.fingerprint(), d.fingerprint(), "port separates them");
+    }
+
+    #[test]
+    fn banner_classifier_reaches_ssh_on_non_standard_ports() {
+        // Before 53282 was added, an SSH banner off port 22 fell through to the
+        // generic "Service banner" arm and lost CVE correlation.
+        let f = classify_banner(ip(GW), 53282, "SSH-2.0-OpenSSH_8.9p1").unwrap();
+        assert_eq!(f.affected_service.as_deref(), Some("SSH"));
+    }
+
+    #[test]
+    fn backdoor_port_is_reachable_by_the_banner_pass() {
+        assert_eq!(AYYSSHUSH_PORT, 53282);
+        assert!(BANNER_PORTS.contains(&AYYSSHUSH_PORT));
+        assert!(ServicesScanner.relevant_ports().contains(&AYYSSHUSH_PORT));
+    }
+
+    #[test]
+    fn host_role_marks_routers_and_asus_hardware() {
+        let mut d = Device::new(ip(HOST));
+        assert!(!HostRole::of_device(&d, false).router_like);
+        assert!(
+            HostRole::of_device(&d, true).router_like,
+            "gateway is a router"
+        );
+        assert!(HostRole::of_device(&d, true).is_gateway);
+
+        d.device_type = DeviceType::Router;
+        assert!(HostRole::of_device(&d, false).router_like);
+
+        d.device_type = DeviceType::AccessPoint;
+        assert!(HostRole::of_device(&d, false).router_like);
+
+        d.device_type = DeviceType::Unknown;
+        d.vendor = Some("ASUSTek COMPUTER INC.".to_owned());
+        assert!(HostRole::of_device(&d, false).router_like);
+
+        d.vendor = Some("Raspberry Pi Trading Ltd".to_owned());
+        assert!(!HostRole::of_device(&d, false).router_like);
+    }
+
+    fn arp(ip_s: &str, mac: &str) -> ArpEntry {
+        ArpEntry {
+            ip: ip(ip_s),
+            mac: mac.to_owned(),
+            interface: "eth0".to_owned(),
+        }
+    }
+
+    fn exclusions(nets: &[&str], devices: &[&str]) -> ExclusionSet {
+        let nets: Vec<String> = nets.iter().map(|s| (*s).to_owned()).collect();
+        let devices: Vec<String> = devices.iter().map(|s| (*s).to_owned()).collect();
+        ExclusionSet::parse(&nets, &devices).unwrap()
+    }
+
+    #[test]
+    fn arp_clears_ip_honours_mac_exclusions() {
+        let entries = [arp(GW, "aa:bb:cc:dd:ee:ff"), arp(HOST, "11:22:33:44:55:66")];
+
+        // The gateway excluded by MAC only: its IP is not listed, so an IP-only
+        // check would wave it through.
+        let by_mac = exclusions(&[], &["AA:BB:CC:DD:EE:FF"]);
+        assert!(!by_mac.excludes_ip(ip(GW)));
+        assert!(!arp_clears_ip(&entries, ip(GW), &by_mac));
+        assert!(arp_clears_ip(&entries, ip(HOST), &by_mac));
+
+        assert!(!arp_clears_ip(&entries, ip(GW), &exclusions(&[], &[GW])));
+        assert!(!arp_clears_ip(
+            &entries,
+            ip(GW),
+            &exclusions(&["192.168.1.0/24"], &[])
+        ));
+    }
+
+    #[test]
+    fn arp_clears_ip_refuses_an_unresolvable_address() {
+        let entries = [arp(HOST, "11:22:33:44:55:66")];
+        let set = exclusions(&[], &["AA:BB:CC:DD:EE:FF"]);
+        // No ARP entry, so no MAC to clear against the exclusion list.
+        assert!(!arp_clears_ip(&entries, ip(GW), &set));
+        // An unparsable MAC is no evidence either.
+        assert!(!arp_clears_ip(&[arp(GW, "(incomplete)")], ip(GW), &set));
+    }
+
+    #[test]
+    fn unvouched_probe_allowed_without_exclusions_skips_the_arp_read() {
+        assert!(unvouched_probe_allowed(ip(GW), &ExclusionSet::default()));
+    }
+
+    #[test]
+    fn select_banner_targets_drops_excluded_ip_cidr_and_mac() {
+        let entries = [
+            arp("192.168.1.10", "aa:aa:aa:aa:aa:aa"),
+            arp("192.168.1.40", "bb:bb:bb:bb:bb:bb"),
+            arp("192.168.1.41", "cc:cc:cc:cc:cc:cc"),
+            arp("10.0.0.2", "dd:dd:dd:dd:dd:dd"),
+            arp("172.16.0.5", "ee:ee:ee:ee:ee:ee"),
+        ];
+        let set = exclusions(&["10.0.0.0/30"], &["192.168.1.40", "CC:CC:CC:CC:CC:CC"]);
+        let in_scope = |i: IpAddr| !matches!(i, IpAddr::V4(v4) if v4.octets()[0] == 172);
+        assert_eq!(
+            select_banner_targets(&entries, in_scope, &set),
+            vec![ip("192.168.1.10")]
+        );
+    }
+
+    /// Drive the direct probe against a one-shot local server on an ephemeral
+    /// port, so the test never depends on 53282 being free.
+    async fn probe_fake_server(greeting: &'static str, role: HostRole) -> (u16, Option<Finding>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind ephemeral loopback port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.write_all(greeting.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let finding = probe_ssh_port(ip("127.0.0.1"), port, role).await;
+        server.abort();
+        let _ = server.await;
+        (port, finding)
+    }
+
+    #[tokio::test]
+    async fn probe_reports_an_ssh_server_answering_where_it_should_not() {
+        let (port, finding) =
+            probe_fake_server("SSH-2.0-dropbear_2020.81\r\n", HostRole::GATEWAY).await;
+        let f = finding.expect("SSH banner on the gateway's odd port must be reported");
+        assert_eq!(
+            f.title,
+            "SSH listening on a non-standard port on the gateway"
+        );
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert_eq!(f.affected_port, Some(port));
+        assert_eq!(f.affected_ip, Some(ip("127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn probe_ignores_a_non_ssh_server() {
+        let (_, finding) =
+            probe_fake_server("HTTP/1.1 400 Bad Request\r\n", HostRole::GATEWAY).await;
+        assert!(finding.is_none(), "an HTTP server is not an SSH backdoor");
+    }
+
+    #[tokio::test]
+    async fn probe_reports_nothing_when_the_port_is_closed() {
+        // Bind, note the port, drop the listener: nothing is listening there.
+        let port = {
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert!(
+            probe_ssh_port(ip("127.0.0.1"), port, HostRole::GATEWAY)
+                .await
+                .is_none()
+        );
+    }
+
+    proptest! {
+        /// `is_ssh_banner` never panics on arbitrary text.
+        #[test]
+        fn prop_is_ssh_banner_no_panic(s in ".*") {
+            let _ = is_ssh_banner(&s);
+        }
+
+        /// `classify_backdoor_ssh` never panics on arbitrary bytes off the wire,
+        /// and only fires when the peer sent an SSH identification string.
+        #[test]
+        fn prop_classify_backdoor_ssh_no_panic(
+            data in proptest::collection::vec(any::<u8>(), 0..512),
+            port in any::<u16>(),
+            is_gateway in any::<bool>(),
+            router_like in any::<bool>(),
+        ) {
+            let role = HostRole { is_gateway, router_like: router_like || is_gateway };
+            let banner = String::from_utf8_lossy(&data);
+            let out = classify_backdoor_ssh(ip(GW), port, &banner, role);
+            if let Some(f) = out {
+                prop_assert!(is_ssh_banner(&banner));
+                prop_assert!(port == AYYSSHUSH_PORT || (role.is_gateway && port != 22));
+                // Campaign attribution only where the host could be ASUS hardware.
+                if f.confidence == Confidence::Confirmed {
+                    prop_assert!(role.router_like);
+                    prop_assert_eq!(port, AYYSSHUSH_PORT);
+                }
+            }
+        }
+
+        /// An SSH banner on 53282 is always reported; Critical only for a
+        /// router-shaped host, and never attributed to the campaign otherwise.
+        #[test]
+        fn prop_ayysshush_port_always_reported(
+            software in "[ -~]{0,64}",
+            router_like in any::<bool>(),
+        ) {
+            let role = HostRole { is_gateway: false, router_like };
+            let banner = format!("SSH-2.0-{software}");
+            let f = classify_backdoor_ssh(ip(GW), AYYSSHUSH_PORT, &banner, role).unwrap();
+            if router_like {
+                prop_assert_eq!(f.severity, Severity::Critical);
+                prop_assert_eq!(f.confidence, Confidence::Confirmed);
+            } else {
+                prop_assert_eq!(f.confidence, Confidence::Probable);
+                prop_assert!(f.cve_ids.is_empty());
+            }
         }
     }
 }

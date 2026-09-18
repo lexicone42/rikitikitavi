@@ -12,9 +12,22 @@ pub struct DeviceScanner;
 fn classify_by_vendor(vendor: &str) -> &'static str {
     match vendor {
         "Synology" => "NAS",
-        "Sonos" | "D&M" | "Roku" => "Media player",
+        "D&M" | "Roku" => "Media player",
+        "Sonos" => "Smart speaker",
         "Sony" | "Nintendo" => "Game console",
         "Ring" => "Camera/doorbell",
+        "Amcrest"
+        | "Arlo"
+        | "Wyze Labs"
+        | "Hangzhou Hikvision Digital"
+        | "Zhejiang Dahua Technology" => "Camera/NVR",
+        "iRobot" | "Beijing Roborock Technology" => "Robot vacuum",
+        "ecobee inc" => "Thermostat",
+        "August Home" => "Smart lock",
+        "Enphase Energy" | "SolarEdge" => "Solar inverter",
+        "SmartThings" | "Lutron Electronics" => "Smart home hub",
+        "Shelly Europe LTD" => "Smart plug/relay",
+        "eero inc." => "Mesh access point",
         "Signify" | "Philips Lighting" | "Espressif" | "AI-Link" | "TI" => "IoT device",
         "Raspberry Pi" => "Single-board computer",
         "HP" => "Printer (likely)",
@@ -38,9 +51,23 @@ fn classify_by_vendor(vendor: &str) -> &'static str {
 const fn vendor_to_device_type(vendor: &str) -> DeviceType {
     match vendor.as_bytes() {
         b"Synology" => DeviceType::Nas,
-        b"Sonos" | b"Roku" | b"D&M" => DeviceType::MediaPlayer,
+        b"Roku" | b"D&M" => DeviceType::MediaPlayer,
+        b"Sonos" => DeviceType::Speaker,
         b"Sony" | b"Nintendo" => DeviceType::GameConsole,
-        b"Ring" => DeviceType::Camera,
+        // Ring also ships cameras; `Camera` is the safe superset of its line.
+        b"Ring"
+        | b"Amcrest"
+        | b"Arlo"
+        | b"Wyze Labs"
+        | b"Hangzhou Hikvision Digital"
+        | b"Zhejiang Dahua Technology" => DeviceType::Camera,
+        b"iRobot" | b"Beijing Roborock Technology" => DeviceType::Vacuum,
+        b"ecobee inc" => DeviceType::Thermostat,
+        b"August Home" => DeviceType::SmartLock,
+        b"Enphase Energy" | b"SolarEdge" => DeviceType::Inverter,
+        b"SmartThings" | b"Lutron Electronics" => DeviceType::Hub,
+        b"Shelly Europe LTD" => DeviceType::SmartPlug,
+        b"eero inc." => DeviceType::AccessPoint,
         b"Signify" | b"Philips Lighting" | b"Espressif" | b"AI-Link" | b"TI" | b"Amazon" => {
             DeviceType::IoT
         }
@@ -193,6 +220,45 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Vendor tables must be keyed on strings the OUI database actually emits;
+    /// a typo here silently classifies nothing.
+    #[test]
+    fn vendor_table_keys_match_oui_registrant_names() {
+        for (oui, vendor) in [
+            ("4c:b9:ea", "iRobot"),
+            ("24:9e:7d", "Beijing Roborock Technology"),
+            ("44:61:32", "ecobee inc"),
+            ("78:9c:85", "August Home"),
+            ("00:1d:c0", "Enphase Energy"),
+            ("00:27:02", "SolarEdge"),
+            ("24:fd:5b", "SmartThings"),
+            ("00:0f:e7", "Lutron Electronics"),
+            ("84:00:ec", "Shelly Europe LTD"),
+            ("00:ab:48", "eero inc."),
+            ("00:65:1e", "Amcrest"),
+            ("48:62:64", "Arlo"),
+            ("2c:aa:8e", "Wyze Labs"),
+            ("00:bc:99", "Hangzhou Hikvision Digital"),
+            ("08:ed:ed", "Zhejiang Dahua Technology"),
+        ] {
+            assert_eq!(
+                ieee_oui_lookup(&format!("{oui}:00:00:00")),
+                Some(vendor),
+                "OUI {oui} no longer maps to {vendor}"
+            );
+            assert_ne!(
+                vendor_to_device_type(vendor),
+                DeviceType::Unknown,
+                "{vendor} has no structured device type"
+            );
+            assert_ne!(
+                classify_by_vendor(vendor),
+                "Unknown",
+                "{vendor} has no vendor label"
+            );
+        }
+    }
+
     #[test]
     fn test_ieee_lookup_apple() {
         assert_eq!(ieee_oui_lookup("a4:83:e7:1a:2b:3c"), Some("Apple"));
@@ -216,7 +282,16 @@ mod tests {
     #[test]
     fn test_classify_by_vendor() {
         assert_eq!(classify_by_vendor("Synology"), "NAS");
-        assert_eq!(classify_by_vendor("Sonos"), "Media player");
+        assert_eq!(classify_by_vendor("Sonos"), "Smart speaker");
+        assert_eq!(classify_by_vendor("Roku"), "Media player");
+        assert_eq!(classify_by_vendor("iRobot"), "Robot vacuum");
+        assert_eq!(classify_by_vendor("ecobee inc"), "Thermostat");
+        assert_eq!(classify_by_vendor("August Home"), "Smart lock");
+        assert_eq!(classify_by_vendor("SolarEdge"), "Solar inverter");
+        assert_eq!(classify_by_vendor("SmartThings"), "Smart home hub");
+        assert_eq!(classify_by_vendor("Shelly Europe LTD"), "Smart plug/relay");
+        assert_eq!(classify_by_vendor("eero inc."), "Mesh access point");
+        assert_eq!(classify_by_vendor("Amcrest"), "Camera/NVR");
         assert_eq!(classify_by_vendor("D&M"), "Media player");
         assert_eq!(classify_by_vendor("Ring"), "Camera/doorbell");
         assert_eq!(classify_by_vendor("Amazon"), "Smart speaker/display");
@@ -232,7 +307,7 @@ mod tests {
     #[test]
     fn test_vendor_to_device_type() {
         assert_eq!(vendor_to_device_type("Synology"), DeviceType::Nas);
-        assert_eq!(vendor_to_device_type("Sonos"), DeviceType::MediaPlayer);
+        assert_eq!(vendor_to_device_type("Sonos"), DeviceType::Speaker);
         assert_eq!(vendor_to_device_type("Roku"), DeviceType::MediaPlayer);
         assert_eq!(vendor_to_device_type("D&M"), DeviceType::MediaPlayer);
         assert_eq!(vendor_to_device_type("Ring"), DeviceType::Camera);
@@ -248,6 +323,30 @@ mod tests {
         assert_eq!(vendor_to_device_type("Sony"), DeviceType::GameConsole);
         assert_eq!(vendor_to_device_type("Nintendo"), DeviceType::GameConsole);
         assert_eq!(vendor_to_device_type("Xiaomi"), DeviceType::Phone);
+        assert_eq!(vendor_to_device_type("iRobot"), DeviceType::Vacuum);
+        assert_eq!(
+            vendor_to_device_type("Beijing Roborock Technology"),
+            DeviceType::Vacuum
+        );
+        assert_eq!(vendor_to_device_type("ecobee inc"), DeviceType::Thermostat);
+        assert_eq!(vendor_to_device_type("August Home"), DeviceType::SmartLock);
+        assert_eq!(
+            vendor_to_device_type("Enphase Energy"),
+            DeviceType::Inverter
+        );
+        assert_eq!(vendor_to_device_type("SolarEdge"), DeviceType::Inverter);
+        assert_eq!(vendor_to_device_type("SmartThings"), DeviceType::Hub);
+        assert_eq!(vendor_to_device_type("Lutron Electronics"), DeviceType::Hub);
+        assert_eq!(
+            vendor_to_device_type("Shelly Europe LTD"),
+            DeviceType::SmartPlug
+        );
+        assert_eq!(vendor_to_device_type("eero inc."), DeviceType::AccessPoint);
+        assert_eq!(vendor_to_device_type("Amcrest"), DeviceType::Camera);
+        assert_eq!(
+            vendor_to_device_type("Hangzhou Hikvision Digital"),
+            DeviceType::Camera
+        );
         // Multi-purpose vendors return Unknown
         assert_eq!(vendor_to_device_type("Apple"), DeviceType::Unknown);
         assert_eq!(vendor_to_device_type("Samsung"), DeviceType::Unknown);

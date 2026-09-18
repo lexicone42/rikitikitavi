@@ -1,8 +1,29 @@
 use rikitikitavi_core::Severity;
 use rikitikitavi_models::Finding;
 
-/// Aggregate risk score (0.0–100.0): sum of per-severity weights
-/// (Critical 25, High 15, Medium 8, Low 3, Info 1), KEV findings ×1.5, capped at 100.
+use crate::exploit_intel::ssvc_for;
+use crate::vulnrichment_db::{Automatable, Exploitation};
+
+/// Exploitability multiplier applied to a finding's severity weight.
+///
+/// KEV and SSVC `active` are the same claim (exploited in the wild) and score alike; `poc`
+/// sits between that and nothing, a little higher when CISA also calls the chain automatable.
+fn exploit_multiplier(finding: &Finding) -> f64 {
+    if finding.is_kev {
+        return 1.5;
+    }
+    match ssvc_for(finding).map(|s| (s.exploitation, s.automatable)) {
+        Some((Exploitation::Active, _)) => 1.5,
+        Some((Exploitation::Poc, Some(Automatable::Yes))) => 1.35,
+        Some((Exploitation::Poc, _)) => 1.25,
+        _ => 1.0,
+    }
+}
+
+/// Aggregate risk score (0.0–100.0), capped at 100.
+///
+/// Sums per-severity weights (Critical 25, High 15, Medium 8, Low 3, Info 1) scaled by
+/// [`exploit_multiplier`]: KEV or SSVC `active` ×1.5, automatable `poc` ×1.35, `poc` ×1.25.
 pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
     if findings.is_empty() {
         return 0.0;
@@ -18,7 +39,7 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
             Severity::Low => 3.0,
             Severity::Info => 1.0,
         };
-        score += if finding.is_kev { base * 1.5 } else { base };
+        score += base * exploit_multiplier(finding);
     }
 
     score.min(100.0)
@@ -96,6 +117,45 @@ mod tests {
         let (label, color) = risk_grade(0, 0, 5);
         assert!(label.starts_with('B'));
         assert_eq!(color, "low");
+    }
+
+    // ─── Vulnrichment tiers ───────────────────────────────────────────
+
+    fn finding_with_cve(sev: Severity, cve: &str) -> Finding {
+        Finding::new("test", "t", "d", sev).with_cve_ids(vec![cve.to_owned()])
+    }
+
+    #[test]
+    fn poc_scores_above_plain_and_below_kev() {
+        let plain = calculate_risk_score(&[Finding::new("test", "t", "d", Severity::Medium)]);
+        // regreSSHion: poc, not automatable.
+        let poc = calculate_risk_score(&[finding_with_cve(Severity::Medium, "CVE-2024-6387")]);
+        // Brother default password: poc, automatable.
+        let wormable =
+            calculate_risk_score(&[finding_with_cve(Severity::Medium, "CVE-2024-51978")]);
+        let mut kev = Finding::new("test", "t", "d", Severity::Medium);
+        kev.is_kev = true;
+        let kev = calculate_risk_score(&[kev]);
+
+        assert!(plain < poc, "{plain} < {poc}");
+        assert!(poc < wormable, "{poc} < {wormable}");
+        assert!(wormable < kev, "{wormable} < {kev}");
+    }
+
+    #[test]
+    fn ssvc_active_scores_like_kev() {
+        // Log4Shell is `active`; score it without the KEV flag set.
+        let active = calculate_risk_score(&[finding_with_cve(Severity::Medium, "CVE-2021-44228")]);
+        let mut kev = Finding::new("test", "t", "d", Severity::Medium);
+        kev.is_kev = true;
+        assert!((active - calculate_risk_score(&[kev])).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn exploitation_none_does_not_raise_the_score() {
+        let plain = calculate_risk_score(&[Finding::new("test", "t", "d", Severity::Low)]);
+        let none = calculate_risk_score(&[finding_with_cve(Severity::Low, "CVE-2023-38408")]);
+        assert!((plain - none).abs() < f64::EPSILON);
     }
 
     // ─── Property-based tests ─────────────────────────────────────────
