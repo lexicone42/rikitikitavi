@@ -9,6 +9,8 @@ use x509_parser::prelude::*;
 
 use crate::Scanner;
 use crate::http_util::unauthenticated_probe_client;
+use crate::recog;
+use crate::recog_db::RecogKey;
 
 /// TLS scanner: direct `rustls` handshake (protocol version, cipher suite,
 /// leaf certificate analysis) plus an HSTS header check on discovered TLS ports.
@@ -229,6 +231,83 @@ pub struct CertDetails {
     pub san_dns: Vec<String>,
     /// Whether the cert is self-signed (subject == issuer).
     pub is_self_signed: bool,
+}
+
+/// Attribute abbreviations `crypto/x509/pkix` prints, by OID.
+///
+/// Recog's `x509.subject` and `x509.issuer` patterns are written against Go's
+/// rendering, so an unlisted OID must print as its dotted form, exactly as Go
+/// does — not as a long name.
+const fn rdn_abbreviation(oid: &str) -> Option<&'static str> {
+    match oid.as_bytes() {
+        b"2.5.4.3" => Some("CN"),
+        b"2.5.4.5" => Some("SERIALNUMBER"),
+        b"2.5.4.6" => Some("C"),
+        b"2.5.4.7" => Some("L"),
+        b"2.5.4.8" => Some("ST"),
+        b"2.5.4.9" => Some("STREET"),
+        b"2.5.4.10" => Some("O"),
+        b"2.5.4.11" => Some("OU"),
+        b"2.5.4.17" => Some("POSTALCODE"),
+        _ => None,
+    }
+}
+
+/// Escape an attribute value the way `pkix.RDNSequence.String` does.
+fn escape_rdn_value(value: &str) -> String {
+    let len = value.len();
+    let mut out = String::with_capacity(len);
+    for (i, c) in value.char_indices() {
+        let escape = match c {
+            ',' | '+' | '"' | '\\' | '<' | '>' | ';' => true,
+            ' ' => i == 0 || i + c.len_utf8() == len,
+            '#' => i == 0,
+            _ => false,
+        };
+        if escape {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Render a distinguished name as Go's `crypto/x509` prints it: RDNs in reverse
+/// encoding order joined by `,`, multi-valued RDNs joined by `+`.
+///
+/// This is the shape Recog's x509 fingerprints match, and it is not what
+/// `x509-parser`'s own `Display` produces (that joins with `, ` in DER order).
+fn render_dn(name: &X509Name<'_>) -> String {
+    let rdns: Vec<&x509_parser::x509::RelativeDistinguishedName<'_>> = name.iter().collect();
+    let mut parts = Vec::with_capacity(rdns.len());
+    for rdn in rdns.into_iter().rev() {
+        let mut atvs = Vec::new();
+        for atv in rdn.iter() {
+            let oid = atv.attr_type().to_id_string();
+            let Ok(value) = atv.as_str() else { continue };
+            let label = rdn_abbreviation(&oid).map_or_else(|| oid.clone(), ToOwned::to_owned);
+            atvs.push(format!("{label}={}", escape_rdn_value(value)));
+        }
+        if !atvs.is_empty() {
+            parts.push(atvs.join("+"));
+        }
+    }
+    parts.join(",")
+}
+
+/// Identify a device from its certificate subject and issuer.
+///
+/// Default and factory certificates are strong identifiers: an iDRAC, an iLO,
+/// a Chromecast and a Vigor router each ship a distinctive DN.
+pub fn recog_cert_identity(ip: IpAddr, port: u16, der: &[u8]) -> Option<Finding> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    let subject = render_dn(cert.subject());
+    let issuer = render_dn(cert.issuer());
+    let matches = recog::identify_all(&[
+        (RecogKey::X509Subject, subject.as_str()),
+        (RecogKey::X509Issuer, issuer.as_str()),
+    ]);
+    recog::identification_finding("ssl", ip, Some(port), &matches)
 }
 
 /// Parse a DER-encoded X.509 certificate into structured details.
@@ -827,6 +906,7 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
         }
 
         if let Some(der) = &info.leaf_cert_der {
+            findings.extend(recog_cert_identity(ip, port, der));
             if let Some(cert_details) = parse_cert_details(der) {
                 findings.extend(analyze_certificate(ip, port, &cert_details));
             } else if info.cert_chain_length == 1 {
@@ -935,6 +1015,97 @@ impl Scanner for SslScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A self-signed certificate whose subject is shaped like Dell's default
+    /// iDRAC certificate, generated with `openssl req -x509`. DER, hex-encoded.
+    const IDRAC_CERT_DER_HEX: &str = concat!(
+        "308202f030820259a00302010202146f096fbec4fc435e48e4ccd1f478b6fc7e085497300d06092a864886f70d01010b",
+        "0500308189310b3009060355040613025553310e300c06035504080c0554657861733113301106035504070c0a526f75",
+        "6e6420526f636b31123010060355040a0c0944656c6c20496e632e311c301a060355040b0c1352656d6f746520416363",
+        "6573732047726f75703123302106035504030c1a6944524143372064656661756c74206365727469666963617465301e",
+        "170d3236303931383032333435345a170d3336303931353032333435345a308189310b3009060355040613025553310e",
+        "300c06035504080c0554657861733113301106035504070c0a526f756e6420526f636b31123010060355040a0c094465",
+        "6c6c20496e632e311c301a060355040b0c1352656d6f7465204163636573732047726f75703123302106035504030c1a",
+        "6944524143372064656661756c7420636572746966696361746530819f300d06092a864886f70d010101050003818d00",
+        "30818902818100a91c8fded77af2a8ddd33310737e5b40460f194421b1f1ceb8d2d796d974dd571d03d3f177386b7fcb",
+        "faa1663f0953b4f0cbd95024564838128a1a3fff94d00351af272542d1604d369a7ef02aebf2e72a50f943c8e6630399",
+        "3f736f8ee2dc242fca1451d2833472bdbeef56200cf9ff901807bd8cbc869e19257a15b5b4a32b0203010001a3533051",
+        "301d0603551d0e04160414cc1e95bcf562f43336b4768ebe10e2ae0799628a301f0603551d23041830168014cc1e95bc",
+        "f562f43336b4768ebe10e2ae0799628a300f0603551d130101ff040530030101ff300d06092a864886f70d01010b0500",
+        "03818100121d9ad47b69ec4f6b07539fc774cc080871ed92c18cc7117f9b771e2a9c215b35c134eb737a0188ed0da35c",
+        "a5a598d3815318bb5cf6aab2c193ddf9cce6ae62d7051cbe708896d01974b1c3740fe5b44476490f84f360b1a214c9d8",
+        "12f55a39f6ef5873128c7f738a3cd6f66f284f611c8e5884fcf5955ad64f39cdca61a8be",
+    );
+
+    fn idrac_cert_der() -> Vec<u8> {
+        IDRAC_CERT_DER_HEX
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    /// Go prints RDNs in reverse encoding order, joined by `,` with no space.
+    /// `x509-parser`'s own `Display` does neither, which is why `render_dn` exists.
+    #[test]
+    fn render_dn_matches_the_go_rendering_recog_expects() {
+        let der = idrac_cert_der();
+        let (_, cert) = X509Certificate::from_der(&der).unwrap();
+        assert_eq!(
+            render_dn(cert.subject()),
+            "CN=iDRAC7 default certificate,OU=Remote Access Group,O=Dell Inc.,\
+             L=Round Rock,ST=Texas,C=US"
+        );
+    }
+
+    #[test]
+    fn escape_rdn_value_follows_pkix() {
+        assert_eq!(
+            escape_rdn_value("Cisco-Linksys, LLC"),
+            "Cisco-Linksys\\, LLC"
+        );
+        assert_eq!(escape_rdn_value(" lead"), "\\ lead");
+        assert_eq!(escape_rdn_value("trail "), "trail\\ ");
+        assert_eq!(escape_rdn_value("#hash"), "\\#hash");
+        assert_eq!(escape_rdn_value("a+b"), "a\\+b");
+        assert_eq!(escape_rdn_value("plain"), "plain");
+    }
+
+    /// An OID with no `pkix` abbreviation prints in its dotted form, as Go does.
+    #[test]
+    fn unknown_oids_print_dotted() {
+        assert_eq!(rdn_abbreviation("2.5.4.3"), Some("CN"));
+        assert_eq!(rdn_abbreviation("2.5.4.10"), Some("O"));
+        assert_eq!(rdn_abbreviation("1.2.840.113549.1.9.1"), None);
+    }
+
+    /// The rendered subject is what the Recog table claims, end to end.
+    #[test]
+    fn recog_identifies_the_idrac_certificate() {
+        let ip: IpAddr = "192.168.1.30".parse().unwrap();
+        let finding = recog_cert_identity(ip, 443, &idrac_cert_der()).unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.confidence, rikitikitavi_core::Confidence::Probable);
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.vendor.as_deref(), Some("Dell"));
+    }
+
+    proptest! {
+        /// Arbitrary bytes in place of a certificate: no panic.
+        #[test]
+        fn prop_recog_cert_identity_no_panic(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let ip: IpAddr = "192.168.1.30".parse().unwrap();
+            let _ = recog_cert_identity(ip, 443, &bytes);
+        }
+
+        /// Truncating a real certificate never panics either.
+        #[test]
+        fn prop_recog_cert_identity_truncation_no_panic(cut in 0usize..756) {
+            let der = idrac_cert_der();
+            let ip: IpAddr = "192.168.1.30".parse().unwrap();
+            let _ = recog_cert_identity(ip, 443, &der[..cut.min(der.len())]);
+        }
+    }
 
     #[test]
     fn test_classify_tls_1_0() {

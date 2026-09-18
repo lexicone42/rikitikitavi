@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use crate::Scanner;
 use crate::ports::udp_probe;
+use crate::recog;
+use crate::recog_db::RecogKey;
 
 /// SNMP default community-string scanner.
 ///
@@ -321,10 +323,19 @@ async fn probe_snmp(ip: IpAddr) -> Option<SnmpHit> {
     None
 }
 
-/// Build a `DeviceHint` from a `sysDescr` string (OS guess + best-effort vendor).
+/// Build a `DeviceHint` from a `sysDescr` string.
+///
+/// Recog's `snmp.sys_description` table is tried first; `guess_vendor` and the
+/// raw string fill what it does not answer.
 fn hint_from_sys_descr(sys_descr: &str) -> DeviceHint {
-    let mut hint = DeviceHint::new().with_os_guess(sys_descr);
-    if let Some(vendor) = guess_vendor(sys_descr) {
+    let mut hint = recog::identify(RecogKey::SnmpSysDescr, sys_descr)
+        .map_or_else(DeviceHint::new, |m| m.device_hint());
+    if hint.os_guess.is_none() {
+        hint = hint.with_os_guess(sys_descr);
+    }
+    if hint.vendor.is_none()
+        && let Some(vendor) = guess_vendor(sys_descr)
+    {
         hint = hint.with_vendor(vendor);
     }
     hint
@@ -453,6 +464,15 @@ impl Scanner for SnmpScanner {
             if let Some(hit) = probe_snmp(ip).await {
                 tracing::debug!(ip = %ip, community = hit.community, "SNMP community accepted");
                 findings.push(finding_for_hit(ip, &hit));
+                findings.extend(hit.response.sys_descr.as_deref().and_then(|descr| {
+                    recog::identify_finding(
+                        "snmp",
+                        ip,
+                        Some(SNMP_PORT),
+                        RecogKey::SnmpSysDescr,
+                        descr,
+                    )
+                }));
             }
         }
 
@@ -472,6 +492,35 @@ impl Scanner for SnmpScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Recog answers `sysDescr` with vendor, model and device class; the raw
+    /// string is only the fallback OS guess.
+    #[test]
+    fn hint_from_sys_descr_prefers_recog() {
+        let hint = hint_from_sys_descr(
+            "HP ETHERNET MULTI-ENVIRONMENT,ROM none,JETDIRECT,JD117,EEPROM V.36.25,CIDATE 05/16/2011",
+        );
+        assert_eq!(hint.vendor.as_deref(), Some("HP"));
+        assert_eq!(
+            hint.device_type,
+            Some(rikitikitavi_models::DeviceType::Printer)
+        );
+    }
+
+    /// An unrecognised `sysDescr` still carries the raw string as the OS guess.
+    #[test]
+    fn hint_from_sys_descr_falls_back_to_the_raw_string() {
+        let hint = hint_from_sys_descr("zzzz unknown agent");
+        assert_eq!(hint.os_guess.as_deref(), Some("zzzz unknown agent"));
+        assert_eq!(hint.device_type, None);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_hint_from_sys_descr_no_panic(descr in ".*") {
+            let _ = hint_from_sys_descr(&descr);
+        }
+    }
 
     // ── GetRequest builder: exact-bytes tests ───────────────────────────────
 

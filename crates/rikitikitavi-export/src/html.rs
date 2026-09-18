@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rikitikitavi_core::Severity;
-use rikitikitavi_models::ScanResults;
+use rikitikitavi_models::{DeviceStatus, ScanResults};
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
@@ -129,6 +129,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
     .badge.medium { background: var(--medium); }
     .badge.low { background: var(--low); }
     .badge.info { background: var(--info); }
+    .badge.none { background: var(--card-bg); color: var(--text-muted); }
     .finding-card {
       background: var(--card-bg);
       border-radius: 8px;
@@ -165,6 +166,7 @@ pub fn render_html_report(results: &ScanResults) -> String {
     table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; }
     th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
     th { background: var(--card-bg); font-weight: bold; }
+    .note { font-size: 0.85rem; color: var(--text-muted); margin: 0.25rem 0 0.5rem; }
     .bullets { margin: 0.5rem 0; padding-left: 1.2rem; }
     .bullets li { margin: 0.2rem 0; }
     .footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.85rem; color: var(--text-muted); }
@@ -391,7 +393,12 @@ pub fn render_html_report(results: &ScanResults) -> String {
     // Device inventory, most findings first
     if !results.devices.is_empty() {
         html.push_str("<h2>Device Inventory</h2>\n");
-        html.push_str("<table><tr><th>IP</th><th>MAC</th><th>Vendor</th><th>Type</th><th>Open Ports</th></tr>\n");
+        html.push_str(
+            "<p class=\"note\">Grades are this tool's own scoring of what it observed \
+             from the network, not a certification against any scheme. A device with \
+             nothing observed is ungraded.</p>\n",
+        );
+        html.push_str("<table><tr><th>Grade</th><th>IP</th><th>MAC</th><th>Vendor</th><th>Type</th><th>Open Ports</th><th>Seen</th></tr>\n");
 
         let mut devices = results.devices.clone();
         devices.sort_by(|a, b| {
@@ -409,6 +416,11 @@ pub fn render_html_report(results: &ScanResults) -> String {
         });
 
         for device in &devices {
+            let card = results.report_cards.iter().find(|c| c.ip == device.ip);
+            let grade = card.map_or('-', |c| c.grade.letter());
+            let grade_class = card.map_or("none", |c| c.grade.color_hint());
+            let grade_title = card.map_or_else(String::new, |c| c.rationale.clone());
+            let status = card.map_or(DeviceStatus::Untracked, |c| c.status);
             let mac = device.mac.map_or_else(|| "-".to_owned(), |m| m.to_string());
             let vendor = device.vendor.as_deref().unwrap_or("Unknown");
             // `Display` is the JSON spelling, so HTML and JSON agree.
@@ -418,12 +430,17 @@ pub fn render_html_report(results: &ScanResults) -> String {
             );
             let _ = writeln!(
                 html,
-                "<tr><td>{ip}</td><td>{mac}</td><td>{vendor}</td><td>{dtype}</td><td>{ports}</td></tr>",
+                "<tr><td><span class=\"badge {gcls}\" title=\"{gtitle}\">{grade}</span></td>\
+                 <td>{ip}</td><td>{mac}</td><td>{vendor}</td><td>{dtype}</td><td>{ports}</td>\
+                 <td>{status}</td></tr>",
+                gcls = grade_class,
+                gtitle = html_escape(&grade_title),
                 ip = html_escape(&device.ip.to_string()),
                 mac = html_escape(&mac),
                 vendor = html_escape(vendor),
                 dtype = html_escape(&device_type),
                 ports = device.open_ports.len(),
+                status = status.as_str(),
             );
         }
         html.push_str("</table>\n");
@@ -494,6 +511,61 @@ mod tests {
             risk_score,
             ..Default::default()
         }
+    }
+
+    /// One device with a report card carrying `rationale`.
+    fn graded_results(grade: rikitikitavi_models::Grade, rationale: &str) -> ScanResults {
+        use rikitikitavi_models::{Device, DeviceReportCard, DeviceType};
+        let ip = "192.168.1.5".parse().unwrap();
+        ScanResults {
+            devices: vec![Device::new(ip)],
+            report_cards: vec![DeviceReportCard {
+                ip,
+                mac: None,
+                hostname: None,
+                device_type: DeviceType::Camera,
+                grade,
+                critical: 1,
+                high: 0,
+                medium: 0,
+                low: 0,
+                info: 0,
+                kev: 0,
+                class_weighted: true,
+                status: DeviceStatus::New,
+                rationale: rationale.to_owned(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn device_inventory_shows_grade_and_status() {
+        let html = render_html_report(&graded_results(rikitikitavi_models::Grade::F, "1 critical"));
+        assert!(html.contains("<th>Grade</th>"));
+        assert!(html.contains(r#"<span class="badge critical" title="1 critical">F</span>"#));
+        assert!(html.contains("<td>new</td>"));
+        assert!(html.contains("not a certification"));
+    }
+
+    #[test]
+    fn ungraded_device_renders_a_dash() {
+        let html = render_html_report(&graded_results(
+            rikitikitavi_models::Grade::NotAssessed,
+            "nothing observed on this host",
+        ));
+        assert!(html.contains(r#"class="badge none""#));
+        assert!(html.contains(">-</span>"));
+    }
+
+    #[test]
+    fn report_card_rationale_is_escaped() {
+        let html = render_html_report(&graded_results(
+            rikitikitavi_models::Grade::D,
+            r#"<script>"x"</script>"#,
+        ));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;&quot;x&quot;&lt;/script&gt;"));
     }
 
     #[test]

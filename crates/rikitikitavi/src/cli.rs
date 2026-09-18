@@ -96,7 +96,7 @@ pub struct ScanArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Output format (json or html).
+    /// Output format (json, html, csv, ocsf or prometheus).
     #[arg(long, default_value = "json")]
     pub format: ReportFormatArg,
 
@@ -394,12 +394,14 @@ pub enum NetworkArg {
     External,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ReportFormatArg {
     Json,
     Html,
     Csv,
     Ocsf,
+    /// Prometheus text exposition 0.0.4, for `node_exporter`'s textfile collector.
+    Prometheus,
 }
 
 /// Minimum severity that makes `scan` exit non-zero.

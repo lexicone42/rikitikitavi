@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use rikitikitavi_analysis::ScanDiff;
 use rikitikitavi_core::Severity;
-use rikitikitavi_models::{Device, Finding, FindingFingerprint, ScanResults};
+use rikitikitavi_models::{Device, DeviceReportCard, Finding, FindingFingerprint, ScanResults};
 
 /// Which screen the TUI is currently showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -408,6 +408,15 @@ impl App {
     /// All devices, or empty when no results.
     pub fn devices(&self) -> &[Device] {
         self.results.as_ref().map_or(&[], |r| r.devices.as_slice())
+    }
+
+    /// Report card for `ip`, when this scan graded it.
+    pub fn report_card(&self, ip: std::net::IpAddr) -> Option<&DeviceReportCard> {
+        self.results
+            .as_ref()?
+            .report_cards
+            .iter()
+            .find(|c| c.ip == ip)
     }
 
     /// Store the diff and rebuild the per-finding status cache.

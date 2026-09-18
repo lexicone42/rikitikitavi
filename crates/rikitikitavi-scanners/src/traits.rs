@@ -79,6 +79,11 @@ impl ScannerRegistry {
                 Box::new(crate::sadp::SadpScanner),
                 Box::new(crate::tuya::TuyaScanner),
                 Box::new(crate::nuclei_detect::NucleiDetectScanner),
+                Box::new(crate::knx::KnxScanner),
+                Box::new(crate::media_server::MediaServerScanner),
+                Box::new(crate::print3d::Print3dScanner),
+                Box::new(crate::ddwrt_upnp::DdwrtUpnpScanner),
+                Box::new(crate::lan_client_exposure::LanClientExposureScanner),
             ],
         }
     }

@@ -231,6 +231,31 @@ fn render_risk_summary(frame: &mut Frame, area: Rect, app: &App, palette: &Palet
         ),
     ]));
 
+    if let Some(results) = &app.results
+        && !results.report_cards.is_empty()
+    {
+        let mut spans = vec![Span::styled(
+            "  Device grades: ",
+            Style::default().fg(palette.fg),
+        )];
+        for grade in rikitikitavi_models::Grade::ALL {
+            let n = results
+                .report_cards
+                .iter()
+                .filter(|c| c.grade == grade)
+                .count();
+            if n > 0 {
+                spans.push(Span::styled(
+                    format!("{} {n}   ", grade.letter()),
+                    Style::default()
+                        .fg(palette.grade_color(grade))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
     if let Some(diff) = &app.scan_diff {
         lines.push(Line::from(Span::styled(
             format!(

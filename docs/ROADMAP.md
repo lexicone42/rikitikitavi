@@ -13,6 +13,14 @@ Baseline at time of writing: 26 `Scanner` impls (25 in `rikitikitavi-scanners`,
 1 in `rikitikitavi-unifi`), 40,157 OUI entries, KEV catalog 2026.09.16
 (1,713 entries), EPSS at runtime.
 
+> **Status 2026-09-17:** the top 15 shipped in three waves (see CHANGELOG.md
+> "Unreleased"): six wave-1 scanners (Cast, PaperCut, Kasa, Tuya, SADP, Modbus),
+> ASUS 53282, DeviceType widening, Vulnrichment; mDNS/HA tables/Matter,
+> endoflife.date, nuclei detection; Recog, per-device report cards, Prometheus
+> export, and five further scanners (KNXnet/IP, media servers, 3D printers,
+> DD-WRT UPnP, client-side LAN exposure). Open: routersploit corpora (CP-07),
+> declarative user checks (CP-11), OWASP ISTG tagging (CP-13).
+
 ## Executive summary
 
 1. The largest coverage gap is not threat intelligence — it is **device

@@ -92,6 +92,19 @@ impl Palette {
         }
     }
 
+    /// Get the color for a device report-card grade.
+    pub const fn grade_color(&self, grade: rikitikitavi_models::Grade) -> Color {
+        use rikitikitavi_models::Grade;
+        match grade {
+            Grade::A => self.info,
+            Grade::B => self.low,
+            Grade::C => self.medium,
+            Grade::D => self.high,
+            Grade::F => self.critical,
+            Grade::NotAssessed => self.border,
+        }
+    }
+
     /// Get the color for a severity level.
     pub const fn severity_color(&self, severity: rikitikitavi_core::Severity) -> Color {
         match severity {

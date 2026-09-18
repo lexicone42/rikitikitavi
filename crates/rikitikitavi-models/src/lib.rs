@@ -5,6 +5,7 @@ pub mod finding;
 pub mod mac;
 pub mod ocsf;
 pub mod priority_action;
+pub mod report_card;
 
 pub use attack_path::{AttackPath, AttackStep};
 pub use config::ScanConfig;
@@ -13,6 +14,7 @@ pub use finding::{Finding, FindingFingerprint, Remediation};
 pub use mac::MacAddr;
 pub use ocsf::OcsfFinding;
 pub use priority_action::PriorityAction;
+pub use report_card::{DeviceReportCard, DeviceStatus, Grade};
 
 use chrono::{DateTime, Utc};
 use rikitikitavi_core::{NetworkMode, Perspective};
@@ -51,6 +53,9 @@ pub struct ScanResults {
     /// Top priority remediation actions (deduplicated and ranked).
     #[serde(default)]
     pub priority_actions: Vec<PriorityAction>,
+    /// Per-device grades and tracking status.
+    #[serde(default)]
+    pub report_cards: Vec<DeviceReportCard>,
     pub risk_score: f64,
     pub scan_duration_secs: u64,
     /// When this scan was performed.

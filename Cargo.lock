@@ -2556,6 +2556,7 @@ dependencies = [
  "ipnetwork",
  "pcap",
  "proptest",
+ "regex",
  "reqwest",
  "rikitikitavi-core",
  "rikitikitavi-models",

@@ -70,6 +70,29 @@ mod tests {
     }
 
     #[test]
+    fn report_cards_round_trip_and_scans_without_them_still_load() {
+        use rikitikitavi_models::{Device, DeviceStatus, Grade};
+
+        let devices = vec![Device::new("10.0.0.8".parse().unwrap())];
+        let results = ScanResults {
+            report_cards: rikitikitavi_analysis::grade_devices(&devices, &[]),
+            devices,
+            ..Default::default()
+        };
+        let json = to_json_string(&results).unwrap();
+        let back: ScanResults = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.report_cards.len(), 1);
+        assert_eq!(back.report_cards[0].grade, Grade::NotAssessed);
+        assert_eq!(back.report_cards[0].status, DeviceStatus::Untracked);
+
+        // A scan file written before report cards existed.
+        let legacy: ScanResults =
+            serde_json::from_str(r#"{"findings":[],"devices":[],"attack_paths":[],"risk_score":0.0,"scan_duration_secs":0}"#)
+                .unwrap();
+        assert!(legacy.report_cards.is_empty());
+    }
+
+    #[test]
     fn test_json_output_is_valid() {
         let results = make_results(Vec::new());
         let json = to_json_string(&results).unwrap();

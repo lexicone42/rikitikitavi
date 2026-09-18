@@ -638,9 +638,14 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
+    // Graded after dedup and the gateway fix-up, so each card sees the final class.
+    let devices = std::mem::take(&mut ctx.discovered_devices);
+    let report_cards = rikitikitavi_analysis::grade_devices(&devices, &all_findings);
+
     Ok(ScanResults {
         findings: all_findings,
-        devices: std::mem::take(&mut ctx.discovered_devices),
+        devices,
+        report_cards,
         attack_paths,
         priority_actions,
         risk_score,
@@ -867,12 +872,94 @@ fn clean_hostname(raw: &str) -> Option<String> {
     Some(cleaned.to_owned())
 }
 
-/// Merge `DeviceHint`s from findings into devices; higher priority overwrites lower.
-/// Priority: `device`/other = 1, `services` = 2, `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
+/// Instance name used to ask HA's zeroconf table what a bare service-type match
+/// yields. It must match no name glob in the table except `*`.
+const BARE_MATCH_PROBE: &str = "rikitikitavi-probe";
+
+/// mDNS service types behind the service labels the `mdns` scanner attaches to its
+/// findings. The runner needs the type to ask which matcher tier produced a hint.
+const MDNS_SERVICE_TYPES: &[(&str, &[&str])] = &[
+    ("HTTP", &["_http._tcp.local"]),
+    ("SSH", &["_ssh._tcp.local"]),
+    ("SMB", &["_smb._tcp.local", "_afpovertcp._tcp.local"]),
+    ("IPP", &["_ipp._tcp.local", "_printer._tcp.local"]),
+    ("AirPlay", &["_airplay._tcp.local", "_raop._tcp.local"]),
+    ("Google Cast", &["_googlecast._tcp.local"]),
+    ("HomeKit", &["_hap._tcp.local"]),
+    (
+        "Matter",
+        &[
+            "_matter._tcp.local",
+            "_matterc._udp.local",
+            "_matterd._udp.local",
+        ],
+    ),
+    ("Thread", &["_meshcop._udp.local", "_meshcop-e._udp.local"]),
+];
+
+/// A name glob or TXT predicate had to fire to produce this hint's integration
+/// domains, rather than the service type alone.
+///
+/// HA's table is asked which domains a bare match on the same service type yields;
+/// a domain outside that set can only have come from a qualified matcher. The
+/// `_http._tcp` responder that resolves to `shelly` is qualified; the
+/// `_googlecast._tcp` responder that resolves to `cast` is not.
+fn mdns_hint_is_qualified(service: Option<&str>, hint: &DeviceHint) -> bool {
+    use rikitikitavi_scanners::ha_discovery_db::zeroconf_domains;
+
+    let (Some(service), Some(subtype)) = (service, hint.device_subtype.as_deref()) else {
+        return false;
+    };
+    let Some((_, types)) = MDNS_SERVICE_TYPES.iter().find(|(l, _)| *l == service) else {
+        return false;
+    };
+
+    let bare: Vec<&str> = types
+        .iter()
+        .flat_map(|st| zeroconf_domains(st, &format!("{BARE_MATCH_PROBE}.{st}."), &[]))
+        .collect();
+    subtype.split('/').any(|d| !bare.contains(&d))
+}
+
+/// Source rank of a hint: scanner tier, then matcher specificity within the tier.
+fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
+    match finding.scanner.as_str() {
+        "services" => (2, 0),
+        "mdns" => {
+            // `mdns` hints carrying a vendor come from UPnP.
+            if hint.vendor.is_some() {
+                (4, 0)
+            } else {
+                let qualified = mdns_hint_is_qualified(finding.affected_service.as_deref(), hint);
+                (3, u8::from(qualified))
+            }
+        }
+        _ => (1, 0),
+    }
+}
+
+/// Total order over hints so equal-ranked hints do not resolve by arrival order.
+fn hint_order_key(rank: (u8, u8), hint: &DeviceHint) -> (u8, u8, &str, &str, &str, &str, &str) {
+    (
+        rank.0,
+        rank.1,
+        hint.device_type.map_or("", DeviceType::as_str),
+        hint.device_subtype.as_deref().unwrap_or(""),
+        hint.vendor.as_deref().unwrap_or(""),
+        hint.hostname.as_deref().unwrap_or(""),
+        hint.os_guess.as_deref().unwrap_or(""),
+    )
+}
+
+/// Merge `DeviceHint`s from findings into devices; higher rank overwrites lower.
+/// Tier: `device`/other = 1, `services` = 2, `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
+/// Within the `mdns` tier a name-glob or TXT-predicate match outranks a bare
+/// service-type match; anything still equal is ordered by hint content, never by
+/// the order the responses arrived in.
 fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
     use std::collections::HashMap;
 
-    let mut hints_by_ip: HashMap<IpAddr, Vec<(u8, &DeviceHint)>> = HashMap::new();
+    let mut hints_by_ip: HashMap<IpAddr, Vec<((u8, u8), &DeviceHint)>> = HashMap::new();
 
     for finding in findings {
         let Some(ip) = finding.affected_ip else {
@@ -885,16 +972,10 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
             continue;
         }
 
-        let priority = match finding.scanner.as_str() {
-            "services" => 2,
-            "mdns" => {
-                // `mdns` hints carrying a vendor come from UPnP.
-                if hint.vendor.is_some() { 4 } else { 3 }
-            }
-            _ => 1,
-        };
-
-        hints_by_ip.entry(ip).or_default().push((priority, hint));
+        hints_by_ip
+            .entry(ip)
+            .or_default()
+            .push((hint_rank(finding, hint), hint));
     }
 
     if hints_by_ip.is_empty() {
@@ -908,7 +989,9 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
         };
 
         let mut sorted: Vec<_> = hints.clone();
-        sorted.sort_by_key(|(prio, _)| *prio);
+        sorted.sort_by(|(a_rank, a), (b_rank, b)| {
+            hint_order_key(*a_rank, a).cmp(&hint_order_key(*b_rank, b))
+        });
 
         let mut changed = false;
         for (_, hint) in &sorted {
@@ -1594,6 +1677,107 @@ mod tests {
         assert_eq!(devices[0].vendor.as_deref(), Some("LG"));
         // mDNS hostname is set
         assert_eq!(devices[0].hostname.as_deref(), Some("denon"));
+    }
+
+    /// mDNS hints for a host advertising both `_http._tcp` (shelly, name glob) and
+    /// `_googlecast._tcp` (cast, bare service type).
+    fn shelly_and_cast_findings() -> [Finding; 2] {
+        [
+            Finding::new("mdns", "HTTP service advertised", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.40"))
+                .with_service("HTTP")
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_device_type(DeviceType::SmartPlug)
+                        .with_device_subtype("shelly"),
+                ),
+            Finding::new("mdns", "Chromecast/Google Cast", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.40"))
+                .with_service("Google Cast")
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_device_type(DeviceType::MediaPlayer)
+                        .with_device_subtype("cast"),
+                ),
+        ]
+    }
+
+    #[test]
+    fn mdns_service_types_are_all_queried() {
+        for (label, types) in MDNS_SERVICE_TYPES {
+            for st in *types {
+                assert!(
+                    rikitikitavi_network::mdns::SERVICE_QUERIES.contains(st),
+                    "{label}: {st} is not in SERVICE_QUERIES"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mdns_qualified_matcher_is_recognised() {
+        let [shelly, cast] = shelly_and_cast_findings();
+        assert!(mdns_hint_is_qualified(
+            shelly.affected_service.as_deref(),
+            shelly.device_hint.as_ref().unwrap()
+        ));
+        assert!(!mdns_hint_is_qualified(
+            cast.affected_service.as_deref(),
+            cast.device_hint.as_ref().unwrap()
+        ));
+        // An unmapped service label cannot be checked, so it is never promoted.
+        assert!(!mdns_hint_is_qualified(
+            Some("SNMP"),
+            shelly.device_hint.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_post_enrich_prefers_qualified_mdns_matcher_either_order() {
+        for reversed in [false, true] {
+            let mut devices = vec![Device::new(ip("192.168.1.40"))];
+            let mut findings = shelly_and_cast_findings().to_vec();
+            if reversed {
+                findings.reverse();
+            }
+            post_enrich_devices(&mut devices, &findings);
+            assert_eq!(
+                devices[0].device_type,
+                DeviceType::SmartPlug,
+                "reversed = {reversed}"
+            );
+            assert_eq!(devices[0].device_subtype.as_deref(), Some("shelly"));
+        }
+    }
+
+    #[test]
+    fn test_post_enrich_same_rank_hints_are_order_independent() {
+        let hints = [
+            DeviceHint::new()
+                .with_device_type(DeviceType::Speaker)
+                .with_device_subtype("sonos"),
+            DeviceHint::new()
+                .with_device_type(DeviceType::SmartTv)
+                .with_device_subtype("samsungtv"),
+        ];
+        let findings: Vec<Finding> = hints
+            .iter()
+            .map(|h| {
+                Finding::new("mdns", "mDNS service", "desc", Severity::Info)
+                    .with_ip(ip("192.168.1.41"))
+                    .with_service("mDNS")
+                    .with_device_hint(h.clone())
+            })
+            .collect();
+
+        let mut forward = vec![Device::new(ip("192.168.1.41"))];
+        post_enrich_devices(&mut forward, &findings);
+        let mut backward = vec![Device::new(ip("192.168.1.41"))];
+        let reversed: Vec<Finding> = findings.into_iter().rev().collect();
+        post_enrich_devices(&mut backward, &reversed);
+
+        assert_eq!(forward[0].device_type, backward[0].device_type);
+        assert_eq!(forward[0].device_subtype, backward[0].device_subtype);
     }
 
     #[test]

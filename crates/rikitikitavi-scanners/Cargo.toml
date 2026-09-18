@@ -36,6 +36,8 @@ serde_json.workspace = true
 
 aws-lc-rs.workspace = true
 
+regex.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 

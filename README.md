@@ -58,7 +58,7 @@ sudo rikitikitavi monitor --interface wlan0
 
 ## Features
 
-### 32 Security Scanners
+### 37 Security Scanners
 
 Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
@@ -115,10 +115,17 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **TR-069 / CWMP** | ISP remote-management (7547) reachable on the LAN |
 | **RTSP / ONVIF** | IP-camera streams reachable without authentication |
 | **UPnP-IGD** | Router WAN→LAN port forwards ("what's exposed to the internet?") |
+| **KNXnet/IP** | Building-automation gateways on UDP 3671 (`SEARCH_REQUEST` only), unsecured service families |
+| **Media Servers** | Plex `/identity` version correlation (CVE-2020-5741 KEV, CVE-2025-34158), Jellyfin `/System/Info/Public` and UDP 7359 discovery, open first-run wizard |
+| **3D Printers** | Moonraker/Klipper authorization posture (7125/7130) and `OctoPrint` (5000), identification paths only |
+| **DD-WRT UPnP** | Unauthenticated `MiniUPnPd`/DD-WRT control endpoints reachable on the LAN |
+| **Client-Side LAN Exposure** | Devices attacked as *clients* of a hostile LAN service (no listening port to scan) |
 | **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(`rikitikitavi monitor`, feature `monitor`)* |
 
-The 32 registered scanners are every row except Passive WiFi, which is not in
-`ScannerRegistry` and runs only through the `monitor` command.
+The 37 registered scanners are every row above except two: Passive WiFi, which is
+not in `ScannerRegistry` and runs only through the `monitor` command, and
+Matter / Thread, which is a capability of the mDNS/SSDP scanner rather than a
+scanner of its own.
 
 ### Exploit Intelligence & Confidence
 
@@ -137,6 +144,62 @@ of raw CVE/CVSS so a non-expert knows what to fix first:
   (banner/version match), or **~ inferred** (heuristic). A version banner is
   only *probable* because a backported patch can leave an old version string,
   so confirmed findings stand out from ones worth double-checking.
+
+### Per-Device Report Cards
+
+Every discovered device gets a letter grade from its own findings and its device
+class, alongside the network-wide score:
+
+```
+  Devices needing attention (grade | device | findings):
+    D  192.168.1.64     Hikvision (camera)          1 HIGH  [new]
+    C  192.168.1.34     Denon (media_player)        1 HIGH
+
+  Device grades (own scoring, not a certification):
+    A 57,  C 1,  not assessed 2
+    Tracking: 2 new, 59 known
+```
+
+The ladder is the scan-wide one (F: any critical; D: >2 high; C: any high;
+B: >3 medium; A: otherwise), with two device-scoped adjustments:
+
+- a finding CISA lists as exploited in the wild caps the grade at **F**;
+- a class whose compromise reaches past the device itself is graded one letter
+  harder — hubs, routers, access points and NAS boxes hold other devices'
+  credentials, locks, EV chargers, inverters and thermostats actuate the
+  physical world, cameras, NVRs and doorbells record it.
+
+A host with no findings and no open ports is **not assessed** rather than A:
+nothing was observed, which is not the same as nothing being wrong. These grades
+are this tool's own scoring of what is visible from the LAN — not a conformance
+verdict. Schemes like ETSI EN 303 645 and the FCC Cyber Trust Mark rest on
+manufacturer evidence no network scan can see.
+
+Grades appear in the terminal report, the HTML device inventory, the TUI
+dashboard, network map and device detail, the JSON `report_cards` array, and the
+Prometheus export. With `--known-devices`, each card also carries whether the
+host is `known`, `new`, or `untracked` (no list supplied, so nothing is claimed).
+
+### Metrics Export
+
+For cron-driven scans, `--format prometheus` writes
+[Prometheus text exposition 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/)
+for node_exporter's textfile collector:
+
+```bash
+rikitikitavi scan --quiet --format prometheus \
+  --output /var/lib/node_exporter/textfile_collector/rikitikitavi.prom
+```
+
+The file is written under a temporary name and renamed into place, so a scrape
+never sees a half-written file. Metrics: `rikitikitavi_devices_total`,
+`devices_new`, `findings{severity,confidence}`, `kev_findings_total`,
+`eol_findings_total`, `risk_score`, `scan_duration_seconds`,
+`last_scan_timestamp_seconds`, `devices_by_grade{grade}`, `device_grade{ip}`
+(A=4 … F=0) and the `device_info{ip,mac,vendor,device_type,hostname,status}`
+identity metric to join on. Deliberately not OpenMetrics: the textfile collector
+parses with `expfmt.NewTextParser`, which rejects `# EOF` and `_created` series
+and would drop the whole file.
 
 ### Scan Comparison
 
@@ -207,7 +270,7 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 │  RIKITIKITAVI ─ Home Network Security Auditor                │
 ├──────────────────────────────────────────────────────────────┤
 │  Risk Score: 72/100 (C)      Scan: 2m 14s                   │
-│  ████████████████░░░░░░░░    32 scanners, 47 findings        │
+│  ████████████████░░░░░░░░    37 scanners, 47 findings        │
 │                                                              │
 │  CRIT ██  3    NEW   5       ┌─────────────────┐            │
 │  HIGH ████  7  CHG   2       │   ,:::::::,     │            │
@@ -280,7 +343,7 @@ Options:
   --aggressive           Deep scan (extended port range)
   --modules <M>          Comma-separated scanner list
   --output <PATH>        Output file path
-  --format <F>           Output format: json, csv, html, ocsf
+  --format <F>           Output format: json, csv, html, ocsf, prometheus
   --attack-paths         Generate attack path analysis
   --compare-previous     Diff against last saved scan
   --fail-on <SEVERITY>   Exit code 2 if any finding is at/above this severity
@@ -418,7 +481,7 @@ host/port/service, CWE reference, and remediation steps with estimated effort:
           │                    │                     │
    ┌──────┴──────┐   ┌────────┴────────┐   ┌───────┴───────┐
    │   scanners  │   │    analysis     │   │    export     │
-   │ 32 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
+   │ 37 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
    │ + registry  │   │ attack paths    │   │ HTML, OCSF    │
    └──────┬──────┘   └────────┬────────┘   └───────────────┘
           │                    │
@@ -587,7 +650,7 @@ The runner (`runner.rs`) coordinates scanning:
    the previous results)
 2. **Enrichment** — discovered ports are grouped by IP to build device
    profiles, then injected into `ScanContext`
-3. **Phase 2** — remaining 29 scanners run concurrently via
+3. **Phase 2** — remaining 34 scanners run concurrently via
    `futures::future::join_all`, filtered by `relevant_ports()`
 4. **Deduplication** — when Phase 1 and Phase 2 produce findings for the same
    `(ip, port)`, the one with more detail wins (scored by evidence, CWE,
@@ -712,7 +775,7 @@ performance.
 ## Development
 
 ```bash
-# Run all tests (1710 tests across 17 binaries, incl. ~200 proptest invariants)
+# Run all tests (2010 tests across 17 binaries, incl. ~200 proptest invariants)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)

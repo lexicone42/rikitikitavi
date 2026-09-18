@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use crate::Scanner;
 use crate::http_util::unauthenticated_probe_client;
+use crate::recog;
+use crate::recog_db::RecogKey;
 
 /// Upper bound on concurrently audited HTTP endpoints.
 const MAX_AUDIT_CONCURRENCY: usize = 8;
@@ -1294,6 +1296,49 @@ fn is_session_cookie_value(lower: &str) -> bool {
         || lower.starts_with("token=")
 }
 
+/// ASCII-case-insensitive substring search that keeps byte indices valid.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let n = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(n.len())
+        .position(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// The `<title>` with its original case; Recog's `html_title` patterns are
+/// case-sensitive unless they carry `(?i)`.
+fn extract_title(body: &str) -> Option<&str> {
+    let open = find_ascii_ci(body, "<title")?;
+    let start = body[open..].find('>')? + open + 1;
+    let close = find_ascii_ci(body.get(start..)?, "</title>")? + start;
+    let title = body.get(start..close)?.trim();
+    (!title.is_empty()).then_some(title)
+}
+
+/// Identify an HTTP endpoint from the `Server` header, the `WWW-Authenticate`
+/// realm and the page title together, as one finding.
+fn recog_identify(
+    ip: IpAddr,
+    port: u16,
+    server: Option<&str>,
+    www_authenticate: Option<&str>,
+    body: &str,
+) -> Option<Finding> {
+    let title = extract_title(body);
+    let mut inputs: Vec<(RecogKey, &str)> = Vec::new();
+    if let Some(server) = server {
+        inputs.push((RecogKey::HttpServer, server));
+    }
+    if let Some(auth) = www_authenticate {
+        inputs.push((RecogKey::HttpWwwAuth, auth));
+    }
+    if let Some(title) = title {
+        inputs.push((RecogKey::HtmlTitle, title));
+    }
+    let matches = recog::identify_all(&inputs);
+    recog::identification_finding("http_audit", ip, Some(port), &matches)
+}
+
 /// Audit a single HTTP endpoint.
 #[allow(clippy::too_many_lines)]
 async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
@@ -1343,6 +1388,12 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             findings.push(finding);
         }
 
+        let www_authenticate = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+
         let powered_by = resp
             .headers()
             .get("x-powered-by")
@@ -1384,6 +1435,14 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         if let Some(f) = classify_nas_ha(ip, port, headers.server.as_deref(), &body) {
             findings.push(f);
         }
+
+        findings.extend(recog_identify(
+            ip,
+            port,
+            headers.server.as_deref(),
+            www_authenticate.as_deref(),
+            &body,
+        ));
         {
             if is_default_page(&body) {
                 findings.push(
@@ -1609,6 +1668,58 @@ impl Scanner for HttpAuditScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn extract_title_keeps_the_original_case() {
+        assert_eq!(
+            extract_title("<html><head><TITLE>RouterOS router configuration page</TITLE>"),
+            Some("RouterOS router configuration page")
+        );
+        assert_eq!(
+            extract_title("<title lang=\"en\"> Spaced </title>"),
+            Some("Spaced")
+        );
+        assert_eq!(extract_title("<title></title>"), None);
+        assert_eq!(extract_title("<title>unterminated"), None);
+        assert_eq!(extract_title("no title here"), None);
+    }
+
+    #[test]
+    fn find_ascii_ci_is_byte_index_safe() {
+        assert_eq!(find_ascii_ci("héllo<TITLE>", "<title"), Some(6));
+        assert_eq!(find_ascii_ci("short", "much longer needle"), None);
+    }
+
+    /// A title Recog knows identifies the device; the finding stays Info/Probable.
+    #[test]
+    fn recog_identify_uses_the_page_title() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let body = "<html><head><title>RouterOS router configuration page</title></head></html>";
+        let finding = recog_identify(ip, 80, None, None, body).unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.confidence, rikitikitavi_core::Confidence::Probable);
+        assert!(finding.title.contains("192.168.1.1:80"));
+    }
+
+    /// Nothing recognisable yields no finding at all.
+    #[test]
+    fn recog_identify_is_silent_without_a_match() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(recog_identify(ip, 80, None, None, "<title>zzzz</title>").is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn prop_extract_title_no_panic(body in ".*") {
+            let _ = extract_title(&body);
+        }
+
+        #[test]
+        fn prop_recog_identify_no_panic(body in ".*", server in ".*") {
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            let _ = recog_identify(ip, 80, Some(&server), None, &body);
+        }
+    }
 
     #[test]
     fn test_flatten_by_index_restores_input_order() {

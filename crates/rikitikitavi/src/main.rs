@@ -242,6 +242,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     let mut results = runner::run_scan(&mut ctx).await?;
 
     if let (Some(known), Some(path)) = (known_devices.as_ref(), args.known_devices.as_ref()) {
+        mark_device_status(&mut results, known);
         let new_devices: Vec<_> = results
             .devices
             .iter()
@@ -318,12 +319,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     }
 
     if let Some(output) = args.output {
-        match args.format {
-            cli::ReportFormatArg::Json => rikitikitavi_export::export_json(&results, &output)?,
-            cli::ReportFormatArg::Html => rikitikitavi_export::export_html(&results, &output)?,
-            cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(&results, &output)?,
-            cli::ReportFormatArg::Ocsf => rikitikitavi_export::export_ocsf_json(&results, &output)?,
-        }
+        write_report(args.format, &results, &output)?;
         tolerate_broken_pipe(writeln!(
             std::io::stdout().lock(),
             "Results written to {}",
@@ -537,6 +533,52 @@ fn is_known_device(
     known.contains(&device_identifier(d)) || known.contains(&d.ip.to_string())
 }
 
+/// Stamp every report card with whether its host is in the known-devices file.
+fn mark_device_status(
+    results: &mut rikitikitavi_models::ScanResults,
+    known: &std::collections::HashSet<String>,
+) {
+    use rikitikitavi_models::DeviceStatus;
+    for card in &mut results.report_cards {
+        let listed = results
+            .devices
+            .iter()
+            .find(|d| d.ip == card.ip)
+            .is_some_and(|d| is_known_device(d, known));
+        card.status = if listed {
+            DeviceStatus::Known
+        } else {
+            DeviceStatus::New
+        };
+    }
+}
+
+/// Grade the devices of a scan loaded from history that predates report cards.
+fn backfill_report_cards(
+    mut results: rikitikitavi_models::ScanResults,
+) -> rikitikitavi_models::ScanResults {
+    if results.report_cards.is_empty() && !results.devices.is_empty() {
+        results.report_cards =
+            rikitikitavi_analysis::grade_devices(&results.devices, &results.findings);
+    }
+    results
+}
+
+/// Write `results` to `path` in `format`.
+fn write_report(
+    format: cli::ReportFormatArg,
+    results: &rikitikitavi_models::ScanResults,
+    path: &std::path::Path,
+) -> Result<()> {
+    match format {
+        cli::ReportFormatArg::Json => rikitikitavi_export::export_json(results, path),
+        cli::ReportFormatArg::Html => rikitikitavi_export::export_html(results, path),
+        cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(results, path),
+        cli::ReportFormatArg::Ocsf => rikitikitavi_export::export_ocsf_json(results, path),
+        cli::ReportFormatArg::Prometheus => rikitikitavi_export::export_prometheus(results, path),
+    }
+}
+
 /// Build a "new device on network" finding for an unrecognized device.
 fn new_device_finding(d: &rikitikitavi_models::Device) -> rikitikitavi_models::Finding {
     use rikitikitavi_core::{Confidence, Severity};
@@ -612,6 +654,51 @@ fn tolerate_broken_pipe(r: std::io::Result<()>) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         other => other,
     }
+}
+
+/// Grade distribution and known/new counts for the devices in this scan.
+///
+/// The grades are this tool's own scoring of what it could see from the LAN; they
+/// are not a certification, and no scheme is being asserted.
+fn print_grade_summary<W: std::io::Write>(
+    out: &mut W,
+    results: &rikitikitavi_models::ScanResults,
+) -> std::io::Result<()> {
+    use rikitikitavi_models::{DeviceStatus, Grade};
+
+    if results.report_cards.is_empty() {
+        return Ok(());
+    }
+
+    let count = |g: Grade| results.report_cards.iter().filter(|c| c.grade == g).count();
+    let spread: Vec<String> = Grade::ALL
+        .into_iter()
+        .filter(|&g| count(g) > 0)
+        .map(|g| {
+            let label = if g == Grade::NotAssessed {
+                "not assessed".to_owned()
+            } else {
+                g.to_string()
+            };
+            format!("{label} {}", count(g))
+        })
+        .collect();
+    writeln!(out, "  Device grades (own scoring, not a certification):")?;
+    writeln!(out, "    {}", spread.join(",  "))?;
+
+    let status_count = |s: DeviceStatus| {
+        results
+            .report_cards
+            .iter()
+            .filter(|c| c.status == s)
+            .count()
+    };
+    let new = status_count(DeviceStatus::New);
+    let known = status_count(DeviceStatus::Known);
+    if new + known > 0 {
+        writeln!(out, "    Tracking: {new} new, {known} known")?;
+    }
+    writeln!(out)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -708,7 +795,7 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) -> std::io::Resu
                     .unwrap_or(Severity::Info);
                 std::cmp::Reverse((worst, fs.len()))
             });
-            out!("  Devices needing attention:");
+            out!("  Devices needing attention (grade | device | findings):");
             for (ip, fs) in &rows {
                 let ident = results
                     .devices
@@ -726,12 +813,23 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) -> std::io::Resu
                         let _ = write!(badge, "{n} {name}  ");
                     }
                 }
+                let card = results.report_cards.iter().find(|c| c.ip == *ip);
+                let grade = card.map_or('-', |c| c.grade.letter());
+                let status = match card.map(|c| c.status) {
+                    Some(rikitikitavi_models::DeviceStatus::New) => "  [new]",
+                    _ => "",
+                };
                 let ip_str = ip.to_string();
-                out!("    {ip_str:<15}  {ident:<26}  {}", badge.trim_end());
+                out!(
+                    "    {grade}  {ip_str:<15}  {ident:<26}  {}{status}",
+                    badge.trim_end()
+                );
             }
             out!();
         }
     }
+
+    print_grade_summary(&mut out, results)?;
 
     if !actionable.is_empty() {
         out!("  Actionable findings:");
@@ -972,7 +1070,8 @@ async fn cmd_tui(
     let history = rikitikitavi_analysis::ScanHistory::new();
     let previous_results = history
         .as_ref()
-        .and_then(|h| h.load_latest().ok().flatten());
+        .and_then(|h| h.load_latest().ok().flatten())
+        .map(backfill_report_cards);
 
     let perspective = args
         .perspective
@@ -1094,6 +1193,7 @@ fn cmd_report(args: &cli::ReportArgs, _app_config: &rikitikitavi_models::config:
         };
         match history.load_latest() {
             Ok(Some(results)) => {
+                let results = backfill_report_cards(results);
                 println!(
                     "Last scan: {} ({} findings)",
                     results.scanned_at.format("%Y-%m-%d %H:%M:%S"),
@@ -1509,20 +1609,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         };
 
         if let Some(ref output) = args.output {
-            match args.format {
-                cli::ReportFormatArg::Json => {
-                    rikitikitavi_export::export_json(&scan_results, output)?;
-                }
-                cli::ReportFormatArg::Html => {
-                    rikitikitavi_export::export_html(&scan_results, output)?;
-                }
-                cli::ReportFormatArg::Csv => {
-                    rikitikitavi_export::export_csv(&scan_results, output)?;
-                }
-                cli::ReportFormatArg::Ocsf => {
-                    rikitikitavi_export::export_ocsf_json(&scan_results, output)?;
-                }
-            }
+            write_report(args.format, &scan_results, output)?;
             println!("Results written to {}", output.display());
         }
 
@@ -1541,20 +1628,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
             ..Default::default()
         };
 
-        match args.format {
-            cli::ReportFormatArg::Json => {
-                rikitikitavi_export::export_json(&scan_results, output)?;
-            }
-            cli::ReportFormatArg::Html => {
-                rikitikitavi_export::export_html(&scan_results, output)?;
-            }
-            cli::ReportFormatArg::Csv => {
-                rikitikitavi_export::export_csv(&scan_results, output)?;
-            }
-            cli::ReportFormatArg::Ocsf => {
-                rikitikitavi_export::export_ocsf_json(&scan_results, output)?;
-            }
-        }
+        write_report(args.format, &scan_results, output)?;
         println!("Results written to {}", output.display());
     }
 
@@ -1983,6 +2057,82 @@ mod tests {
             &rikitikitavi_models::Device::new(ip),
             &by_mac
         ));
+    }
+
+    /// One graded device at 10.0.0.5, one at 10.0.0.6.
+    fn two_device_results() -> rikitikitavi_models::ScanResults {
+        use rikitikitavi_models::{Device, ScanResults};
+        let devices = vec![
+            Device::new("10.0.0.5".parse().unwrap()).with_mac("aa:bb:cc:dd:ee:ff"),
+            Device::new("10.0.0.6".parse().unwrap()),
+        ];
+        let report_cards = rikitikitavi_analysis::grade_devices(&devices, &[]);
+        ScanResults {
+            devices,
+            report_cards,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mark_device_status_splits_known_from_new() {
+        use crate::mark_device_status;
+        use rikitikitavi_models::DeviceStatus;
+        use std::collections::HashSet;
+
+        let mut results = two_device_results();
+        let known: HashSet<String> = HashSet::from(["aa:bb:cc:dd:ee:ff".to_owned()]);
+        mark_device_status(&mut results, &known);
+
+        let status = |ip: &str| {
+            results
+                .report_cards
+                .iter()
+                .find(|c| c.ip.to_string() == ip)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status("10.0.0.5"), DeviceStatus::Known);
+        assert_eq!(status("10.0.0.6"), DeviceStatus::New);
+    }
+
+    #[test]
+    fn backfill_grades_a_scan_loaded_without_cards() {
+        use crate::backfill_report_cards;
+
+        let mut results = two_device_results();
+        results.report_cards.clear();
+        let filled = backfill_report_cards(results);
+        assert_eq!(filled.report_cards.len(), 2);
+    }
+
+    #[test]
+    fn write_report_emits_prometheus_text() {
+        use crate::write_report;
+
+        let path = temp_path("write-report.prom");
+        write_report(
+            crate::cli::ReportFormatArg::Prometheus,
+            &two_device_results(),
+            &path,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(body.contains("rikitikitavi_devices_total 2"));
+        assert!(!body.contains("# EOF"));
+    }
+
+    #[test]
+    fn grade_summary_names_no_scheme() {
+        use crate::print_grade_summary;
+
+        let mut buf = Vec::new();
+        print_grade_summary(&mut buf, &two_device_results()).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("not a certification"));
+        assert!(text.contains("not assessed 2"));
+        assert!(!text.to_lowercase().contains("etsi"));
     }
 
     #[cfg(feature = "tui")]

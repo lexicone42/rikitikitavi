@@ -12,6 +12,8 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 use crate::eol_db;
+use crate::recog;
+use crate::recog_db::RecogKey;
 
 /// Service banner scanner: banner grabs, HTTP `Server` header version checks,
 /// and protocol probes (SSH `kex_init`, SMTP `EHLO`, FTP `FEAT`).
@@ -500,6 +502,63 @@ async fn probe_ftp_feat(ip: IpAddr, port: u16) -> Option<FtpFeatInfo> {
     let feat_response = String::from_utf8_lossy(&buf[..fn_]);
     let combined = format!("{greeting}{feat_response}");
     Some(parse_ftp_feat(&combined))
+}
+
+/// First line of a banner, whitespace trimmed.
+fn first_line(banner: &str) -> &str {
+    banner.lines().next().unwrap_or("").trim()
+}
+
+/// Strip an FTP/SMTP three-digit reply code and its `\x20` or `-` separator.
+///
+/// Recog's `ftp.banner` and `smtp.banner` patterns match the greeting text, not
+/// the reply code, so a banner that keeps the code matches nothing.
+fn strip_reply_code(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let code = bytes.first_chunk::<3>()?;
+    if !code.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if !matches!(bytes.get(3), Some(b' ' | b'-')) {
+        return None;
+    }
+    Some(line.get(4..)?.trim())
+}
+
+/// Strip a POP3 or IMAP status indicator, which Recog's patterns also omit.
+fn strip_status<'a>(line: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+    prefixes.iter().find_map(|prefix| {
+        line.get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .and_then(|_| line.get(prefix.len()..))
+            .map(str::trim)
+    })
+}
+
+/// Identify a raw TCP banner with the Recog fingerprint tables.
+///
+/// The key follows the banner, not only the port: an SSH identification string
+/// is an SSH identification string wherever it is listening. Each table expects
+/// the greeting with its protocol status prefix already removed.
+fn recog_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
+    if let Some(software) = recog::ssh_software(banner) {
+        return recog::identify_finding("services", ip, Some(port), RecogKey::SshBanner, software);
+    }
+    let (key, body) = match port {
+        21 => (RecogKey::FtpBanner, strip_reply_code(first_line(banner))?),
+        23 => (RecogKey::TelnetBanner, banner.trim()),
+        25 => (RecogKey::SmtpBanner, strip_reply_code(first_line(banner))?),
+        110 => (
+            RecogKey::PopBanner,
+            strip_status(first_line(banner), &["+OK ", "-ERR "])?,
+        ),
+        143 => (
+            RecogKey::ImapBanner,
+            strip_status(first_line(banner), &["* OK ", "* PREAUTH "])?,
+        ),
+        _ => return None,
+    };
+    recog::identify_finding("services", ip, Some(port), key, body)
 }
 
 /// Ports that send a banner immediately upon connection.
@@ -1943,6 +2002,7 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
                 findings.extend(classify_banner(ip, port, banner));
                 findings.extend(check_os_eol(ip, port, banner));
                 findings.extend(classify_backdoor_ssh(ip, port, banner, role));
+                findings.extend(recog_banner(ip, port, banner));
             }
             if active {
                 findings.extend(deep_probe(ip, port, banner.as_deref()).await);
@@ -1950,6 +2010,18 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
         } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
             if let Some(server) = grab_http_server(ip, port).await {
                 findings.extend(classify_http_server(ip, port, &server));
+                // At Active+ the HTTP audit identifies this endpoint from the
+                // header, the realm and the page title together; identify here
+                // only when that scanner will not run.
+                if !active {
+                    findings.extend(recog::identify_finding(
+                        "services",
+                        ip,
+                        Some(port),
+                        RecogKey::HttpServer,
+                        &server,
+                    ));
+                }
             }
         } else {
             // Unknown port: plain banner grab
@@ -1957,6 +2029,7 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
                 findings.extend(classify_banner(ip, port, &banner));
                 findings.extend(check_os_eol(ip, port, &banner));
                 findings.extend(classify_backdoor_ssh(ip, port, &banner, role));
+                findings.extend(recog_banner(ip, port, &banner));
             }
         }
     }
@@ -2064,12 +2137,20 @@ impl Scanner for ServicesScanner {
                     findings.extend(classify_banner(ip, port, &banner));
                     findings.extend(check_os_eol(ip, port, &banner));
                     findings.extend(classify_backdoor_ssh(ip, port, &banner, role));
+                    findings.extend(recog_banner(ip, port, &banner));
                 }
             }
 
             for &port in HTTP_PORTS {
                 if let Some(server) = grab_http_server(ip, port).await {
                     findings.extend(classify_http_server(ip, port, &server));
+                    findings.extend(recog::identify_finding(
+                        "services",
+                        ip,
+                        Some(port),
+                        RecogKey::HttpServer,
+                        &server,
+                    ));
                 }
             }
         }
@@ -2093,6 +2174,81 @@ impl Scanner for ServicesScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// An SSH identification string is identified wherever it listens, including
+    /// the `AyySSHush` port.
+    #[test]
+    fn recog_banner_identifies_ssh_on_any_port() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        for port in [22u16, 2222, AYYSSHUSH_PORT] {
+            let finding =
+                recog_banner(ip, port, "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4").unwrap();
+            assert_eq!(finding.affected_port, Some(port));
+            assert_eq!(finding.confidence, Confidence::Probable);
+            assert_eq!(finding.severity, Severity::Info);
+        }
+    }
+
+    /// Ports with no Recog table and no SSH banner produce nothing.
+    #[test]
+    fn recog_banner_is_silent_on_unmapped_ports() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(recog_banner(ip, 6379, "+PONG").is_none());
+        assert!(recog_banner(ip, 21, "220 zzzz").is_none());
+    }
+
+    /// The reply code is not part of what Recog matches.
+    #[test]
+    fn recog_banner_strips_the_ftp_reply_code() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let finding =
+            recog_banner(ip, 21, "220 ProFTPD 1.3.5 Server (Debian) [10.0.0.1]\r\n").unwrap();
+        assert!(
+            finding
+                .affected_service
+                .as_deref()
+                .is_some_and(|s| s.contains("ProFTPD"))
+        );
+        // The same greeting with the code still attached matches nothing.
+        assert!(
+            crate::recog::identify(
+                RecogKey::FtpBanner,
+                "220 ProFTPD 1.3.5 Server (Debian) [10.0.0.1]"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn strip_reply_code_needs_three_digits_and_a_separator() {
+        assert_eq!(strip_reply_code("220 hello"), Some("hello"));
+        assert_eq!(strip_reply_code("220-hello"), Some("hello"));
+        assert_eq!(strip_reply_code("22 hello"), None);
+        assert_eq!(strip_reply_code("220xhello"), None);
+        assert_eq!(strip_reply_code("220"), None);
+        assert_eq!(strip_reply_code(""), None);
+    }
+
+    #[test]
+    fn strip_status_matches_case_insensitively() {
+        assert_eq!(
+            strip_status("+OK Dovecot ready", &["+OK "]),
+            Some("Dovecot ready")
+        );
+        assert_eq!(
+            strip_status("* ok [CAPABILITY] ready", &["* OK "]),
+            Some("[CAPABILITY] ready")
+        );
+        assert_eq!(strip_status("nope", &["+OK "]), None);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_recog_banner_no_panic(banner in ".*", port in any::<u16>()) {
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            let _ = recog_banner(ip, port, &banner);
+        }
+    }
 
     #[test]
     fn test_extract_ssh_version() {

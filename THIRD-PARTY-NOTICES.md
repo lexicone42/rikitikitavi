@@ -192,3 +192,99 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Rapid7 Recog fingerprint database
+
+Embedded in `crates/rikitikitavi-scanners/src/recog_db.rs` (regenerate with
+`uv run --with defusedxml python scripts/gen_recog_db.py --clone <path>`).
+
+- Source: https://github.com/rapid7/recog — the `xml/` fingerprint files, read at commit
+  `d3d20938da9f5f1e442c2419fe6c30cd651b6878` (2026-08-17, branch `main`).
+- Snapshot taken: 2026-09-17
+- Licence: BSD-2-Clause. The repository's `LICENSE` is a Debian copyright-format file
+  naming `Files: *`, `Copyright: 2014, Rapid7, Inc.`, `License: BSD-2-clause`; the licence
+  text itself is in `COPYING`, reproduced verbatim below, including its
+  "Copyright (c) 2014-2015, Rapid7" notice.
+- Extracted fields: from 13 of the 51 fingerprint files, each `<fingerprint>` element's
+  `pattern`, `flags` and `<description>`, and the `<param>` elements whose `name` is one of
+  `service.{vendor,product,version,family}`, `os.{vendor,product,version,family,device,arch}`,
+  `hw.{vendor,product,model,family,device}` or `host.name`. The `<example>` elements of the
+  imported fingerprints are embedded behind `#[cfg(test)]` only.
+- Not extracted: every `*.cpe23` value, `*.certainty`, `system.time*`, `openssh.comment`,
+  `host.mac`, `host.ip`, `dell.service_tag` and the other vendor-specific parameters —
+  2,427 parameters in all, because nothing in this workspace joins them. A fingerprint
+  left with no extracted parameter is dropped (34 of them, mostly `html_title`'s generic
+  HTTP error pages), and 38 of the 51 upstream files are not imported at all because no
+  probe here produces their input; `scripts/gen_recog_db.py` records the reason per file.
+- Row counts: 2,430 fingerprints across 13 match keys — `ssh.banner` 152,
+  `telnet.banner` 144, `ftp.banner` 149, `smtp.banner` 139, `imap4.banner` 18,
+  `pop3.banner` 30, `http_header.server` 451, `http_header.wwwauth` 74, `html_title` 452,
+  `snmp.sys_description` 591, `x509.subject` 166, `x509.issuer` 29, `hp.pjl.id` 35 —
+  plus 4,529 test-only examples.
+- Byte size: 1,172,967 bytes of embedded table and 811,591 bytes of `#[cfg(test)]`
+  examples, 1,984,558 bytes of generated source in total.
+- Modifications (§ none required by BSD-2-Clause, recorded for review): each pattern is
+  rewritten from Recog's Ruby/POSIX flag conventions into Rust inline flags —
+  `REG_ICASE` becomes `(?i)`, `REG_DOT_NEWLINE` and `REG_MULTILINE` both become `(?s)`,
+  and `(?m)` is prefixed to every pattern because Ruby's `^`/`$` are always line anchors.
+  Pattern text is otherwise byte-for-byte upstream. Match resolution keeps upstream file
+  order (first match wins). No fingerprint was dropped for using an unsupported regex
+  feature: at this commit none of the imported patterns uses lookaround or a
+  backreference.
+
+Upstream `COPYING`, verbatim:
+
+```
+Copyright (c) 2014-2015, Rapid7
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this
+  list of conditions and the following disclaimer in the documentation and/or
+  other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+Upstream `LICENSE`, verbatim:
+
+```
+Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: https://github.com/rapid7/recog
+
+Files: *
+Copyright: 2014, Rapid7, Inc.
+License: BSD-2-clause
+```
+
+## Concepts referenced, with no code or data copied
+
+These projects and specifications informed features in this repository. Nothing
+was vendored from them: no source, no fixtures, no data tables, no wording.
+
+- **Prometheus text exposition format 0.0.4** — the output shape of
+  `--format prometheus` (`crates/rikitikitavi-export/src/prometheus.rs`). The
+  format is a published specification; the Prometheus project itself is
+  Apache-2.0. Metric names, help strings and the choice of series are ours.
+  Source: https://prometheus.io/docs/instrumenting/exposition_formats/
+- **WatchYourLAN** (MIT) — prior art for exporting LAN-scan state as metrics.
+  No code or metric definitions were taken. Source:
+  https://github.com/aceberg/WatchYourLAN
+- **NetAlertX** (GPL-3.0) — prior art for presenting per-device new/known state
+  alongside the device inventory. The idea only; no GPL code, strings or schema
+  is present, and the implementation reuses this repository's own
+  `--known-devices` file. Source: https://github.com/jokob-sk/NetAlertX

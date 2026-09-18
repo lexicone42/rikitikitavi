@@ -345,6 +345,15 @@ async fn check_raw_printing(ip: IpAddr, port: u16, findings: &mut Vec<Finding>) 
     // The open port itself is the exposure — reported unconditionally.
     let banner = grab_pjl_banner(ip, port).await;
     let model = banner.as_deref().and_then(parse_pjl_id);
+    if let Some(model) = model.as_deref() {
+        findings.extend(crate::recog::identify_finding(
+            "printers",
+            ip,
+            Some(port),
+            crate::recog_db::RecogKey::HpPjlId,
+            model,
+        ));
+    }
 
     findings.push(build_raw_printing_finding(ip, port, model.as_deref()));
 
@@ -425,6 +434,28 @@ impl Scanner for PrinterScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A PJL model string identifies the printer through Recog.
+    #[test]
+    fn recog_identifies_a_pjl_model() {
+        let ip: std::net::IpAddr = "192.168.1.40".parse().unwrap();
+        let model = parse_pjl_id("@PJL INFO ID\r\n\"HP LaserJet 4100 Series\"\r\n").unwrap();
+        let finding = crate::recog::identify_finding(
+            "printers",
+            ip,
+            Some(RAW_PRINT_PORT),
+            crate::recog_db::RecogKey::HpPjlId,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(finding.severity, Severity::Info);
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.vendor.as_deref(), Some("HP"));
+        assert_eq!(
+            hint.device_type,
+            Some(rikitikitavi_models::DeviceType::Printer)
+        );
+    }
 
     // ── classify_cups_server ────────────────────────────────────────
 

@@ -14,6 +14,15 @@ Roadmap waves 1 and 2 (see docs/ROADMAP.md).
 - nuclei detection templates (MIT, inert send payloads only) identify products
   from banners and handshakes as a new read-only scanner.
 
+- Rapid7 Recog banner fingerprints (BSD-2-Clause, 2,430 patterns over 13 match
+  keys) identify products, firmware and device class from strings the scanners
+  already collect: SSH, Telnet, FTP, SMTP, IMAP and POP greetings, the HTTP
+  `Server` header, `WWW-Authenticate` realm and page title, SNMP `sysDescr`,
+  X.509 subject and issuer, and the `@PJL INFO ID` reply. Identification is
+  Info/Probable — a banner is a claim, not a demonstration — and a device type is
+  set only from Recog's own device vocabulary through a curated map, never from a
+  product name.
+
 - Six new scanners: Google Cast, PaperCut NG/MF (CVE-2026-81578/82078), TP-Link
   Kasa (unauthenticated local control on 9999), Tuya local protocol, Hikvision
   SADP discovery, Modbus/SunSpec on solar, battery and EV equipment. All probes
@@ -27,6 +36,37 @@ Roadmap waves 1 and 2 (see docs/ROADMAP.md).
 - CISA Vulnrichment SSVC (CC0) embedded for the CVEs the scanners emit: the
   `poc` exploitation tier and CWE backfill feed risk scoring.
 - 14 ports added to the common scan list; THIRD-PARTY-NOTICES.md added.
+
+- Per-device report cards: a letter grade per device from its own findings and
+  its device class (KEV findings cap at F; classes that hold other devices'
+  credentials or act on the physical world are graded one letter harder; a host
+  with nothing observed is "not assessed", not A). Rendered in the terminal
+  report, HTML inventory, TUI dashboard/map/detail and the JSON `report_cards`
+  array. It is this tool's own scoring, not a conformance verdict against any
+  scheme.
+- Device tracking status (`known` / `new` / `untracked`) from `--known-devices`
+  now appears per device in reports, not only as a finding.
+- `--format prometheus`: Prometheus text exposition 0.0.4 for node_exporter's
+  textfile collector, written atomically (device, finding, KEV, EOL, grade and
+  per-device identity metrics).
+- mDNS device hints are ranked by matcher specificity: a name-glob or
+  TXT-predicate match from Home Assistant's zeroconf table now outranks a bare
+  service-type match, and equal-ranked hints are ordered by content instead of
+  by the order the responses arrived in.
+- Five more scanners from the roadmap's threat and hardware sections, all
+  read-only: KNXnet/IP building automation (UDP 3671 SEARCH_REQUEST; reports
+  reachable attack surface and programming mode, and deliberately attaches no
+  CVE, since the CVE-2023-4346 precondition is a bus-level property no
+  KNXnet/IP datagram carries), Plex and Jellyfin media servers (CVE-2020-5741
+  and CVE-2025-34158 version ranges, Jellyfin first-run setup left open),
+  Moonraker/Klipper and OctoPrint 3D printers (authentication posture read from
+  Moonraker's own `/access/info`, OctoPrint identified by its `X-Clacks-Overhead`
+  header), the DD-WRT `upnpd` banner check for CVE-2021-27137 (KEV; MiniUPnPd
+  banners are a negative indicator and the crashing proof of concept is never
+  sent), and a client-side LAN exposure category for devices attacked as clients
+  of services other hosts offer, seeded with the Sonos SMB client issue.
+
+Review fixes on those five scanners:
 
 ## 0.3.0 — 2026-09-16
 

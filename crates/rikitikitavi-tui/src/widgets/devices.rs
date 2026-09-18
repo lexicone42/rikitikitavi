@@ -20,6 +20,13 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
+    // Cloned up front: the detail closure borrows `app.selected_device`.
+    let card = app
+        .selected_device
+        .as_ref()
+        .and_then(|d| app.report_card(d.ip))
+        .cloned();
+
     let text = app.selected_device.as_ref().map_or_else(
         || {
             vec![
@@ -102,6 +109,26 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
                 ),
                 detail_line("  Type", &type_str, &palette),
             ];
+
+            if let Some(card) = &card {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<14}", "Grade"),
+                        Style::default().fg(palette.border),
+                    ),
+                    Span::styled(
+                        card.grade.letter().to_string(),
+                        Style::default()
+                            .fg(palette.grade_color(card.grade))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  ({})", card.rationale),
+                        Style::default().fg(palette.border),
+                    ),
+                ]));
+                lines.push(detail_line("  Seen", card.status.as_str(), &palette));
+            }
 
             lines.push(Line::from(""));
             if device.open_ports.is_empty() {

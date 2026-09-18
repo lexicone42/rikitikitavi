@@ -52,7 +52,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    let devices = app.devices();
+    // Cloned so the map rows can read report cards while `app` is borrowed mutably.
+    let devices = app.devices().to_vec();
+    let grades: Vec<(char, ratatui::style::Color)> = devices
+        .iter()
+        .map(|d| {
+            app.report_card(d.ip).map_or(('-', palette.border), |c| {
+                (c.grade.letter(), palette.grade_color(c.grade))
+            })
+        })
+        .collect();
 
     // Snake position oscillates with the tick counter.
     #[allow(clippy::cast_possible_truncation)]
@@ -180,10 +189,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Style::default().fg(palette.fg)
             };
 
+            let (letter, color) = grades[i];
             lines.push(Line::from(vec![
                 Span::raw("           "),
                 Span::styled(connector, Style::default().fg(palette.border)),
-                Span::styled(format!(" {icon} {label}"), style),
+                Span::styled(
+                    format!(" {letter} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{icon} {label}"), style),
                 Span::styled(ports_info, Style::default().fg(palette.border)),
             ]));
         }
