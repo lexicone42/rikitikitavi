@@ -19,7 +19,7 @@ Clone the repository (~1.6 GB checked out; needed only for the repo-wide
         https://github.com/cisagov/vulnrichment.git /tmp/vulnrichment
 
 Without a clone, `--download` fetches just the records for the CVEs this
-workspace references (45 HTTPS requests today).
+workspace references, one HTTPS request each.
 
 Usage
 -----
@@ -31,8 +31,16 @@ Usage
     uv run python scripts/gen_vulnrichment_db.py --download \\
         > crates/rikitikitavi-analysis/src/vulnrichment_db.rs
 
-Row selection: every CVE this workspace references (harvested from the crate
-sources, minus the generated tables) that CISA has enriched. Records with
+    # offline: does the committed table still match the selection rule?
+    uv run python scripts/gen_vulnrichment_db.py \\
+        --check crates/rikitikitavi-analysis/src/vulnrichment_db.rs
+
+Row selection: every CVE this workspace references that CISA has enriched.
+References are harvested from production crate source only — the generated
+tables, `tests.rs` files, `#[cfg(test)]` items and comments are stripped by a
+lexer that knows string, raw-string and char literals, so a fixture id cannot
+select a row — plus the explicit allowlist in
+`scripts/vulnrichment_extra_cves.txt` for ids the tests spot-check. Records with
 neither an SSVC block nor a CISA-ADP CWE are dropped.
 
 `--sweep-tiers` additionally embeds every `poc`/`active` record repo-wide. That
@@ -58,22 +66,177 @@ from pathlib import Path
 REPO_URL = "https://github.com/cisagov/vulnrichment"
 RAW_BASE = "https://raw.githubusercontent.com/cisagov/vulnrichment/develop"
 CVE_RE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,7}")
+CFG_TEST_RE = re.compile(r"#\[cfg\(test\)\]")
+RAW_STR_RE = re.compile(r'b?r(#*)"')
+SSVC_ROW_RE = re.compile(r'Ssvc \{ cve: "(CVE-[0-9]{4}-[0-9]{4,7})"')
 # Generated tables: their CVE ids are data, not references this workspace makes.
-SKIP_SOURCES = {"kev_db.rs", "vulnrichment_db.rs"}
+# `tests.rs`: fixture ids, not references either.
+SKIP_SOURCES = {"kev_db.rs", "vulnrichment_db.rs", "tests.rs"}
+# Ids to embed regardless of what the sources reference; one per line, `#` comments.
+EXTRA_CVES = Path(__file__).resolve().parent / "vulnrichment_extra_cves.txt"
 
 EXPLOITATION = {"none": "None", "poc": "Poc", "active": "Active"}
 AUTOMATABLE = {"no": "No", "yes": "Yes"}
 IMPACT = {"partial": "Partial", "total": "Total"}
 
 
+def char_literal_end(text: str, i: int) -> int | None:
+    """End index of the char literal starting at `i`, or None for a lifetime."""
+    n = len(text)
+    if i + 1 >= n:
+        return None
+    if text[i + 1] == "\\":
+        j = i + 2
+        if j >= n:
+            return None
+        if text[j] == "u":
+            j = text.find("}", j)
+            if j < 0:
+                return None
+            j += 1
+        elif text[j] == "x":
+            j += 3
+        else:
+            j += 1
+        return j + 1 if j < n and text[j] == "'" else None
+    # `'a` is a lifetime or a loop label, not a literal.
+    return i + 3 if i + 2 < n and text[i + 2] == "'" else None
+
+
+def mask_source(text: str) -> tuple[str, str]:
+    """`(no_comments, code_only)`, both the length of `text`.
+
+    `no_comments` blanks comments. `code_only` blanks comments and the text of string,
+    raw-string and char literals, so a brace or a quote inside one is not read as code.
+    """
+    no_comments = list(text)
+    code_only = list(text)
+    n = len(text)
+    i = 0
+
+    def blank(start: int, stop: int, comment: bool) -> None:
+        for k in range(start, min(stop, n)):
+            fill = "\n" if text[k] == "\n" else " "
+            code_only[k] = fill
+            if comment:
+                no_comments[k] = fill
+
+    while i < n:
+        char = text[i]
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            blank(i, end, comment=True)
+            i = end
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            blank(i, j, comment=True)
+            i = j
+        elif char == "'" and (end := char_literal_end(text, i)):
+            blank(i, end, comment=False)
+            i = end
+        elif char in "br" and (match := raw_string_at(text, i)):
+            hashes = match.group(1)
+            close = text.find('"' + hashes, match.end())
+            end = n if close < 0 else close + 1 + len(hashes)
+            blank(i, end, comment=False)
+            i = end
+        elif char == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                elif text[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            blank(i, j, comment=False)
+            i = j
+        else:
+            i += 1
+    return "".join(no_comments), "".join(code_only)
+
+
+def raw_string_at(text: str, i: int) -> re.Match | None:
+    """Raw-string prefix (`r"`, `r#"`, `br#"`) starting at `i`, if it starts a token."""
+    if i and (text[i - 1].isalnum() or text[i - 1] == "_"):
+        return None
+    return RAW_STR_RE.match(text, i)
+
+
+def cfg_test_spans(code_only: str) -> list[tuple[int, int]]:
+    """Half-open spans of every `#[cfg(test)]` item, by brace matching over code."""
+    spans: list[tuple[int, int]] = []
+    n = len(code_only)
+    i = 0
+    while match := CFG_TEST_RE.search(code_only, i):
+        brace = code_only.find("{", match.end())
+        semi = code_only.find(";", match.end())
+        if brace < 0 or 0 <= semi < brace:
+            # `#[cfg(test)] mod tests;` — the file itself is skipped by name.
+            i = semi + 1 if semi >= 0 else match.end()
+            continue
+        depth, j = 0, brace
+        while j < n:
+            if code_only[j] == "{":
+                depth += 1
+            elif code_only[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        spans.append((match.start(), min(j + 1, n)))
+        i = j + 1
+    return spans
+
+
+def production_source(text: str) -> str:
+    """Rust source with comments and `#[cfg(test)]` items removed."""
+    no_comments, code_only = mask_source(text)
+    out: list[str] = []
+    prev = 0
+    for start, end in cfg_test_spans(code_only):
+        out.append(no_comments[prev:start])
+        prev = end
+    out.append(no_comments[prev:])
+    return "".join(out)
+
+
+def extra_cves(path: Path = EXTRA_CVES) -> set[str]:
+    """Allowlisted ids: embedded whether or not production source references them."""
+    if not path.exists():
+        return set()
+    found: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip().upper()
+        if line:
+            if not CVE_RE.fullmatch(line):
+                raise SystemExit(f"{path}: not a CVE id: {line}")
+            found.add(line)
+    return found
+
+
 def workspace_cves(crates: Path) -> set[str]:
-    """CVE ids referenced by the crate sources, excluding the generated tables."""
+    """CVE ids referenced by production crate source, plus the allowlist.
+
+    Generated tables, `tests.rs` files, `#[cfg(test)]` items and comments are
+    excluded: a fixture id must never select a row.
+    """
     found: set[str] = set()
     for path in crates.rglob("*.rs"):
-        if path.name in SKIP_SOURCES:
+        if path.name in SKIP_SOURCES or "tests" in path.parts:
             continue
-        found.update(CVE_RE.findall(path.read_text(encoding="utf-8", errors="replace")))
-    return {c.upper() for c in found}
+        source = path.read_text(encoding="utf-8", errors="replace")
+        found.update(CVE_RE.findall(production_source(source)))
+    return {c.upper() for c in found} | extra_cves()
 
 
 def cisa_adp(record: dict) -> list[dict]:
@@ -202,11 +365,11 @@ def emit(rows: list[tuple], meta: dict, out) -> None:
 //! Snapshot: {meta["date"]} | Entries: {len(rows):,} (active {tiers["Active"]}, poc {tiers["Poc"]}, none {tiers["None"]})
 //! Mode: {meta["mode"]}
 //!
-//! Regenerate with `uv run python scripts/gen_vulnrichment_db.py`.
+//! Regenerate with `uv run python scripts/gen_vulnrichment_db.py --clone <path>`;
+//! `--check <this file>` re-runs the row selection offline.
 //!
-//! The `poc` tier is what KEV and EPSS cannot express: public exploit code
-//! exists, exploitation in the wild has not been observed. `active` overlaps
-//! KEV almost exactly; it is kept so the tier is total over the table.
+//! The `poc` tier — public exploit code, no observed exploitation — is the part KEV
+//! and EPSS cannot express. `active` overlaps KEV almost exactly.
 
 /// SSVC Exploitation: evidence that a vulnerability is being exploited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -285,6 +448,21 @@ static SSVC_ENTRIES: &[Ssvc] = &[
     out.write("];\n\n#[cfg(test)]\nmod tests;\n")
 
 
+def check_table(path: Path, wanted: set[str]) -> int:
+    """Exit code: 1 if the table holds a row the current selection rule would not pick.
+
+    Offline; checks which ids are embedded, not the SSVC values behind them.
+    """
+    table = set(SSVC_ROW_RE.findall(path.read_text(encoding="utf-8")))
+    stale = sorted(table - wanted)
+    print(
+        f"{path}: {len(table)} rows; {len(stale)} not selected by the current rule: "
+        f"{', '.join(stale) if stale else 'none'}",
+        file=sys.stderr,
+    )
+    return 1 if stale else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate vulnrichment_db.rs")
     parser.add_argument(
@@ -310,8 +488,17 @@ def main() -> None:
         default=Path(__file__).resolve().parent.parent / "crates",
         help="workspace crate sources to harvest CVE references from",
     )
+    parser.add_argument(
+        "--check",
+        type=Path,
+        metavar="VULNRICHMENT_DB_RS",
+        help="offline: report rows the current selection rule would no longer select, "
+        "then exit non-zero if there are any",
+    )
     args = parser.parse_args()
 
+    if args.check:
+        raise SystemExit(check_table(args.check, workspace_cves(args.crates)))
     if not args.clone and not args.download:
         parser.error("pass --clone <path> or --download")
     if args.sweep_tiers and not args.clone:
@@ -320,13 +507,15 @@ def main() -> None:
     wanted = workspace_cves(args.crates)
     print(f"workspace references {len(wanted)} CVE ids", file=sys.stderr)
 
+    selection = f"production CVE references + `{EXTRA_CVES.name}`"
     if args.clone:
         rows = read_wanted(args.clone, wanted)
-        mode = "workspace CVEs"
+        flags = "--clone"
         if args.sweep_tiers:
             rows = sweep_tiers(args.clone) | rows
-            mode = "workspace CVEs + repo-wide poc/active sweep"
-        meta = {"commit": clone_commit(args.clone), "mode": mode}
+            selection += " + repo-wide poc/active sweep"
+            flags += " --sweep-tiers"
+        meta = {"commit": clone_commit(args.clone), "mode": f"{selection} ({flags})"}
     else:
         rows = {}
         for cve in sorted(wanted):
@@ -334,7 +523,7 @@ def main() -> None:
             parsed = parse_record(record) if record else None
             if parsed:
                 rows[parsed[0]] = parsed
-        meta = {"commit": "n/a (HTTPS fetch)", "mode": "workspace CVEs (HTTPS fetch)"}
+        meta = {"commit": "n/a (HTTPS fetch)", "mode": f"{selection} (--download)"}
 
     missing = sorted(wanted - rows.keys())
     print(

@@ -1,23 +1,31 @@
 //! Prometheus text exposition format 0.0.4, for `node_exporter`'s textfile collector.
 //!
-//! Deliberately not `OpenMetrics`: the collector parses with `expfmt.NewTextParser`,
-//! which rejects `# EOF`, `_created` series and OpenMetrics-only types, and would
-//! publish `node_textfile_scrape_error 1` and drop the file. The collector also
-//! ignores nothing and supports no timestamps, so none is ever appended — the scan
-//! time is a gauge whose *value* is the epoch second.
+//! Not `OpenMetrics`: the collector parses with `expfmt.NewTextParser`, which rejects
+//! `# EOF`, `_created` series and OpenMetrics-only types and would drop the file. It
+//! supports no sample timestamps either, so the scan time is a gauge whose value is
+//! the epoch second.
+//!
+//! Written 0644, not 0600 like the other exports: `node_exporter` reads it as its own
+//! user.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use rikitikitavi_analysis::{Exploitation, ssvc_for};
 use rikitikitavi_core::{Confidence, Severity};
-use rikitikitavi_models::{DeviceStatus, Grade, ScanResults};
+use rikitikitavi_models::{DeviceStatus, Finding, Grade, ScanResults};
 
 /// Metric name prefix.
 const PREFIX: &str = "rikitikitavi";
 
 /// End-of-life findings are marked with CWE-1104 (use of unmaintained components).
 const EOL_CWE: &str = "CWE-1104";
+
+/// The finding's worst Vulnrichment record is the `poc` tier: exploit code, no observed use.
+fn poc_tier(finding: &Finding) -> bool {
+    ssvc_for(finding).is_some_and(|s| s.exploitation == Exploitation::Poc)
+}
 
 /// Numeric value of a grade, best to worst; `NotAssessed` has no value.
 const fn grade_value(grade: Grade) -> Option<f64> {
@@ -84,11 +92,11 @@ pub fn render_prometheus(results: &ScanResults) -> String {
 
     header(
         &mut out,
-        "devices_total",
+        "devices",
         "Devices seen in the last scan.",
         "gauge",
     );
-    let _ = writeln!(out, "{PREFIX}_devices_total {}", results.devices.len());
+    let _ = writeln!(out, "{PREFIX}_devices {}", results.devices.len());
 
     let tracked = results
         .report_cards
@@ -143,25 +151,37 @@ pub fn render_prometheus(results: &ScanResults) -> String {
 
     header(
         &mut out,
-        "kev_findings_total",
+        "kev_findings",
         "Findings whose CVEs are in the CISA KEV catalog.",
         "gauge",
     );
     let _ = writeln!(
         out,
-        "{PREFIX}_kev_findings_total {}",
+        "{PREFIX}_kev_findings {}",
         results.findings.iter().filter(|f| f.is_kev).count()
     );
 
     header(
         &mut out,
-        "eol_findings_total",
+        "poc_findings",
+        "Findings with public exploit code, no observed exploitation (CISA Vulnrichment).",
+        "gauge",
+    );
+    let _ = writeln!(
+        out,
+        "{PREFIX}_poc_findings {}",
+        results.findings.iter().filter(|f| poc_tier(f)).count()
+    );
+
+    header(
+        &mut out,
+        "eol_findings",
         "Findings of end-of-life software (CWE-1104).",
         "gauge",
     );
     let _ = writeln!(
         out,
-        "{PREFIX}_eol_findings_total {}",
+        "{PREFIX}_eol_findings {}",
         results
             .findings
             .iter()
@@ -260,6 +280,40 @@ pub fn render_prometheus(results: &ScanResults) -> String {
     out
 }
 
+/// Mode of the exposition file.
+#[cfg(unix)]
+const TEXTFILE_MODE: u32 = 0o644;
+
+/// Write `bytes` to `path` world-readable, creating or truncating it.
+fn write_world_readable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(TEXTFILE_MODE);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    if file.metadata()?.is_file() {
+        // The open mode is masked by umask. Devices and pipes keep their mode;
+        // filesystems without modes are tolerated.
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(TEXTFILE_MODE))
+            && !matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+            )
+        {
+            return Err(e);
+        }
+    }
+    file.write_all(bytes)?;
+    file.flush()
+}
+
 /// Temporary path for the atomic write: `<path>.<pid>`.
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -269,13 +323,13 @@ fn temp_path(path: &Path) -> PathBuf {
 
 /// Write the exposition document to `path`, atomically.
 ///
-/// The textfile collector reads whatever is on disk whenever it scrapes, so the file
-/// is written under a temporary name and renamed into place.
+/// The textfile collector reads whatever is on disk whenever it scrapes, so the file is
+/// written under a temporary name and renamed into place.
 pub fn export_prometheus(results: &ScanResults, path: &Path) -> Result<()> {
     tracing::info!(?path, "exporting Prometheus metrics");
     let body = render_prometheus(results);
     let temp = temp_path(path);
-    rikitikitavi_core::fs::write_private(&temp, body.as_bytes())
+    write_world_readable(&temp, body.as_bytes())
         .with_context(|| format!("writing {}", temp.display()))?;
     if let Err(e) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);

@@ -79,8 +79,8 @@ pub fn render_detail(frame: &mut Frame, app: &mut App) {
             let display_name = device.hostname.as_deref().unwrap_or(&ip_str).to_owned();
             // `Display` is the JSON spelling, so the TUI and the report agree.
             let type_str = device.device_subtype.as_ref().map_or_else(
-                || device.device_type.to_string(),
-                |sub| format!("{} ({sub})", device.device_type),
+                || device.device_type.label().to_owned(),
+                |sub| format!("{} ({sub})", device.device_type.label()),
             );
 
             let mut lines = vec![

@@ -90,6 +90,15 @@ fn known_records_match_upstream() {
     );
 }
 
+/// Ids that exist only as test fixtures must never select a row: the generator
+/// harvests production source plus `scripts/vulnrichment_extra_cves.txt`.
+#[test]
+fn test_fixture_cves_are_absent() {
+    for cve in ["CVE-2024-1234", "CVE-2024-5678", "CVE-1999-0001"] {
+        assert!(lookup_ssvc(cve).is_none(), "{cve}");
+    }
+}
+
 #[test]
 fn unknown_cve_is_absent() {
     assert!(lookup_ssvc("CVE-9999-99999").is_none());

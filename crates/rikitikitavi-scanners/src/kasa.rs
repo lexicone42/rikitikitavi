@@ -5,7 +5,8 @@
 //! the LAN can read `get_sysinfo` and issue control commands. This probe sends one
 //! request from a hard allowlist (`get_sysinfo` only) and never writes device state.
 //!
-//! Protocol description: <https://github.com/softScheck/tplink-smartplug>
+//! Protocol description and the test vector: softScheck/tplink-smartplug
+//! (Apache-2.0); see THIRD-PARTY-NOTICES.md.
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
@@ -669,7 +670,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Published `get_sysinfo` ciphertext (softScheck tplink-smartplug), no length prefix.
+    /// Published `get_sysinfo` ciphertext (softScheck/tplink-smartplug, Apache-2.0),
+    /// no length prefix.
     const GET_SYSINFO_CIPHERTEXT: &str =
         "d0f281f88bff9af7d5ef94b6d1b4c09fec95e68fe187e8caf08bf68bf6";
 

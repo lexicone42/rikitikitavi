@@ -411,8 +411,8 @@ fn firmware_finding(ip: IpAddr, device: &SadpDevice, verdict: BuildVerdict) -> O
                 "The device at {ip} reports firmware {version}. Builds in the V5.2.0-V5.4.4 \
                  range dated 170109 or earlier carry CVE-2017-7921, an improper authentication \
                  flaw that lets anyone on the network download the full device configuration \
-                 — including the admin password hash — and escalate to full control. CISA added \
-                 it to the Known Exploited Vulnerabilities catalog on 2026-03-05; it is used by \
+                 — including the admin password hash — and escalate to full control. CISA lists \
+                 it in the Known Exploited Vulnerabilities catalog; it is used by \
                  IoT botnets and has been exploited in the wild for years. The same build is \
                  also below the 250807 floor of the 2025 advisory family (CVE-2025-66177). \
                  Upgrade the firmware and then change every credential, since existing \
@@ -541,10 +541,24 @@ async fn bind_sadp_socket() -> Option<UdpSocket> {
     }
 }
 
+/// Whether a reply sender may be reported. The group inquiry reaches the whole
+/// L2 segment, so senders outside `--target` must be dropped on receipt.
+fn reply_in_scope(
+    ip: IpAddr,
+    exclusions: &ExclusionSet,
+    network: Option<&ipnetwork::IpNetwork>,
+) -> bool {
+    !exclusions.excludes_ip(ip) && network.is_none_or(|n| n.contains(ip))
+}
+
 /// Send the inquiry to the multicast group and to each unicast target, then
-/// collect replies until the window closes. Replies from excluded hosts are
-/// dropped.
-async fn discover(targets: &[IpAddr], exclusions: &ExclusionSet) -> Vec<(IpAddr, SadpDevice)> {
+/// collect replies until the window closes. Replies from excluded hosts, and
+/// from outside `network` when one is set, are dropped.
+async fn discover(
+    targets: &[IpAddr],
+    exclusions: &ExclusionSet,
+    network: Option<&ipnetwork::IpNetwork>,
+) -> Vec<(IpAddr, SadpDevice)> {
     let mut results: Vec<(IpAddr, SadpDevice)> = Vec::new();
     let Some(socket) = bind_sadp_socket().await else {
         tracing::warn!("could not bind a SADP socket");
@@ -552,8 +566,6 @@ async fn discover(targets: &[IpAddr], exclusions: &ExclusionSet) -> Vec<(IpAddr,
     };
 
     let inquiry = build_inquiry(&probe_uuid());
-    // The multicast inquiry mirrors the existing SSDP/mDNS discovery scanners:
-    // one group datagram, results filtered by the exclusion set on receipt.
     let group = SocketAddr::new(IpAddr::V4(SADP_GROUP), SADP_PORT);
     if let Err(e) = socket.send_to(inquiry.as_bytes(), group).await {
         tracing::debug!("could not send the SADP multicast inquiry: {e}");
@@ -579,11 +591,12 @@ async fn discover(targets: &[IpAddr], exclusions: &ExclusionSet) -> Vec<(IpAddr,
             break;
         };
         let ip = from.ip();
-        if exclusions.excludes_ip(ip) || !seen.insert(ip) {
+        if !reply_in_scope(ip, exclusions, network) || seen.contains(&ip) {
             continue;
         }
         let Some(chunk) = buf.get(..n) else { continue };
         if let Some(device) = parse_probe_match(&String::from_utf8_lossy(chunk)) {
+            seen.insert(ip);
             results.push((ip, device));
         }
     }
@@ -640,7 +653,7 @@ impl Scanner for SadpScanner {
             .map(|d| d.ip)
             .collect();
 
-        let replies = discover(&targets, &exclusions).await;
+        let replies = discover(&targets, &exclusions, ctx.target_network.as_ref()).await;
         tracing::info!(reply_count = replies.len(), "SADP replies received");
 
         for (ip, device) in &replies {
@@ -979,6 +992,23 @@ mod tests {
         assert!(!exclusions.excludes_ip(ip("192.168.1.64")));
     }
 
+    #[test]
+    fn multicast_replies_from_outside_the_target_network_are_dropped() {
+        let network: ipnetwork::IpNetwork = "192.168.1.0/24".parse().unwrap();
+        let none = ExclusionSet::default();
+        assert!(reply_in_scope(ip("192.168.1.64"), &none, Some(&network)));
+        // Same L2 segment, different subnet: answers the group inquiry anyway.
+        assert!(!reply_in_scope(ip("192.168.0.64"), &none, Some(&network)));
+        // No --target: only the exclusion set filters.
+        assert!(reply_in_scope(ip("192.168.0.64"), &none, None));
+        let excluded = ExclusionSet::parse(&["192.168.1.64/32".to_owned()], &[]).unwrap();
+        assert!(!reply_in_scope(
+            ip("192.168.1.64"),
+            &excluded,
+            Some(&network)
+        ));
+    }
+
     /// Answer one inquiry on 127.0.0.1:37020 with `CAMERA_REPLY`, asserting the
     /// request is the read-only inquiry verb.
     fn spawn_responder(responder: UdpSocket) -> tokio::task::JoinHandle<()> {
@@ -1001,7 +1031,7 @@ mod tests {
             return;
         };
         let server = spawn_responder(responder);
-        let found = discover(&[ip("127.0.0.1")], &ExclusionSet::default()).await;
+        let found = discover(&[ip("127.0.0.1")], &ExclusionSet::default(), None).await;
         server.abort();
 
         let (addr, device) = found
@@ -1017,7 +1047,7 @@ mod tests {
         };
         let server = spawn_responder(responder);
         let excluded = ExclusionSet::parse(&["127.0.0.0/8".to_owned()], &[]).unwrap();
-        let found = discover(&[ip("127.0.0.1")], &excluded).await;
+        let found = discover(&[ip("127.0.0.1")], &excluded, None).await;
         server.abort();
         assert!(found.is_empty(), "{found:?}");
     }

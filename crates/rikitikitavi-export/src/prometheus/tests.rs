@@ -132,16 +132,41 @@ fn headers_precede_every_metric() {
 #[test]
 fn counts_match_the_results() {
     let text = render_prometheus(&sample());
-    assert!(text.contains("rikitikitavi_devices_total 2"));
+    assert!(text.contains("rikitikitavi_devices 2"));
     assert!(text.contains("rikitikitavi_devices_new 1"));
-    assert!(text.contains("rikitikitavi_kev_findings_total 1"));
-    assert!(text.contains("rikitikitavi_eol_findings_total 1"));
+    assert!(text.contains("rikitikitavi_kev_findings 1"));
+    assert!(text.contains("rikitikitavi_eol_findings 1"));
+    assert!(text.contains("rikitikitavi_poc_findings 0"));
     assert!(
         text.contains("rikitikitavi_findings{severity=\"critical\",confidence=\"probable\"} 1")
     );
     assert!(text.contains("rikitikitavi_devices_by_grade{grade=\"F\"} 1"));
     assert!(text.contains("rikitikitavi_device_grade{ip=\"10.0.0.1\"} 0"));
     assert!(text.contains("rikitikitavi_scan_duration_seconds 42"));
+}
+
+/// `_total` is reserved for counters; every series here is a snapshot gauge.
+#[test]
+fn no_gauge_carries_the_counter_suffix() {
+    let text = render_prometheus(&sample());
+    for (name, _) in check_exposition(&text) {
+        let base = name.split('{').next().unwrap();
+        assert!(!base.ends_with("_total"), "{base}");
+    }
+}
+
+/// The `poc` tier is the one exploit signal KEV does not carry.
+#[test]
+fn poc_tier_findings_are_counted() {
+    let mut results = sample();
+    results.findings.push(
+        Finding::new("test", "terrapin", "d", Severity::Medium)
+            .with_ip(ip(2))
+            .with_cve_ids(vec!["CVE-2023-48795".to_owned()]),
+    );
+    let text = render_prometheus(&results);
+    check_exposition(&text);
+    assert!(text.contains("rikitikitavi_poc_findings 1"));
 }
 
 #[test]
@@ -177,7 +202,7 @@ fn label_values_are_escaped() {
 fn empty_results_still_render() {
     let text = render_prometheus(&ScanResults::default());
     check_exposition(&text);
-    assert!(text.contains("rikitikitavi_devices_total 0"));
+    assert!(text.contains("rikitikitavi_devices 0"));
 }
 
 #[test]
@@ -197,13 +222,13 @@ fn export_writes_the_file_and_leaves_no_temp() {
 
 #[cfg(unix)]
 #[test]
-fn exported_file_is_private() {
+fn exported_file_is_world_readable() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rikitikitavi.prom");
     export_prometheus(&sample(), &path).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    assert_eq!(mode, 0o644, "node_exporter reads this as its own user");
 }
 
 #[test]

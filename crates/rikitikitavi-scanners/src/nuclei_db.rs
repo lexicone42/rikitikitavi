@@ -58,8 +58,6 @@ pub struct TcpTemplate {
     pub id: &'static str,
     /// Product this identifies.
     pub product: &'static str,
-    /// Vendor, when upstream metadata names one.
-    pub vendor: Option<&'static str>,
     /// Ports the template declares.
     pub ports: &'static [u16],
     /// Payloads to send, in order.
@@ -117,8 +115,6 @@ pub struct HttpTemplate {
     pub id: &'static str,
     /// Product this identifies.
     pub product: &'static str,
-    /// Vendor, when upstream metadata names one.
-    pub vendor: Option<&'static str>,
     /// Paths to GET, relative to the base URL.
     pub paths: &'static [&'static str],
     /// How `matchers` combine.
@@ -178,7 +174,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "3com-ftp-detect",
         product: "3Com 3CDaemon FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -192,7 +187,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "activemq-openwire-transport-detect",
         product: "ActiveMQ OpenWire Transport",
-        vendor: None,
         ports: &[6835, 61616],
         probes: &[
             Probe { data: b"VERSION", name: None, read: None },
@@ -206,7 +200,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "adi-galaxy-ftp-detect",
         product: "ADI Convergence Galaxy FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -220,7 +213,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "adsb-ultrafeeder-detect",
         product: "ADSB Ultrafeeder Beast Mode",
-        vendor: None,
         ports: &[30005],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -234,7 +226,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "afp-server-detect",
         product: "AFP Server",
-        vendor: None,
         ports: &[548],
         probes: &[
             Probe { data: b"\x00\x03\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x0f\x00", name: None, read: None },
@@ -248,7 +239,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "aix-websm-detect",
         product: "AIX WebSM",
-        vendor: None,
         ports: &[9090],
         probes: &[
             Probe { data: b"en_US\x0d\x0a", name: None, read: Some(1024) },
@@ -262,7 +252,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-compactlogix-detect",
         product: "Allen-Bradley CompactLogix Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -276,7 +265,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-guardplc-detect",
         product: "Allen-Bradley GuardPLC Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -292,7 +280,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-micro800-detect",
         product: "Allen-Bradley Micro800 Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -306,7 +293,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-micrologix-detect",
         product: "Allen-Bradley MicroLogix Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -320,7 +306,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-plc5-detect",
         product: "Allen-Bradley PLC-5 Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -334,7 +319,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "allen-bradley-slc-500-detect",
         product: "Allen-Bradley SLC-500 Series PLC",
-        vendor: None,
         ports: &[44818],
         probes: &[
             Probe { data: b"c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: Some("info"), read: Some(200) },
@@ -348,7 +332,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "apache-activemq-detect",
         product: "Apache ActiveMQ",
-        vendor: None,
         ports: &[61613],
         probes: &[
             Probe { data: b"HELP\x0a\x0a\x00", name: None, read: None },
@@ -362,7 +345,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "argosoft-ftp-detect",
         product: "ArGoSoft FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -376,7 +358,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "avalaunch-ftp-detect",
         product: "Avalaunch FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -390,7 +371,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "aws-sftp-detect",
         product: "AWS SFTP Service",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -402,7 +382,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "axigen-mail-server-detect",
         product: "Axigen Mail Server",
-        vendor: None,
         ports: &[25],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -416,7 +395,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "baby-ftp-detect",
         product: "Baby FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -430,7 +408,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "betaftpd-detect",
         product: "BetaFTPD Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -444,7 +421,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "bgp-detect",
         product: "BGP",
-        vendor: None,
         ports: &[179],
         probes: &[
             Probe { data: b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x1d\x01\x04\x00\xff\xff\x00\x00\xb4\xc0", name: None, read: None },
@@ -458,7 +434,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "bitvise-detect",
         product: "SSH Bitvise Service",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -470,7 +445,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "blackjumbodog-ftp-detect",
         product: "BlackJumboDog FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -484,7 +458,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "blackmoon-chaos-ftp-detect",
         product: "BlackMoon FTP Chaos Edition Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -498,7 +471,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "blackmoon-free-ftp-detect",
         product: "BlackMoon FTP Free Edition Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -512,7 +484,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "bluecoat-telnet-proxy-detect",
         product: "BlueCoat Telnet Proxy",
-        vendor: None,
         ports: &[23],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: Some(1024) },
@@ -526,7 +497,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "bsdi-ftp-detect",
         product: "BSDI FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -540,7 +510,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "cerberus-ftp-detect",
         product: "Cerberus FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -554,7 +523,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "checkpoint-ftp-detect",
         product: "Check Point FireWall-1 FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -568,7 +536,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "cisco-finger-detect",
         product: "Cisco Finger Daemon",
-        vendor: None,
         ports: &[79],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -582,7 +549,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "clamav-detect",
         product: "ClamAV Server",
-        vendor: None,
         ports: &[3310],
         probes: &[
             Probe { data: b"VERSION", name: None, read: None },
@@ -596,7 +562,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "cleo-vlproxy-ftp-detect",
         product: "Cleo VLProxy FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -610,7 +575,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "code-crafters-ftp-detect",
         product: "Code-Crafters Ability FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -624,7 +588,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "communigate-ftp-detect",
         product: "CommuniGate Pro FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -638,7 +601,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "cql-native-transport",
         product: "CQL Native Transport",
-        vendor: None,
         ports: &[9042],
         probes: &[
             Probe { data: b"/n", name: None, read: None },
@@ -652,7 +614,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "delegate-ftp-detect",
         product: "DeleGate PROXY-FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -666,7 +627,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "detect-addpac-voip-gateway",
         product: "AddPac GSM VoIP Gateway Panel",
-        vendor: None,
         ports: &[23],
         probes: &[
             Probe { data: b"\x00", name: None, read: None },
@@ -680,7 +640,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "detect-jabber-xmpp",
         product: "Jabber XMPP Protocol",
-        vendor: None,
         ports: &[5222],
         probes: &[
             Probe { data: b"a\x0a", name: None, read: None },
@@ -694,7 +653,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "direct-connect-detect",
         product: "Direct Connect P2P",
-        vendor: None,
         ports: &[548],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -708,7 +666,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "diskstation-ftp-detect",
         product: "DiskStation FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -722,7 +679,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "dotnet-remoting-service-detect",
         product: "Microsoft .NET Remoting httpd",
-        vendor: None,
         ports: &[8080],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -736,7 +692,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "dumb-ftp-detect",
         product: "Dumb FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -750,7 +705,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "easycoder-ftp-detect",
         product: "EasyCoder FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -764,7 +718,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "erlang-otp-ssh-detect",
         product: "Erlang/OTP SSH Server",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -776,7 +729,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "esmtp-detect",
         product: "ESMTP",
-        vendor: None,
         ports: &[25, 465, 587, 2525],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -790,7 +742,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "exim-detect",
         product: "Exim",
-        vendor: None,
         ports: &[465, 587],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -804,7 +755,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "expn-mail-detect",
         product: "EXPN Mail Server",
-        vendor: None,
         ports: &[25, 465, 587, 2525],
         probes: &[
             Probe { data: b"ehlo checktls\x0a", name: None, read: None },
@@ -818,7 +768,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "famatech-radmin-detect",
         product: "Famatech Radmin",
-        vendor: None,
         ports: &[4899],
         probes: &[
             Probe { data: b"\x01\x00\x00\x00\x01\x00\x00\x00\x08\x08", name: None, read: None },
@@ -832,7 +781,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "filezilla-ftp-detect",
         product: "FileZilla FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -846,7 +794,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "finger-detect",
         product: "Finger Daemon",
-        vendor: None,
         ports: &[79],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -860,7 +807,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "firstclass-ftp-detect",
         product: "FirstClass FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -874,7 +820,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "fortinet-fgfm-detect",
         product: "Fortinet FGFM protocol",
-        vendor: None,
         ports: &[541],
         probes: &[
             Probe { data: b".", name: None, read: None },
@@ -888,7 +833,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "freebox-ftp-detect",
         product: "Freebox FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -902,7 +846,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "ftp-detect",
         product: "FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: None },
@@ -916,7 +859,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "gene6-ftp-detect",
         product: "Gene6 FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -930,7 +872,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "globalscape-ftp-detect",
         product: "GlobalSCAPE Secure FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -944,7 +885,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "globalsite-selector-ftp-detect",
         product: "Global Site Selector FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -958,7 +898,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "gnu-inetutils-ftpd-detect",
         product: "GNU Inetutils FTPd",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -972,7 +911,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "golden-ftp-detect",
         product: "Golden FTP Server Pro Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -986,7 +924,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "hp-ftp-detect",
         product: "Hewlett-Packard FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1000,7 +937,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "hummingbird-ftp-detect",
         product: "Hummingbird HCLFTPD Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1014,7 +950,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "ibm-ftp-detect",
         product: "IBM FTP CS Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1028,7 +963,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "imap-detect",
         product: "IMAP",
-        vendor: None,
         ports: &[143],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1042,7 +976,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "iplanet-imap-detect",
         product: "iPlanet Messaging Server IMAP Protocol",
-        vendor: None,
         ports: &[110],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1056,7 +989,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "jana-ftp-detect",
         product: "Jana-Server FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1070,7 +1002,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "java-ftp-proxy-detect",
         product: "Java FTP Proxy Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1084,7 +1015,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "jd-ftp-detect",
         product: "JD FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1098,7 +1028,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "jdwp-detect",
         product: "Java Debug Wire Protocol",
-        vendor: None,
         ports: &[5005],
         probes: &[
             Probe { data: b"JDWP-Handshake", name: None, read: Some(14) },
@@ -1113,7 +1042,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "lanier-ftp-detect",
         product: "LANIER MP 2555 FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1127,7 +1055,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "macosx-ftp-detect",
         product: "Mac OS X Server FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1141,7 +1068,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "maverick-ssh-detect",
         product: "Maverick SSH Service",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -1153,7 +1079,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "medusa-ftp-detect",
         product: "Medusa Async FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1167,7 +1092,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "microsoft-ftp-detect",
         product: "Microsoft FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1181,7 +1105,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "microsoft-ftp-service",
         product: "Microsoft FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1195,7 +1118,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "mikrotik-ftp-detect",
         product: "MikroTik FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1209,7 +1131,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "mikrotik-ftp-server-detect",
         product: "MikroTik FTP server",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1223,7 +1144,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "mikrotik-routeros-api",
         product: "MikroTik RouterOS API",
-        vendor: None,
         ports: &[8728],
         probes: &[
             Probe { data: b":\x00\x00\x00/\x00\x00\x00\x02\x00\x00@\x02\x0f\x00\x01\x00=\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00/\x00\x00\x00\x00\x00\x00\x00\x00\x00@\x1f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: None, read: None },
@@ -1237,7 +1157,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "mongodb-detect",
         product: "MongoDB Service",
-        vendor: None,
         ports: &[27017],
         probes: &[
             Probe { data: b":\x00\x00\x00\xa7A\x00\x00\x00\x00\x00\x00\xd4\x07\x00\x00\x00\x00\x00\x00admin.$cmd\x00\x00\x00\x00\x00\xff\xff\xff\xff\x13\x00\x00\x00\x10ismaster\x00\x01\x00\x00\x00\x00", name: None, read: None },
@@ -1251,7 +1170,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "moveit-sftp-detect",
         product: "MOVEit Transfer SFTP",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -1263,7 +1181,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "mysql-detect",
         product: "MySQL",
-        vendor: None,
         ports: &[3306],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1277,7 +1194,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "ncftpd-detect",
         product: "NcFTPd Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1291,7 +1207,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "netbsd-ftpd-detect",
         product: "NetBSD FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1305,7 +1220,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "netdisk-ftp-detect",
         product: "NET Disk FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1319,7 +1233,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "networkcamera-ftp-detect",
         product: "Network Camera FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1333,7 +1246,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "nfs-v3-exposed",
         product: "NFSv3 Exposed",
-        vendor: None,
         ports: &[2049],
         probes: &[
             Probe { data: b"\x80\x00\x00(VER3\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa3\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: None, read: None },
@@ -1348,7 +1260,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "nmc-ftp-detect",
         product: "Network Management Card FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1362,7 +1273,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "nucleus-ftp-detect",
         product: "Nucleus FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1376,7 +1286,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "opendreambox-ftp-detect",
         product: "OpenDreambox FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1390,7 +1299,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "openssh-detect",
         product: "OpenSSH Service",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -1402,7 +1310,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "oracle-ifs-ftp-detect",
         product: "Oracle Internet File System FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1416,7 +1323,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "oracle-xmldb-ftp-detect",
         product: "Oracle XML DB FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1430,7 +1336,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "pablo-ftp-detect",
         product: "Pablo's FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1444,7 +1349,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "packetshaper-ftp-detect",
         product: "PacketShaper FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1458,7 +1362,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "personal-ftp-detect",
         product: "Personal FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1472,7 +1375,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "pop3-detect",
         product: "POP3 Protocol",
-        vendor: None,
         ports: &[110],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1486,7 +1388,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "prnet-ftp-detect",
         product: "PrNET FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1500,7 +1401,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "proftpd-server-detect",
         product: "ProFTPD Server",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1514,7 +1414,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "psosystem-ftp-detect",
         product: "pSOSystem FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1528,7 +1427,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "pure-ftpd-detect",
         product: "Pure-FTPd Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1542,7 +1440,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "rabbitmq-detect",
         product: "RabbitMQ",
-        vendor: None,
         ports: &[5672],
         probes: &[
             Probe { data: b"AMQP\x00\x00\x09\x01", name: None, read: None },
@@ -1556,7 +1453,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "red-lion-enip-detect",
         product: "Red Lion ENIP",
-        vendor: None,
         ports: &[502],
         probes: &[
             Probe { data: b"\x00\x04\x01+\x1b\x00", name: Some("info"), read: Some(200) },
@@ -1571,7 +1467,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "redis-detect",
         product: "Redis Service",
-        vendor: None,
         ports: &[6379, 6380],
         probes: &[
             Probe { data: b"*1\x0d\x0a$4\x0d\x0ainfo\x0d\x0a", name: None, read: None },
@@ -1585,7 +1480,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "riak-detect",
         product: "Riak",
-        vendor: None,
         ports: &[8087],
         probes: &[
             Probe { data: b"\x00\x00\x00\x01\x07", name: None, read: None },
@@ -1599,7 +1493,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "riedel-ftp-detect",
         product: "RIEDEL Artist FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1613,7 +1506,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "rpcbind-portmapper-detect",
         product: "Rpcbind Portmapper",
-        vendor: None,
         ports: &[111],
         probes: &[
             Probe { data: b"\x80\x00\x00(6\xeddm\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa0\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", name: None, read: None },
@@ -1627,7 +1519,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "rsyncd-service-detect",
         product: "Rsyncd Service",
-        vendor: None,
         ports: &[873],
         probes: &[
             Probe { data: b"?\x0d\x0a", name: None, read: None },
@@ -1641,7 +1532,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sambar-ftp-detect",
         product: "Sambar FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1655,7 +1545,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sap-dispatcher-detect",
         product: "SAP Dispatcher",
-        vendor: None,
         ports: &[3200],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1669,7 +1558,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sap-router",
         product: "SAPRouter",
-        vendor: None,
         ports: &[3299],
         probes: &[
             Probe { data: b"WHOAREYOU?\x0a", name: None, read: None },
@@ -1683,7 +1571,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sap-router-detect",
         product: "SAProuter",
-        vendor: None,
         ports: &[3200],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1697,7 +1584,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "schneider-modicon-340-detect",
         product: "Schneider Electric Modicon 340 Series PLC",
-        vendor: None,
         ports: &[502],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00\x00\x05\x00+\x0e\x02\x00", name: Some("info"), read: Some(200) },
@@ -1713,7 +1599,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "schneider-modicon-580-detect",
         product: "Schneider Electric Modicon 580 Series PLC",
-        vendor: None,
         ports: &[502],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00\x00\x05\x00+\x0e\x02\x00", name: Some("info"), read: Some(200) },
@@ -1729,7 +1614,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "securegateway-ftp-detect",
         product: "Secure Gateway FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1743,7 +1627,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "serv-u-ftp-detect",
         product: "Serv-U FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1757,7 +1640,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sidewinder-ftp-detect",
         product: "Sidewinder FTP Proxy Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1771,7 +1653,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "siemens-s7-detect",
         product: "Siemens SIMATIC S7 Series PLC",
-        vendor: Some("siemens"),
         ports: &[102],
         probes: &[
             Probe { data: b"\x03\x00\x00\x16\x11\xe0\x00\x00\x00\x14\x00\xc1\x02\x01\x00\xc2\x02\x01\x02\xc0\x01\x0a", name: Some("cotp"), read: Some(1024) },
@@ -1787,7 +1668,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "smtp-detect",
         product: "SMTP",
-        vendor: None,
         ports: &[25, 465, 587, 2525],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: None },
@@ -1801,7 +1681,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sshd-dropbear-detect",
         product: "Dropbear sshd",
-        vendor: None,
         ports: &[22],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1815,7 +1694,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "starttls-mail-detect",
         product: "STARTTLS Mail Server",
-        vendor: None,
         ports: &[25, 465, 587, 2525],
         probes: &[
             Probe { data: b"ehlo checktls\x0a", name: None, read: None },
@@ -1829,7 +1707,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sunos56-ftp-detect",
         product: "SunOS 5.6 FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1843,7 +1720,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "sunos58-ftp-detect",
         product: "SunOS 5.8 FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1857,7 +1733,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "teamspeak3-detect",
         product: "TeamSpeak 3 ServerQuery",
-        vendor: None,
         ports: &[2002],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: None },
@@ -1871,7 +1746,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "telnet-detect",
         product: "Telnet",
-        vendor: None,
         ports: &[23],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1885,7 +1759,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "titan-ftp-detect",
         product: "Titan FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1899,7 +1772,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "tnftpd-detect",
         product: "TNFTPD Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1913,7 +1785,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "tornado-vxworks-ftp-detect",
         product: "Tornado-VxWorks FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1927,7 +1798,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "totemomail-smtp-detect",
         product: "Totemomail SMTP Server",
-        vendor: None,
         ports: &[25, 465, 587],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: None },
@@ -1941,7 +1811,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "tp-print-ftp-detect",
         product: "TP Print FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1955,7 +1824,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "treck-ftp-detect",
         product: "Treck FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1969,7 +1837,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "typsoft-ftp-detect",
         product: "TYPSoft FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -1983,7 +1850,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "unauth-java-message-broker-detect",
         product: "Unauthenticated Java Message Broker",
-        vendor: None,
         ports: &[7676],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -1997,7 +1863,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "vmware-authentication-daemon",
         product: "VMware Authentication Daemon",
-        vendor: None,
         ports: &[902],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -2011,7 +1876,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "vnc-service-detect",
         product: "VNC Service",
-        vendor: None,
         ports: &[5900],
         probes: &[
             Probe { data: b"\x0d\x0a", name: None, read: None },
@@ -2025,7 +1889,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "vsftpd-detect",
         product: "vsFTPd Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2039,7 +1902,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "vtun-server",
         product: "VTUN Server",
-        vendor: None,
         ports: &[5001],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -2053,7 +1915,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "weblogic-t3-detect",
         product: "Weblogic T3 Protocol",
-        vendor: None,
         ports: &[7001],
         probes: &[
             Probe { data: b"t3 12.2.1\x0aAS:255\x0aHL:19\x0aMS:10000000\x0aPU:t3://us-l-breens:7001\x0a\x0a", name: None, read: None },
@@ -2067,7 +1928,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "weblogic-t3-detect-2",
         product: "Weblogic T3 Protocol",
-        vendor: None,
         ports: &[7002],
         probes: &[
             Probe { data: b"t3s 12.2.1\x0aAS:255\x0aHL:19\x0aMS:10000000\x0aPU:t3://us-l-breens:7001\x0a\x0a", name: None, read: None },
@@ -2081,7 +1941,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "windriver-ftp-detect",
         product: "Wind River FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2095,7 +1954,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "wing-ftp-detect",
         product: "Wing FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -2109,7 +1967,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "ws_ftp-ssh-detect",
         product: "WS_FTP-SSH Service",
-        vendor: None,
         ports: &[22],
         probes: &[],
         read_size: 1024,
@@ -2121,7 +1978,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "x2-wsftp-detect",
         product: "X2 WS_FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2135,7 +1991,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "xerver-ftp-detect",
         product: "Xerver Free FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2149,7 +2004,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "xlight-ftp-detect",
         product: "Xlight FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2163,7 +2017,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "xlight-ftp-service-detect",
         product: "Xlight FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x0a", name: None, read: None },
@@ -2177,7 +2030,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "zftp-detect",
         product: "Z-FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2191,7 +2043,6 @@ pub static TCP_TEMPLATES: &[TcpTemplate] = &[
     TcpTemplate {
         id: "zywall-ftp-detect",
         product: "ZyWALL FTP Service",
-        vendor: None,
         ports: &[21],
         probes: &[
             Probe { data: b"\x00\x00\x00\x00", name: None, read: None },
@@ -2210,7 +2061,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "airtame-device-detect",
         product: "Airtame Device",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2221,7 +2071,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "boa-web-server",
         product: "Boa Web Server",
-        vendor: Some("boa"),
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2231,7 +2080,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "cups-detect",
         product: "CUPS",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2242,7 +2090,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "dreambox-detect",
         product: "DreamBox",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2253,7 +2100,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "fiberhome-router-detect",
         product: "Fiberhome Router",
-        vendor: Some("fiberhome"),
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2265,7 +2111,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "hikvision-detect",
         product: "Hikvision Panel",
-        vendor: Some("hikvision"),
         paths: &["/favicon.ico", "/doc/page/login.asp"],
         condition: Condition::Or,
         matchers: &[
@@ -2276,7 +2121,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "hp-media-vault-detect",
         product: "HP Media Vault",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2287,7 +2131,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "hue-wireless-lighting",
         product: "Hue Personal Wireless Lighting",
-        vendor: None,
         paths: &["/"],
         condition: Condition::Or,
         matchers: &[
@@ -2297,7 +2140,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "ilo-detect",
         product: "HP iLO",
-        vendor: None,
         paths: &["/xmldata?item=all"],
         condition: Condition::And,
         matchers: &[
@@ -2309,7 +2151,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "ispyconnect-detect",
         product: "iSpyConnect",
-        vendor: Some("ispyconnect"),
         paths: &["/"],
         condition: Condition::Or,
         matchers: &[
@@ -2320,7 +2161,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "jellyfin-detect",
         product: "Jellyfin detected",
-        vendor: Some("jellyfin"),
         paths: &["/home.html", "/web/home.html", "/index.html"],
         condition: Condition::And,
         matchers: &[
@@ -2331,7 +2171,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "lexmark-detect",
         product: "Lexmark Device",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2342,7 +2181,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "meteobridge-detect",
         product: "MeteoBridge",
-        vendor: None,
         paths: &["/cgi-bin/meteobridge.cgi"],
         condition: Condition::And,
         matchers: &[
@@ -2353,7 +2191,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "mikrotik-httpproxy",
         product: "MikroTik httpproxy",
-        vendor: Some("mikrotik"),
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2363,7 +2200,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "miniupnpd-detect",
         product: "MiniUPnPd",
-        vendor: None,
         paths: &["/"],
         condition: Condition::Or,
         matchers: &[
@@ -2373,7 +2209,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "nextcloud-detect",
         product: "Nextcloud",
-        vendor: Some("nextcloud"),
         paths: &["/", "/login", "/nextcloud/login"],
         condition: Condition::And,
         matchers: &[
@@ -2384,7 +2219,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "node-red-detect",
         product: "Node-RED Dashboard",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2395,7 +2229,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "opnhap-detect",
         product: "OpenHAP",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2406,7 +2239,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "pi-hole-panel",
         product: "Pi-hole Login Panel",
-        vendor: Some("pi-hole"),
         paths: &["/", "/admin/index.php", "/admin/login.php"],
         condition: Condition::Or,
         matchers: &[
@@ -2417,7 +2249,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "samsung-smarttv-debug",
         product: "Samsung SmartTV Debug Config",
-        vendor: Some("samsung"),
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2428,7 +2259,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "synology-web-station",
         product: "Synology Web Station Page",
-        vendor: None,
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2439,7 +2269,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "vivotex-web-console-detect",
         product: "VIVOTEK Web Console",
-        vendor: Some("vivotek"),
         paths: &["/"],
         condition: Condition::And,
         matchers: &[
@@ -2451,7 +2280,6 @@ pub static HTTP_TEMPLATES: &[HttpTemplate] = &[
     HttpTemplate {
         id: "xerox-workcentre-detect",
         product: "Xerox Workcentre",
-        vendor: Some("xerox"),
         paths: &["/index.dhtml"],
         condition: Condition::And,
         matchers: &[

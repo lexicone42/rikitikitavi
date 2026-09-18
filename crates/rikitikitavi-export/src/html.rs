@@ -425,8 +425,8 @@ pub fn render_html_report(results: &ScanResults) -> String {
             let vendor = device.vendor.as_deref().unwrap_or("Unknown");
             // `Display` is the JSON spelling, so HTML and JSON agree.
             let device_type = device.device_subtype.as_ref().map_or_else(
-                || device.device_type.to_string(),
-                |sub| format!("{} ({sub})", device.device_type),
+                || device.device_type.label().to_owned(),
+                |sub| format!("{} ({sub})", device.device_type.label()),
             );
             let _ = writeln!(
                 html,

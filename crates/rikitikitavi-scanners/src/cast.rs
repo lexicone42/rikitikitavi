@@ -9,6 +9,7 @@
 //! so the port number alone never identifies a Cast device — the TLS response does.
 
 use async_trait::async_trait;
+use futures::stream::StreamExt as _;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
 use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::device::PortProtocol;
@@ -17,6 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use crate::Scanner;
 use crate::http_util::{read_body_capped, unauthenticated_probe_client};
@@ -39,6 +41,12 @@ const CAST_HTTP_PORT: u16 = 8008;
 const CAST_PROTOCOL_PORT: u16 = 8009;
 
 const CAST_PORTS: &[u16] = &[CAST_HTTPS_PORT, CAST_PROTOCOL_PORT, CAST_HTTP_PORT];
+
+/// Deadline for the whole probe phase, below the runner's per-scanner budget.
+const PROBE_BUDGET: Duration = Duration::from_secs(40);
+
+/// Cap on concurrent host probes.
+const MAX_PARALLELISM: usize = 16;
 
 /// Read-only status selector, as used by `pychromecast`'s `dial.py`.
 const EUREKA_PATH: &str =
@@ -79,7 +87,8 @@ fn first_str(root: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
     paths.iter().find_map(|p| json_str(root, p))
 }
 
-/// Whether `path` resolves to a present, non-null value.
+/// Whether `path` resolves to a value carrying data. Null and empty/whitespace
+/// strings are unset fields, not disclosure — Cast firmware emits `""` for those.
 fn json_present(root: &serde_json::Value, path: &[&str]) -> bool {
     let mut cur = root;
     for key in path {
@@ -88,7 +97,11 @@ fn json_present(root: &serde_json::Value, path: &[&str]) -> bool {
             None => return false,
         }
     }
-    !cur.is_null()
+    match cur {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(s) => !s.trim().is_empty(),
+        _ => true,
+    }
 }
 
 /// Parse an `eureka_info` body. `None` unless the JSON object carries one of the
@@ -643,9 +656,36 @@ impl Scanner for CastScanner {
         };
 
         tracing::info!(target_count = targets.len(), "probing Cast candidates");
-        for target in &targets {
-            scan_target(&client, target, &mut findings).await;
+
+        // Bounded concurrency behind a phase deadline; findings collected so
+        // far survive an overrun.
+        let parallelism = ctx.config.parallelism.clamp(1, MAX_PARALLELISM);
+        let deadline = Instant::now() + PROBE_BUDGET;
+        let mut probes = futures::stream::iter(targets)
+            .map(|target| {
+                let client = client.clone();
+                async move {
+                    let mut found = Vec::new();
+                    scan_target(&client, &target, &mut found).await;
+                    found
+                }
+            })
+            .buffer_unordered(parallelism);
+        loop {
+            match tokio::time::timeout_at(deadline, probes.next()).await {
+                Ok(Some(found)) => findings.extend(found),
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        budget_secs = PROBE_BUDGET.as_secs(),
+                        "Cast probe phase timed out; keeping the findings collected so far"
+                    );
+                    break;
+                }
+            }
         }
+        // Stable: keeps each host's findings in the order scan_target built them.
+        findings.sort_by_key(|f| f.affected_ip);
 
         tracing::info!(findings_count = findings.len(), "Google Cast scan complete");
         Ok(findings)
@@ -719,6 +759,21 @@ mod tests {
       },
       "name": "Kitchen speaker",
       "settings": {"timezone": "Europe/London"}
+    }"#;
+
+    /// Unlinked speaker: sensitive fields present but empty.
+    const UNLINKED_FIXTURE: &str = r#"{
+      "build_info": {"system_build_number": "1.56.275975"},
+      "device_info": {
+        "cloud_device_id": "",
+        "local_authorization_token_hash": "",
+        "mac_address": "",
+        "manufacturer": "Google Inc.",
+        "model_name": "Google Nest Mini"
+      },
+      "name": "Spare speaker",
+      "settings": {"timezone": ""},
+      "wifi": {"ssid": "", "bssid": "   "}
     }"#;
 
     fn tcp_port(port: u16) -> OpenPort {
@@ -882,6 +937,15 @@ mod tests {
     #[test]
     fn exposed_fields_empty_for_bare_response() {
         assert!(exposed_fields(&EurekaInfo::default()).is_empty());
+    }
+
+    #[test]
+    fn empty_string_fields_are_not_disclosure() {
+        let info = parse_eureka_info(UNLINKED_FIXTURE).expect("cast-shaped body");
+        assert!(!info.auth_token_hash_present);
+        assert!(!info.cloud_device_id_present);
+        assert!(exposed_fields(&info).is_empty());
+        assert_eq!(exposure_severity(&exposed_fields(&info)), None);
     }
 
     #[test]

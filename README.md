@@ -192,14 +192,19 @@ rikitikitavi scan --quiet --format prometheus \
 ```
 
 The file is written under a temporary name and renamed into place, so a scrape
-never sees a half-written file. Metrics: `rikitikitavi_devices_total`,
-`devices_new`, `findings{severity,confidence}`, `kev_findings_total`,
-`eol_findings_total`, `risk_score`, `scan_duration_seconds`,
-`last_scan_timestamp_seconds`, `devices_by_grade{grade}`, `device_grade{ip}`
-(A=4 … F=0) and the `device_info{ip,mac,vendor,device_type,hostname,status}`
-identity metric to join on. Deliberately not OpenMetrics: the textfile collector
-parses with `expfmt.NewTextParser`, which rejects `# EOF` and `_created` series
-and would drop the whole file.
+never sees a half-written file. Metrics: `rikitikitavi_devices`, `devices_new`,
+`findings{severity,confidence}`, `kev_findings`, `poc_findings`, `eol_findings`,
+`risk_score`, `scan_duration_seconds`, `last_scan_timestamp_seconds`,
+`devices_by_grade{grade}`, `device_grade{ip}` (A=4 … F=0) and the
+`device_info{ip,mac,vendor,device_type,hostname,status}` identity metric to join
+on. Deliberately not OpenMetrics: the textfile collector parses with
+`expfmt.NewTextParser`, which rejects `# EOF` and `_created` series and would
+drop the whole file.
+
+Unlike every other export, this file is written **0644**, not 0600: node_exporter
+reads it as its own user. `device_info` carries the IP, MAC, vendor, type and
+hostname of every host, so write it where the collector reads it, not into a
+directory other local accounts can browse.
 
 ### Scan Comparison
 
@@ -434,7 +439,7 @@ Exclusion semantics: MAC entries are resolved to IPs through the ARP cache befor
 
 Independently of `scan.timeout_seconds`, each scanner runs under its own budget of 4× its estimated duration, clamped to 60–600 s; a scanner that exceeds it is skipped with a warning and contributes no findings.
 
-Reports, baseline and known-device files are written with mode `0600`; the scan-history directory with `0700`.
+Reports, baseline and known-device files are written with mode `0600` (the Prometheus textfile export is `0644`); the scan-history directory with `0700`.
 
 ### Host Discovery
 

@@ -332,19 +332,6 @@ def convert_byte_matchers(block: dict, template_id: str) -> tuple[list[dict], st
 # ── template conversion ─────────────────────────────────────────────────────
 
 
-def vendor_of(info: dict, product: str) -> str | None:
-    """Upstream `metadata.vendor`, kept only when the template name corroborates it.
-
-    Several `network/detection` templates carry copy-pasted metadata (redis-detect
-    claims vendor `apache`), so an uncorroborated vendor is dropped.
-    """
-    vendor = (info.get("metadata") or {}).get("vendor")
-    if not vendor:
-        return None
-    squash = lambda text: re.sub(r"[^a-z0-9]", "", text.lower())  # noqa: E731
-    return vendor if squash(vendor) in squash(product) else None
-
-
 def product_name(info: dict) -> str:
     name = (info.get("name") or "").strip()
     for suffix in (" - Detect", " - Detection", " - detect", " Detection", " Detect"):
@@ -422,7 +409,6 @@ def convert_tcp(path: str) -> list[dict]:
             {
                 "id": block_id,
                 "product": product,
-                "vendor": vendor_of(info, product),
                 "ports": ports,
                 "probes": probes,
                 "read_size": min(read_size, 8192),
@@ -530,7 +516,6 @@ def convert_http(path: str) -> dict | None:
     return {
         "id": template_id,
         "product": product,
-        "vendor": vendor_of(info, product),
         "paths": paths,
         "condition": condition,
         "matchers": matchers,
@@ -572,7 +557,6 @@ def emit_tcp(template: dict, out) -> None:
     out.write("    TcpTemplate {\n")
     out.write(f"        id: {rust_str(template['id'])},\n")
     out.write(f"        product: {rust_str(template['product'])},\n")
-    out.write(f"        vendor: {rust_opt_str(template['vendor'])},\n")
     ports = ", ".join(str(p) for p in template["ports"])
     out.write(f"        ports: &[{ports}],\n")
     if template["probes"]:
@@ -606,7 +590,6 @@ def emit_http(template: dict, out) -> None:
     out.write("    HttpTemplate {\n")
     out.write(f"        id: {rust_str(template['id'])},\n")
     out.write(f"        product: {rust_str(template['product'])},\n")
-    out.write(f"        vendor: {rust_opt_str(template['vendor'])},\n")
     paths = ", ".join(rust_str(p) for p in template["paths"])
     out.write(f"        paths: &[{paths}],\n")
     out.write(f"        condition: {cond(template['condition'])},\n")
@@ -694,8 +677,6 @@ pub struct TcpTemplate {{
     pub id: &'static str,
     /// Product this identifies.
     pub product: &'static str,
-    /// Vendor, when upstream metadata names one.
-    pub vendor: Option<&'static str>,
     /// Ports the template declares.
     pub ports: &'static [u16],
     /// Payloads to send, in order.
@@ -753,8 +734,6 @@ pub struct HttpTemplate {{
     pub id: &'static str,
     /// Product this identifies.
     pub product: &'static str,
-    /// Vendor, when upstream metadata names one.
-    pub vendor: Option<&'static str>,
     /// Paths to GET, relative to the base URL.
     pub paths: &'static [&'static str],
     /// How `matchers` combine.

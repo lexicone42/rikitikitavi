@@ -94,7 +94,7 @@ const fn port_to_service(port: u16) -> &'static str {
     }
 }
 
-/// Common ports for a home network scan (~40 ports).
+/// Common ports for a home network scan (58 ports; see `common_port_count`).
 fn common_ports() -> Vec<u16> {
     vec![
         21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 465, 548, 554, 587, 631, 993,
@@ -104,7 +104,7 @@ fn common_ports() -> Vec<u16> {
     ]
 }
 
-/// Extended port list (~100 ports).
+/// Extended port list (140 ports; see `extended_port_count`).
 fn extended_ports() -> Vec<u16> {
     let mut ports = common_ports();
     ports.extend_from_slice(&[
@@ -628,6 +628,38 @@ mod tests {
     }
 
     // ── common_ports / extended_ports tests ──────────────────────────
+
+    /// Pins the count the doc comment and CHANGELOG state.
+    #[test]
+    fn common_port_count() {
+        let ports = common_ports();
+        assert_eq!(ports.len(), 58);
+        let mut unique = ports.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ports.len(), "no duplicates");
+    }
+
+    #[test]
+    fn extended_port_count() {
+        assert_eq!(extended_ports().len(), 140);
+    }
+
+    /// Every port a scanner declares in `relevant_ports` must be discoverable
+    /// at the default range, or `filter_phase2` drops that scanner.
+    #[test]
+    fn common_ports_cover_the_new_scanners() {
+        let ports = common_ports();
+        for port in [
+            502u16, 1400, 6668, 7125, 8008, 8009, 8123, 9191, 9192, 9999, 32400, 34567, 37777,
+            53282, 81,
+        ] {
+            assert!(
+                ports.contains(&port),
+                "{port} missing from the default range"
+            );
+        }
+    }
 
     #[test]
     fn test_common_ports_contains_expected() {

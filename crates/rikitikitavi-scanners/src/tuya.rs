@@ -1,21 +1,9 @@
 //! Tuya local-protocol discovery.
 //!
-//! Tuya / Smart Life devices announce themselves on the LAN every few seconds.
-//! This scanner binds UDP 6666 and 6667 and decodes those broadcasts; it sends
-//! nothing on the UDP half. Both frame magics are handled: `0x000055AA`
-//! (plaintext JSON, or AES-128-ECB under the published broadcast key) and
-//! `0x00006699` (protocol 3.5, AES-128-GCM under the same key). A 55AA-only
-//! matcher misses every v3.5 device.
-//!
-//! The broadcast key is `md5("yGAdlopoPVldABfn")` — the same constant in every
-//! device and every client library, so the payload is readable by any host on
-//! the segment. It carries `gwId`, `ip`, `productKey` and the protocol version.
-//!
-//! At Active intensity the scanner additionally makes a bare TCP connect to
-//! 6668 (local control port) and immediately closes it; no bytes are written.
-//! Unauthenticated *control* is not available on any protocol version;
-//! unauthenticated status readout is reported for protocol 3.1 only, and even
-//! there it depends on firmware below 1.0.5, which the broadcast does not carry.
+//! Binds UDP 6666 and 6667 and decodes the `0x000055AA` (plaintext or
+//! AES-128-ECB) and `0x00006699` (protocol 3.5, AES-128-GCM) broadcast frames
+//! under the published broadcast key. Sends nothing on UDP. At Active intensity
+//! it also makes a bare TCP connect to 6668 and closes it; no bytes are written.
 
 use async_trait::async_trait;
 use aws_lc_rs::aead::{AES_128_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -51,10 +39,7 @@ const TCP_PORT: u16 = 6668;
 /// between scans. The ports actually heard go in the evidence.
 const DISCOVERY_PORT: u16 = UDP_PORT_ENCRYPTED;
 
-/// `md5("yGAdlopoPVldABfn")`, the fixed broadcast key. Published by every Tuya
-/// local library; identical on all devices, so it protects nothing. The value is
-/// checked by the ECB and GCM fixture tests, whose ciphertexts were produced
-/// with an independent implementation under this key.
+/// Fixed broadcast key, `md5("yGAdlopoPVldABfn")`; identical on all devices.
 const UDP_KEY: [u8; 16] = [
     0x6c, 0x1e, 0xc8, 0xe2, 0xbb, 0x9b, 0xb5, 0x9a, 0xb5, 0x0b, 0x0d, 0xaf, 0x64, 0x9b, 0x41, 0x0a,
 ];
@@ -525,34 +510,48 @@ fn opaque_finding(ip: IpAddr, observation: &Observation, magic: Magic) -> Findin
 }
 
 /// Finding for an open TCP 6668. `corroborated` is true when the same address
-/// also produced a decodable broadcast.
+/// also produced a decodable broadcast; without one the probe is a bare connect,
+/// so the title states the port, not the vendor (6668 is also an IRC alternate).
 fn control_port_finding(ip: IpAddr, corroborated: bool) -> Finding {
-    let finding = Finding::new(
-        "tuya",
-        &format!("Tuya local control port open on {ip}"),
-        &format!(
-            "TCP/{TCP_PORT} is accepting connections on {ip}. This is the Tuya \
-             local control channel: any host on the segment can open a session \
-             and, with the device's local key, read status and issue commands. \
-             The key is not obtainable from the LAN, so this is an exposure of \
-             attack surface rather than direct unauthenticated control — but the \
-             port should not be reachable from general-purpose LAN clients."
-        ),
-        Severity::Low,
-    )
-    .with_confidence(if corroborated {
-        Confidence::Probable
+    let (title, description) = if corroborated {
+        (
+            format!("Tuya local control port open on {ip}"),
+            format!(
+                "TCP/{TCP_PORT} is accepting connections on {ip}. This is the Tuya \
+                 local control channel: any host on the segment can open a session \
+                 and, with the device's local key, read status and issue commands. \
+                 The key is not obtainable from the LAN, so this is an exposure of \
+                 attack surface rather than direct unauthenticated control — but the \
+                 port should not be reachable from general-purpose LAN clients."
+            ),
+        )
     } else {
-        Confidence::Inferred
-    })
-    .with_ip(ip)
-    .with_port(TCP_PORT)
-    .with_service("Tuya")
-    .with_evidence(format!("TCP connect to {ip}:{TCP_PORT} accepted"))
-    .with_references(tuya_references(None))
-    .with_remediation(segment_remediation());
+        (
+            format!("TCP/{TCP_PORT} open on {ip}, Tuya protocol unconfirmed"),
+            format!(
+                "TCP/{TCP_PORT} is accepting connections on {ip}. Tuya devices use \
+                 this port for local control, but nothing on this host confirmed the \
+                 protocol: no Tuya broadcast was heard from this address and no bytes \
+                 were exchanged. TCP/{TCP_PORT} is also a long-standing IRC alternate \
+                 port. If this is a Tuya device, the port should not be reachable from \
+                 general-purpose LAN clients."
+            ),
+        )
+    };
+
+    let finding = Finding::new("tuya", &title, &description, Severity::Low)
+        .with_confidence(if corroborated {
+            Confidence::Probable
+        } else {
+            Confidence::Inferred
+        })
+        .with_ip(ip)
+        .with_port(TCP_PORT)
+        .with_evidence(format!("TCP connect to {ip}:{TCP_PORT} accepted"))
+        .with_references(tuya_references(None))
+        .with_remediation(segment_remediation());
     if corroborated {
-        finding.with_device_hint(
+        finding.with_service("Tuya").with_device_hint(
             DeviceHint::new()
                 .with_vendor("Tuya")
                 .with_device_type(DeviceType::IoT),
@@ -752,9 +751,7 @@ impl Scanner for TuyaScanner {
                 select_tcp_targets(&devices, &heard, |ip| in_scope(ip, ctx, &exclusions, &macs));
             tracing::debug!(targets = targets.len(), "Tuya control-port sweep");
 
-            // Bounded concurrency and a hard deadline: a LAN full of hosts that
-            // never answer must not spend the runner's whole budget and take the
-            // passive findings down with it.
+            // Bounded concurrency; the sweep has its own deadline.
             let parallelism = ctx.config.parallelism.clamp(1, MAX_TCP_PARALLELISM);
             let sweep = futures::stream::iter(targets)
                 .map(|ip| async move { (ip, control_port_open(ip).await) })
@@ -1230,7 +1227,20 @@ mod tests {
         let bare = control_port_finding(ip("10.0.0.8"), false);
         assert_eq!(bare.confidence, Confidence::Inferred);
         assert_eq!(bare.affected_port, Some(TCP_PORT));
-        assert_eq!(bare.title, "Tuya local control port open on 10.0.0.8");
+    }
+
+    #[test]
+    fn uncorroborated_control_port_title_does_not_claim_tuya() {
+        let bare = control_port_finding(ip("10.0.0.8"), false);
+        assert_eq!(
+            bare.title,
+            "TCP/6668 open on 10.0.0.8, Tuya protocol unconfirmed"
+        );
+        assert_eq!(bare.affected_service, None);
+        assert_eq!(
+            control_port_finding(ip("10.0.0.8"), true).title,
+            "Tuya local control port open on 10.0.0.8"
+        );
     }
 
     #[test]

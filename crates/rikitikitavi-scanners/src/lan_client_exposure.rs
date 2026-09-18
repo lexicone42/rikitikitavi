@@ -1,24 +1,12 @@
-//! Client-side LAN exposure: devices that are attacked as *clients* of a service
-//! another host on the network offers, rather than through a port they listen on.
+//! Client-side LAN exposure: devices attacked as *clients* of a service another
+//! host on the network offers, rather than through a listening port of their own.
 //!
-//! Every other scanner here reasons inbound — a listening port, a weak banner, an
-//! open management plane. A client-side bug inverts that: the vulnerable code
-//! runs when the device connects out to an SMB, HTTP or update server, so any
-//! host on the LAN that an attacker controls becomes the attack platform, and no
-//! port scan of the victim shows anything.
+//! Matching is on the OUI vendor against a curated table; no probe is sent.
 //!
-//! Matching is against a curated table keyed on the OUI vendor, never on
-//! free-text product strings, and no probe is sent: this scanner reads what
-//! discovery already collected.
-//!
-//! No finding here populates `cve_ids`. A hostname substring is presence, not a
-//! version, and nothing this scanner reads could ever clear the match — so a
-//! patched device would keep the finding forever. `cve_ids` is also what
-//! `enrich_exploit_intelligence` consumes to raise any KEV CVE to at least High
-//! regardless of confidence, which would turn a name match into a High with no
-//! version evidence behind it the first time the embedded KEV picked the id up.
-//! The id is named in the description and references instead; it moves into
-//! `cve_ids` only once a firmware build is actually readable.
+//! No finding populates `cve_ids`: a name match is not version evidence, and
+//! `enrich_exploit_intelligence` escalates on that field (see
+//! `no_row_ever_populates_cve_ids`). The id is named in the description and
+//! references instead.
 
 use async_trait::async_trait;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
@@ -39,6 +27,9 @@ struct ClientExposure {
     /// Lowercase model tokens that confirm the affected model, when any
     /// identification the scan collected happens to carry one.
     affected_models: &'static [&'static str],
+    /// Lowercase whole-word model tokens the advisory does not name. A match
+    /// downgrades to `Info`; the tokens are also ordinary room names.
+    unaffected_models: &'static [&'static str],
     /// Protocol the device speaks *as a client*.
     protocol: &'static str,
     /// CVE id. Named in the finding text only; never put in `cve_ids`.
@@ -55,6 +46,10 @@ const CLIENT_EXPOSURES: &[ClientExposure] = &[ClientExposure {
     vendor: "sonos",
     product: "Sonos speaker",
     affected_models: &["era 300", "era300"],
+    unaffected_models: &[
+        "one", "beam", "move", "port", "amp", "roam", "arc", "five", "play", "playbar", "playbase",
+        "sub", "connect",
+    ],
     protocol: "SMB",
     cve: "CVE-2026-4149",
     summary: "an out-of-bounds write in the speaker's SMB client, reached when it \
@@ -74,12 +69,20 @@ fn exposure_for(device: &Device) -> Option<&'static ClientExposure> {
     CLIENT_EXPOSURES.iter().find(|e| vendor.contains(e.vendor))
 }
 
-/// Whether anything the scan collected names an affected model.
-///
-/// Hostnames and subtypes are identification the device chose to publish; they
-/// confirm a model but their absence never rules one out.
-fn model_confirmed(device: &Device, exposure: &ClientExposure) -> bool {
-    let haystack = [
+/// What the names a device publishes say about its model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelEvidence {
+    /// A published name matches `affected_models`.
+    Affected,
+    /// A published name carries this `unaffected_models` token.
+    Unaffected(&'static str),
+    /// Nothing the scan collected names a model.
+    Unknown,
+}
+
+/// Lowercased identification the device published, for model matching.
+fn published_names(device: &Device) -> String {
+    [
         device.hostname.as_deref(),
         device.device_subtype.as_deref(),
         device.os_guess.as_deref(),
@@ -88,12 +91,33 @@ fn model_confirmed(device: &Device, exposure: &ClientExposure) -> bool {
     .flatten()
     .collect::<Vec<_>>()
     .join(" ")
-    .to_ascii_lowercase();
+    .to_ascii_lowercase()
+}
 
-    exposure
+/// Classify a device against one row. Affected wins over unaffected; absence of
+/// any name is `Unknown`, never `Unaffected`.
+fn model_evidence(device: &Device, exposure: &ClientExposure) -> ModelEvidence {
+    let haystack = published_names(device);
+    if exposure
         .affected_models
         .iter()
         .any(|model| haystack.contains(model))
+    {
+        return ModelEvidence::Affected;
+    }
+    // Whole-word only: `unaffected_models` holds single tokens, and a substring
+    // match would suppress on any name containing one ("stone" -> "one").
+    haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|word| {
+            exposure
+                .unaffected_models
+                .iter()
+                .find(|model| **model == word)
+        })
+        .map_or(ModelEvidence::Unknown, |model| {
+            ModelEvidence::Unaffected(model)
+        })
 }
 
 // ── Findings ────────────────────────────────────────────────────────────────
@@ -134,21 +158,49 @@ fn references() -> Vec<String> {
     ]
 }
 
-/// Finding for one matched device.
+/// Finding for one matched device. A published name the advisory does not list
+/// downgrades to `Info`, never drops the row (see
+/// `a_room_named_after_a_model_does_not_hide_the_device`).
 fn exposure_finding(device: &Device, exposure: &ClientExposure) -> Finding {
-    let confirmed = model_confirmed(device, exposure);
+    let evidence = model_evidence(device, exposure);
     let ip = device.ip;
     let vendor = device.vendor.as_deref().unwrap_or(exposure.product);
 
-    let identification = if confirmed {
-        "The model this issue affects was identified from the name the device \
-         publishes."
-            .to_owned()
-    } else {
-        format!(
-            "The device is identified as {vendor} from its MAC address only, so whether \
-             it is the affected model is unconfirmed."
-        )
+    let (severity, identification, evidence_text) = match evidence {
+        ModelEvidence::Affected => (
+            Severity::Medium,
+            "The model this issue affects was identified from the name the device \
+             publishes."
+                .to_owned(),
+            "model matches the affected family".to_owned(),
+        ),
+        ModelEvidence::Unaffected(token) => {
+            tracing::debug!(
+                %ip,
+                token,
+                cve = exposure.cve,
+                "published name names a model the advisory does not; reporting at Info"
+            );
+            (
+                Severity::Info,
+                format!(
+                    "A name this device publishes contains \"{token}\", a model {} does not \
+                     name, so this is recorded for reference only. That rests on the advisory \
+                     being model-specific and on the published name being a model rather than \
+                     a room name.",
+                    exposure.cve
+                ),
+                format!("published name contains the unaffected model token {token}"),
+            )
+        }
+        ModelEvidence::Unknown => (
+            Severity::Low,
+            format!(
+                "The device is identified as {vendor} from its MAC address only, so whether \
+                 it is the affected model is unconfirmed."
+            ),
+            "model not confirmed".to_owned(),
+        ),
     };
 
     let finding = Finding::new(
@@ -174,24 +226,13 @@ fn exposure_finding(device: &Device, exposure: &ClientExposure) -> Finding {
             exposure.cve,
             exposure.version_note,
         ),
-        if confirmed {
-            Severity::Medium
-        } else {
-            Severity::Low
-        },
+        severity,
     )
     .with_confidence(Confidence::Inferred)
     .with_ip(ip)
     .with_service(exposure.protocol)
     .with_cwe("CWE-119")
-    .with_evidence(format!(
-        "OUI vendor {vendor}; model {}",
-        if confirmed {
-            "matches the affected family"
-        } else {
-            "not confirmed"
-        }
-    ))
+    .with_evidence(format!("OUI vendor {vendor}; {evidence_text}"))
     .with_remediation(remediation(exposure))
     .with_references(references());
 
@@ -222,8 +263,8 @@ impl Scanner for LanClientExposureScanner {
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
         tracing::info!("running client-side LAN exposure scan");
 
-        // No probe is sent, so this runs at every intensity; it only reads what
-        // discovery already collected.
+        // No probe is sent. The runner still drops this scanner at Passive: it is in
+        // neither `passive_essential` nor `relevant_ports` (runner.rs `filter_phase2`).
         let exclusions = ctx
             .config
             .exclusions()
@@ -288,6 +329,25 @@ mod tests {
             for model in row.affected_models {
                 assert_eq!(*model, model.to_ascii_lowercase());
             }
+            for model in row.unaffected_models {
+                assert_eq!(*model, model.to_ascii_lowercase());
+                assert!(
+                    model.chars().all(|c| c.is_ascii_alphanumeric()),
+                    "{model} is matched as a whole word, so it must be one token"
+                );
+                assert!(
+                    !row.affected_models.iter().any(|a| a.contains(*model)),
+                    "{model} is listed as both affected and unaffected"
+                );
+                // Whole-word too: an affected model naming this token would make
+                // every affected device look unaffected.
+                assert!(
+                    !row.affected_models.iter().any(|affected| affected
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|word| word == *model)),
+                    "{model} is a word of an affected model name"
+                );
+            }
             // Each row must resolve from a device carrying that vendor string.
             let probe = device(Some(row.vendor));
             assert_eq!(exposure_for(&probe), Some(row));
@@ -314,14 +374,64 @@ mod tests {
     fn model_is_confirmed_from_published_names() {
         let exposure = &CLIENT_EXPOSURES[0];
         let mut dev = device(Some("Sonos, Inc."));
-        assert!(!model_confirmed(&dev, exposure));
+        assert_eq!(model_evidence(&dev, exposure), ModelEvidence::Unknown);
 
         dev.hostname = Some("Sonos-Era 300-Kitchen".to_owned());
-        assert!(model_confirmed(&dev, exposure));
+        assert_eq!(model_evidence(&dev, exposure), ModelEvidence::Affected);
 
         dev.hostname = None;
         dev.device_subtype = Some("sonos_era300".to_owned());
-        assert!(model_confirmed(&dev, exposure));
+        assert_eq!(model_evidence(&dev, exposure), ModelEvidence::Affected);
+    }
+
+    #[test]
+    fn a_named_unaffected_model_reports_at_info_naming_the_token() {
+        let exposure = &CLIENT_EXPOSURES[0];
+        for (name, token) in [
+            ("Sonos-Beam-Lounge", "beam"),
+            ("sonos one sl", "one"),
+            ("Sonos_Port", "port"),
+            ("SONOS-ARC", "arc"),
+        ] {
+            let mut dev = device(Some("Sonos, Inc."));
+            dev.hostname = Some(name.to_owned());
+            assert_eq!(
+                model_evidence(&dev, exposure),
+                ModelEvidence::Unaffected(token),
+                "{name}"
+            );
+            let finding = exposure_finding(&dev, exposure);
+            assert_eq!(finding.severity, Severity::Info, "{name}");
+            assert!(finding.description.contains(token), "{name}");
+            assert!(finding.evidence.unwrap().contains(token), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_room_named_after_a_model_does_not_hide_the_device() {
+        let exposure = &CLIENT_EXPOSURES[0];
+        let mut dev = device(Some("Sonos, Inc."));
+        dev.hostname = Some("sonos-arc-room".to_owned());
+        let finding = exposure_finding(&dev, exposure);
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.affected_ip, Some(dev.ip));
+    }
+
+    #[test]
+    fn unaffected_tokens_match_whole_words_only() {
+        let exposure = &CLIENT_EXPOSURES[0];
+        let mut dev = device(Some("Sonos, Inc."));
+        dev.hostname = Some("sonos-stonehenge".to_owned());
+        assert_eq!(model_evidence(&dev, exposure), ModelEvidence::Unknown);
+        assert_eq!(exposure_finding(&dev, exposure).severity, Severity::Low);
+    }
+
+    #[test]
+    fn an_affected_model_is_not_suppressed_by_a_stray_token() {
+        let exposure = &CLIENT_EXPOSURES[0];
+        let mut dev = device(Some("Sonos, Inc."));
+        dev.hostname = Some("sonos era 300 arc room".to_owned());
+        assert_eq!(model_evidence(&dev, exposure), ModelEvidence::Affected);
     }
 
     // ── Findings ────────────────────────────────────────────────────

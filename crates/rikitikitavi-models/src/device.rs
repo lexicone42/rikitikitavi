@@ -38,133 +38,90 @@ pub struct Device {
     pub os_guess: Option<String>,
 }
 
-/// Classified device type.
-///
-/// The wire name is the serde `snake_case` spelling of the variant (`smart_tv`,
-/// `access_point`, and the legacy `io_t`). [`DeviceType::as_str`] and the
-/// [`Display`](fmt::Display) impl emit that same string, so JSON, HTML and text
-/// output spell a type identically.
-///
-/// Deserialization is lenient: an unrecognised name becomes [`DeviceType::Unknown`]
-/// rather than an error, so scan history written by a newer build still loads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum DeviceType {
-    Router,
-    Switch,
-    AccessPoint,
-    Desktop,
-    Laptop,
-    Phone,
-    Tablet,
-    Server,
-    Nas,
-    Printer,
-    Camera,
-    SmartTv,
-    IoT,
-    GameConsole,
-    MediaPlayer,
-    /// Aggregation point holding other devices' credentials (`SmartThings`, Hue, Caseta).
-    Hub,
-    SmartLock,
-    Thermostat,
-    EvCharger,
-    /// Solar / battery inverter or gateway.
-    Inverter,
-    /// Network video recorder.
-    Nvr,
-    Doorbell,
-    Vacuum,
-    SmartPlug,
-    Speaker,
-    /// Networked white goods.
-    Appliance,
-    Printer3d,
-    Sensor,
-    #[default]
-    Unknown,
+/// Declares [`DeviceType`] once: variant, wire name, human label. `ALL`,
+/// `as_str`, `label` and `from_name` are generated from this list.
+macro_rules! device_types {
+    ($( $(#[$meta:meta])* $variant:ident => $wire:literal, $label:literal ),* $(,)?) => {
+        /// Classified device type.
+        ///
+        /// `as_str`/[`Display`](fmt::Display) give the frozen serde wire name
+        /// (`smart_tv`, the legacy `io_t`); [`DeviceType::label`] gives the
+        /// human spelling for reports. Unknown wire names deserialize to
+        /// [`DeviceType::Unknown`] rather than failing the load.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+        pub enum DeviceType {
+            $( $(#[$meta])* $variant, )*
+        }
+
+        impl DeviceType {
+            /// Every variant, in declaration order.
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] = [$(Self::$variant),*];
+
+            /// Wire name: the serde spelling, frozen for stored scan history.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire, )*
+                }
+            }
+
+            /// Human label for reports and terminal output.
+            #[must_use]
+            pub const fn label(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $label, )*
+                }
+            }
+
+            /// Parse a wire name. `iot` is accepted as an alias for the legacy `io_t`.
+            #[must_use]
+            pub fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    "iot" => Some(Self::IoT),
+                    $( $wire => Some(Self::$variant), )*
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-impl DeviceType {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 29] = [
-        Self::Router,
-        Self::Switch,
-        Self::AccessPoint,
-        Self::Desktop,
-        Self::Laptop,
-        Self::Phone,
-        Self::Tablet,
-        Self::Server,
-        Self::Nas,
-        Self::Printer,
-        Self::Camera,
-        Self::SmartTv,
-        Self::IoT,
-        Self::GameConsole,
-        Self::MediaPlayer,
-        Self::Hub,
-        Self::SmartLock,
-        Self::Thermostat,
-        Self::EvCharger,
-        Self::Inverter,
-        Self::Nvr,
-        Self::Doorbell,
-        Self::Vacuum,
-        Self::SmartPlug,
-        Self::Speaker,
-        Self::Appliance,
-        Self::Printer3d,
-        Self::Sensor,
-        Self::Unknown,
-    ];
-
-    /// Wire and display name.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Router => "router",
-            Self::Switch => "switch",
-            Self::AccessPoint => "access_point",
-            Self::Desktop => "desktop",
-            Self::Laptop => "laptop",
-            Self::Phone => "phone",
-            Self::Tablet => "tablet",
-            Self::Server => "server",
-            Self::Nas => "nas",
-            Self::Printer => "printer",
-            Self::Camera => "camera",
-            Self::SmartTv => "smart_tv",
-            // Legacy spelling from `rename_all = "snake_case"`; kept so stored
-            // scan history still reads.
-            Self::IoT => "io_t",
-            Self::GameConsole => "game_console",
-            Self::MediaPlayer => "media_player",
-            Self::Hub => "hub",
-            Self::SmartLock => "smart_lock",
-            Self::Thermostat => "thermostat",
-            Self::EvCharger => "ev_charger",
-            Self::Inverter => "inverter",
-            Self::Nvr => "nvr",
-            Self::Doorbell => "doorbell",
-            Self::Vacuum => "vacuum",
-            Self::SmartPlug => "smart_plug",
-            Self::Speaker => "speaker",
-            Self::Appliance => "appliance",
-            Self::Printer3d => "printer3d",
-            Self::Sensor => "sensor",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Parse a wire name. `iot` is accepted as an alias for the legacy `io_t`.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        if name == "iot" {
-            return Some(Self::IoT);
-        }
-        Self::ALL.into_iter().find(|t| t.as_str() == name)
-    }
+device_types! {
+    Router => "router", "Router",
+    Switch => "switch", "Switch",
+    AccessPoint => "access_point", "Access Point",
+    Desktop => "desktop", "Desktop",
+    Laptop => "laptop", "Laptop",
+    Phone => "phone", "Phone",
+    Tablet => "tablet", "Tablet",
+    Server => "server", "Server",
+    Nas => "nas", "NAS",
+    Printer => "printer", "Printer",
+    Camera => "camera", "Camera",
+    SmartTv => "smart_tv", "Smart TV",
+    /// Wire name is the legacy `snake_case` of `IoT`.
+    IoT => "io_t", "IoT",
+    GameConsole => "game_console", "Game Console",
+    MediaPlayer => "media_player", "Media Player",
+    /// Aggregation point holding other devices' credentials (`SmartThings`, Hue, Caseta).
+    Hub => "hub", "Hub",
+    SmartLock => "smart_lock", "Smart Lock",
+    Thermostat => "thermostat", "Thermostat",
+    EvCharger => "ev_charger", "EV Charger",
+    /// Solar / battery inverter or gateway.
+    Inverter => "inverter", "Inverter",
+    /// Network video recorder.
+    Nvr => "nvr", "NVR",
+    Doorbell => "doorbell", "Doorbell",
+    Vacuum => "vacuum", "Vacuum",
+    SmartPlug => "smart_plug", "Smart Plug",
+    Speaker => "speaker", "Speaker",
+    /// Networked white goods.
+    Appliance => "appliance", "Appliance",
+    Printer3d => "printer3d", "3D Printer",
+    Sensor => "sensor", "Sensor",
+    #[default]
+    Unknown => "unknown", "Unknown",
 }
 
 impl fmt::Display for DeviceType {
@@ -464,6 +421,68 @@ mod tests {
         }
     }
 
+    /// Wire names and labels, written out independently of `device_types!`.
+    const WIRE_NAMES: [(DeviceType, &str, &str); 29] = [
+        (DeviceType::Router, "router", "Router"),
+        (DeviceType::Switch, "switch", "Switch"),
+        (DeviceType::AccessPoint, "access_point", "Access Point"),
+        (DeviceType::Desktop, "desktop", "Desktop"),
+        (DeviceType::Laptop, "laptop", "Laptop"),
+        (DeviceType::Phone, "phone", "Phone"),
+        (DeviceType::Tablet, "tablet", "Tablet"),
+        (DeviceType::Server, "server", "Server"),
+        (DeviceType::Nas, "nas", "NAS"),
+        (DeviceType::Printer, "printer", "Printer"),
+        (DeviceType::Camera, "camera", "Camera"),
+        (DeviceType::SmartTv, "smart_tv", "Smart TV"),
+        (DeviceType::IoT, "io_t", "IoT"),
+        (DeviceType::GameConsole, "game_console", "Game Console"),
+        (DeviceType::MediaPlayer, "media_player", "Media Player"),
+        (DeviceType::Hub, "hub", "Hub"),
+        (DeviceType::SmartLock, "smart_lock", "Smart Lock"),
+        (DeviceType::Thermostat, "thermostat", "Thermostat"),
+        (DeviceType::EvCharger, "ev_charger", "EV Charger"),
+        (DeviceType::Inverter, "inverter", "Inverter"),
+        (DeviceType::Nvr, "nvr", "NVR"),
+        (DeviceType::Doorbell, "doorbell", "Doorbell"),
+        (DeviceType::Vacuum, "vacuum", "Vacuum"),
+        (DeviceType::SmartPlug, "smart_plug", "Smart Plug"),
+        (DeviceType::Speaker, "speaker", "Speaker"),
+        (DeviceType::Appliance, "appliance", "Appliance"),
+        (DeviceType::Printer3d, "printer3d", "3D Printer"),
+        (DeviceType::Sensor, "sensor", "Sensor"),
+        (DeviceType::Unknown, "unknown", "Unknown"),
+    ];
+
+    #[test]
+    fn device_type_table_covers_every_variant() {
+        assert_eq!(WIRE_NAMES.len(), DeviceType::ALL.len());
+        for (variant, wire, label) in WIRE_NAMES {
+            assert!(
+                DeviceType::ALL.contains(&variant),
+                "{wire} missing from ALL"
+            );
+            assert_eq!(variant.as_str(), wire);
+            assert_eq!(variant.label(), label);
+            assert_eq!(DeviceType::from_name(wire), Some(variant));
+        }
+    }
+
+    #[test]
+    fn device_type_labels_are_distinct_and_human() {
+        let mut labels: Vec<&str> = DeviceType::ALL.iter().map(|t| t.label()).collect();
+        let total = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), total);
+        for t in DeviceType::ALL {
+            assert!(!t.label().is_empty());
+            assert!(!t.label().contains('_'), "{t} label is a wire name");
+        }
+        assert_eq!(DeviceType::IoT.label(), "IoT");
+        assert_eq!(DeviceType::SmartTv.label(), "Smart TV");
+    }
+
     #[test]
     fn device_type_all_names_are_unique() {
         let mut names: Vec<&str> = DeviceType::ALL.iter().map(|t| t.as_str()).collect();
@@ -689,7 +708,13 @@ mod tests {
         fn prop_device_type_deserialize_never_panics(name in ".{0,40}") {
             let json = serde_json::to_string(&name).unwrap();
             let parsed: DeviceType = serde_json::from_str(&json).unwrap();
-            let expected = DeviceType::from_name(&name).unwrap_or(DeviceType::Unknown);
+            let expected = WIRE_NAMES
+                .iter()
+                .find(|(_, wire, _)| *wire == name)
+                .map_or(
+                    if name == "iot" { DeviceType::IoT } else { DeviceType::Unknown },
+                    |(v, _, _)| *v,
+                );
             assert_eq!(parsed, expected);
         }
 

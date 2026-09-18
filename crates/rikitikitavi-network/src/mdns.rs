@@ -352,13 +352,13 @@ pub fn txt_get<'a>(txt: &'a [String], key: &str) -> Option<&'a str> {
 /// records, and `ot-br-posix`'s `_meshcop._udp` border-agent record.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MdnsTxt {
-    /// `md` / `model` / `am` / `mn`: hardware model.
+    /// Hardware model, from the key that means "model" for this service type.
     pub model: Option<String>,
     /// `fn` / `n`: friendly name chosen by the owner.
     pub friendly_name: Option<String>,
     /// `gen`: protocol/hardware generation (Shelly, Google Cast).
     pub generation: Option<String>,
-    /// `manufacturer` / `vendor` / `vn`.
+    /// Manufacturer, from the key that means "vendor" for this service type.
     pub manufacturer: Option<String>,
     /// `VP`: Matter vendor and product id, `vid+pid`.
     pub vendor_product: Option<String>,
@@ -382,10 +382,41 @@ pub struct MdnsTxt {
     pub thread_version: Option<String>,
 }
 
+/// TXT keys holding the hardware model, for `service_type`. `md` is the model
+/// only for `_hap`, `_googlecast`, Shelly and `_device-info`; in `_raop`/`_airplay`
+/// it lists metadata types and the model is `am` or `model`. `mn` is the model in
+/// `_meshcop._udp`.
+fn model_keys(service_type: &str) -> &'static [&'static str] {
+    if service_type.contains("_raop.") || service_type.contains("_airplay.") {
+        &["am", "model"]
+    } else if service_type.contains("_meshcop") {
+        &["mn"]
+    } else if service_type.contains("_hap.")
+        || service_type.contains("_googlecast.")
+        || service_type.contains("_shelly")
+        || service_type.contains("_device-info.")
+    {
+        &["md", "model", "mdl"]
+    } else {
+        &["model", "mdl"]
+    }
+}
+
+/// TXT keys holding the manufacturer, for `service_type`. `vn` is the vendor
+/// name only in `_meshcop._udp`; in `_raop` it is the protocol version.
+fn manufacturer_keys(service_type: &str) -> &'static [&'static str] {
+    if service_type.contains("_meshcop") {
+        &["vn", "manufacturer", "vendor"]
+    } else {
+        &["manufacturer", "vendor"]
+    }
+}
+
 impl MdnsTxt {
-    /// Interpret the well-known keys of a TXT record set.
+    /// Interpret the well-known keys of a TXT record set; `service_type` selects
+    /// the model and manufacturer keys.
     #[must_use]
-    pub fn parse(txt: &[String]) -> Self {
+    pub fn parse(service_type: &str, txt: &[String]) -> Self {
         let first = |keys: &[&str]| -> Option<String> {
             keys.iter()
                 .find_map(|k| txt_get(txt, k))
@@ -393,10 +424,10 @@ impl MdnsTxt {
                 .map(ToOwned::to_owned)
         };
         Self {
-            model: first(&["md", "model", "am", "mdl", "mn"]),
+            model: first(model_keys(service_type)),
             friendly_name: first(&["fn", "n"]),
             generation: first(&["gen"]),
-            manufacturer: first(&["manufacturer", "vendor", "vn"]),
+            manufacturer: first(manufacturer_keys(service_type)),
             vendor_product: first(&["vp"]),
             commissioning_mode: first(&["cm"]).and_then(|v| v.parse().ok()),
             discriminator: first(&["d"]),
@@ -1740,16 +1771,43 @@ mod tests {
     #[test]
     fn test_mdns_txt_parses_homekit_and_shelly_keys() {
         let records = txt(&["md=Shelly Plus 1", "fn=Porch", "gen=2"]);
-        let parsed = MdnsTxt::parse(&records);
+        let parsed = MdnsTxt::parse("_shelly._tcp.local", &records);
         assert_eq!(parsed.model.as_deref(), Some("Shelly Plus 1"));
         assert_eq!(parsed.friendly_name.as_deref(), Some("Porch"));
         assert_eq!(parsed.generation.as_deref(), Some("2"));
     }
 
     #[test]
+    fn mdns_txt_ignores_raop_md_and_vn() {
+        let records = txt(&["md=0,1,2", "vn=65537", "am=AppleTV14,1"]);
+        let parsed = MdnsTxt::parse("_raop._tcp.local", &records);
+        assert_eq!(parsed.model.as_deref(), Some("AppleTV14,1"));
+        assert_eq!(parsed.manufacturer, None);
+
+        // `_airplay._tcp` spells the same model `model=`.
+        let airplay = MdnsTxt::parse(
+            "_airplay._tcp.local",
+            &txt(&["md=0,1,2", "model=AppleTV14,1"]),
+        );
+        assert_eq!(airplay.model.as_deref(), Some("AppleTV14,1"));
+
+        // The same keys still read as model and vendor where they mean that.
+        let hap = MdnsTxt::parse("_hap._tcp.local", &txt(&["md=Eve Door 20EBP"]));
+        assert_eq!(hap.model.as_deref(), Some("Eve Door 20EBP"));
+        let thread = MdnsTxt::parse("_meshcop._udp.local", &txt(&["mn=BorderRouter", "vn=Nest"]));
+        assert_eq!(thread.model.as_deref(), Some("BorderRouter"));
+        assert_eq!(thread.manufacturer.as_deref(), Some("Nest"));
+
+        // An unknown service type gets neither ambiguous key.
+        let generic = MdnsTxt::parse("_http._tcp.local", &txt(&["md=0,1,2", "vn=65537"]));
+        assert_eq!(generic.model, None);
+        assert_eq!(generic.manufacturer, None);
+    }
+
+    #[test]
     fn test_mdns_txt_parses_matter_commissioning_keys() {
         let records = txt(&["VP=65521+32769", "CM=2", "D=3840", "DT=21", "DN=Front Lamp"]);
-        let parsed = MdnsTxt::parse(&records);
+        let parsed = MdnsTxt::parse("_matterc._udp.local", &records);
         assert_eq!(parsed.vendor_product.as_deref(), Some("65521+32769"));
         assert_eq!(parsed.commissioning_mode, Some(2));
         assert_eq!(parsed.discriminator.as_deref(), Some("3840"));
@@ -1767,7 +1825,7 @@ mod tests {
             "sb=0x00000131",
             "omr=0xfd11223300000000",
         ]);
-        let parsed = MdnsTxt::parse(&records);
+        let parsed = MdnsTxt::parse("_meshcop._udp.local", &records);
         assert_eq!(parsed.thread_network_name.as_deref(), Some("HomeThread"));
         assert_eq!(parsed.thread_version.as_deref(), Some("1.3.0"));
         assert_eq!(
@@ -1783,7 +1841,10 @@ mod tests {
 
     #[test]
     fn test_mdns_txt_ignores_unparseable_commissioning_mode() {
-        assert_eq!(MdnsTxt::parse(&txt(&["CM=open"])).commissioning_mode, None);
+        assert_eq!(
+            MdnsTxt::parse("_matterc._udp.local", &txt(&["CM=open"])).commissioning_mode,
+            None
+        );
     }
 
     // ── Service query list ─────────────────────────────────────────
@@ -1884,7 +1945,7 @@ mod tests {
         #[test]
         fn prop_parse_txt_rdata_no_panic(data in proptest::collection::vec(any::<u8>(), 0..600)) {
             let entries = parse_txt_rdata(&data);
-            let _ = MdnsTxt::parse(&entries);
+            let _ = MdnsTxt::parse("_http._tcp.local", &entries);
             let _ = txt_get(&entries, "md");
         }
 

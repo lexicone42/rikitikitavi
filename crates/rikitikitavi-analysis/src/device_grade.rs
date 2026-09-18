@@ -1,24 +1,12 @@
-//! Per-device report cards: one letter grade per host, from that host's findings
-//! and its device class.
+//! Per-device letter grades from a device's findings and class.
 //!
-//! The ladder is the scan-wide one in [`crate::risk_score::risk_grade`], so a device
-//! and the network are graded on the same scale (a test pins the two together). Two
-//! adjustments are device-scoped: a finding CISA lists as exploited in the wild caps
-//! the grade at F, and a device class whose compromise reaches past the device itself
-//! costs one letter.
-//!
-//! This is this tool's own scoring of observable state, not a conformance verdict:
-//! ETSI EN 303 645 and the FCC Cyber Trust Mark rest on manufacturer evidence no
-//! network scan can see.
+//! Same ladder as [`crate::risk_score::risk_grade`]; a KEV finding forces F, otherwise a
+//! weighted class costs one letter.
 
 use rikitikitavi_core::Severity;
 use rikitikitavi_models::{Device, DeviceReportCard, DeviceStatus, DeviceType, Finding, Grade};
 
 /// Device classes graded one letter harder.
-///
-/// Hubs, routers, access points and NAS boxes hold other devices' credentials or
-/// traffic; locks, EV chargers, inverters and thermostats actuate the physical
-/// world; cameras, NVRs and doorbells record it.
 pub const CLASS_WEIGHTED: &[DeviceType] = &[
     DeviceType::Router,
     DeviceType::AccessPoint,
@@ -114,23 +102,29 @@ pub fn grade_device(device: &Device, findings: &[Finding]) -> DeviceReportCard {
         reasons.push(severity_phrase(critical, high, medium, low, info));
     }
 
+    let exploited = mine
+        .iter()
+        .any(|f| f.is_kev && f.severity >= Severity::High);
+
     let mut class_applied = false;
-    if grade != Grade::NotAssessed
+    if !exploited
+        && grade != Grade::NotAssessed
         && class_weighted(device.device_type)
         && critical + high + medium > 0
     {
-        grade = grade.step_down();
-        class_applied = true;
-        reasons.push(format!(
-            "{} class graded one letter harder",
-            device.device_type
-        ));
+        // `step_down` saturates at F; only claim the class cost a letter if it did.
+        let stepped = grade.step_down();
+        if stepped != grade {
+            grade = stepped;
+            class_applied = true;
+            reasons.push(format!(
+                "{} class graded one letter harder",
+                device.device_type
+            ));
+        }
     }
 
-    if mine
-        .iter()
-        .any(|f| f.is_kev && f.severity >= Severity::High)
-    {
+    if exploited {
         grade = Grade::F;
         reasons.push("exploited in the wild (CISA KEV)".to_owned());
     }
@@ -265,6 +259,30 @@ mod tests {
     }
 
     #[test]
+    fn weighted_class_claims_nothing_when_the_grade_is_already_f() {
+        let card = grade_device(
+            &device(13, DeviceType::Camera),
+            &[finding(13, Severity::Critical)],
+        );
+        assert_eq!(card.grade, Grade::F);
+        assert!(!card.class_weighted);
+        assert!(!card.rationale.contains("class graded"));
+    }
+
+    #[test]
+    fn weighted_class_claims_nothing_when_kev_forces_f() {
+        let kev = Finding {
+            is_kev: true,
+            ..finding(13, Severity::High)
+        };
+        let card = grade_device(&device(13, DeviceType::Camera), &[kev]);
+        assert_eq!(card.grade, Grade::F);
+        assert!(!card.class_weighted);
+        assert!(!card.rationale.contains("class graded"));
+        assert!(card.rationale.contains("CISA KEV"));
+    }
+
+    #[test]
     fn weighted_class_without_actionable_findings_keeps_its_grade() {
         let findings = [finding(14, Severity::Info)];
         let card = grade_device(&device(14, DeviceType::Router), &findings);
@@ -376,6 +394,25 @@ mod tests {
                 prop_assert!(other >= plain, "{plain:?} -> {other:?}");
             } else {
                 prop_assert_eq!(other, plain);
+            }
+        }
+
+        /// `class_weighted` is set only when the class rule actually cost a letter.
+        #[test]
+        fn prop_class_weighted_implies_a_letter_was_lost(
+            severities in proptest::collection::vec(arb_severity(), 0..8),
+            kev in any::<bool>(),
+            dt in arb_type(),
+        ) {
+            let findings: Vec<Finding> = severities
+                .iter()
+                .map(|&s| Finding { is_kev: kev, ..finding(33, s) })
+                .collect();
+            let plain = grade_device(&device(33, DeviceType::Desktop), &findings).grade;
+            let card = grade_device(&device(33, dt), &findings);
+            if card.class_weighted {
+                prop_assert_ne!(card.grade, plain);
+                prop_assert_eq!(card.grade, plain.step_down());
             }
         }
     }

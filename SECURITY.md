@@ -120,7 +120,8 @@ only:
   JSON/CSV/HTML/OCSF exports, baselines, known-devices files — goes through
   `core::fs::write_private`, which creates with mode `0600` and re-chmods an
   existing file; the history directory is created with `create_private_dir`
-  (`0700`).
+  (`0700`). The one exception is `--format prometheus`, written `0644` so
+  node_exporter's textfile collector can read it.
 - **No telemetry**: Rikitikitavi does not phone home or transmit scan results
   anywhere.
 - **Outbound calls**: rikitikitavi makes a small number of external calls beyond

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::stream::StreamExt as _;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
 use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::{Device, DeviceHint, DeviceType, Finding, Remediation, ScanContext};
@@ -6,6 +7,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use crate::Scanner;
 
@@ -22,6 +24,12 @@ const MODBUS_PORT: u16 = 502;
 
 /// Ports gating this scanner in Phase 2.
 const MODBUS_PORTS: &[u16] = &[MODBUS_PORT];
+
+/// Deadline for the whole probe phase, below the runner's per-scanner budget.
+const PROBE_BUDGET: Duration = Duration::from_secs(40);
+
+/// Cap on concurrent host probes.
+const MAX_PARALLELISM: usize = 32;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
@@ -331,7 +339,22 @@ const VENDOR_CLASSES: &[(&str, Equipment)] = &[
     ("janitza", Equipment::Meter),
     ("carlo gavazzi", Equipment::Meter),
     ("eastron", Equipment::Meter),
+    ("smappee", Equipment::Meter),
 ];
+
+/// Needles at or below this length are matched as a whole manufacturer token.
+/// As substrings they hit "Smart"/"Smappee" and shadow every row below them.
+const SHORT_NEEDLE_LEN: usize = 3;
+
+/// Whether a table needle matches this manufacturer/model pair.
+fn vendor_matches(needle: &str, mn: &str, md: &str) -> bool {
+    if needle.len() <= SHORT_NEEDLE_LEN {
+        mn.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == needle)
+    } else {
+        mn.contains(needle) || md.contains(needle)
+    }
+}
 
 /// Classify equipment from the manufacturer string, falling back to the model.
 fn classify_equipment(manufacturer: &str, model: &str) -> Equipment {
@@ -339,7 +362,7 @@ fn classify_equipment(manufacturer: &str, model: &str) -> Equipment {
     let md = model.to_ascii_lowercase();
     VENDOR_CLASSES
         .iter()
-        .find(|(needle, _)| mn.contains(needle) || md.contains(needle))
+        .find(|(needle, _)| vendor_matches(needle, &mn, &md))
         .map_or(Equipment::Unknown, |(_, class)| *class)
 }
 
@@ -711,12 +734,32 @@ impl Scanner for ModbusScanner {
 
         tracing::info!(target_count = targets.len(), "probing Modbus/TCP servers");
 
-        for ip in targets {
-            if let Some(probe) = probe_modbus(ip, MODBUS_PORT).await {
-                tracing::debug!(ip = %ip, unit = probe.unit, sunspec = ?probe.sunspec_base, "Modbus server answered");
-                findings.push(finding_for_probe(ip, MODBUS_PORT, &probe));
+        // Bounded concurrency behind a phase deadline; findings already
+        // collected survive an overrun rather than being thrown away with the
+        // scanner's whole result.
+        let parallelism = ctx.config.parallelism.clamp(1, MAX_PARALLELISM);
+        let deadline = Instant::now() + PROBE_BUDGET;
+        let mut probes = futures::stream::iter(targets)
+            .map(|ip| async move { (ip, probe_modbus(ip, MODBUS_PORT).await) })
+            .buffer_unordered(parallelism);
+        loop {
+            match tokio::time::timeout_at(deadline, probes.next()).await {
+                Ok(Some((ip, Some(probe)))) => {
+                    tracing::debug!(ip = %ip, unit = probe.unit, sunspec = ?probe.sunspec_base, "Modbus server answered");
+                    findings.push(finding_for_probe(ip, MODBUS_PORT, &probe));
+                }
+                Ok(Some((_, None))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        budget_secs = PROBE_BUDGET.as_secs(),
+                        "Modbus probe phase timed out; keeping the findings collected so far"
+                    );
+                    break;
+                }
             }
         }
+        findings.sort_by_key(|f| f.affected_ip);
 
         tracing::info!(
             findings_count = findings.len(),
@@ -1018,6 +1061,29 @@ mod tests {
         );
         assert_eq!(classify_equipment("", "Janitza UMG 604"), Equipment::Meter);
         assert_eq!(classify_equipment("Acme Widgets", ""), Equipment::Unknown);
+    }
+
+    #[test]
+    fn short_vendor_needles_do_not_match_the_word_smart() {
+        // "sma" as a substring shadowed every row below it.
+        assert_eq!(
+            classify_equipment("Victron Energy", "SmartSolar MPPT 250/100"),
+            Equipment::Battery
+        );
+        assert_eq!(classify_equipment("Smappee", "Infinity"), Equipment::Meter);
+        assert_eq!(
+            classify_equipment("Acme", "Smart Meter 3000"),
+            Equipment::Unknown
+        );
+        // The real vendor still resolves, as its own manufacturer token.
+        assert_eq!(
+            classify_equipment("SMA Solar Technology AG", "SB3.6-1AV-41"),
+            Equipment::SolarInverter
+        );
+        assert_eq!(
+            classify_equipment("SMA", "Sunny Tripower"),
+            Equipment::SolarInverter
+        );
     }
 
     #[test]

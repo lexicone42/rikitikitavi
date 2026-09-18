@@ -18,14 +18,16 @@ Embedded in `crates/rikitikitavi-scanners/src/oui_db.rs` (regenerate with `scrip
 
 ## CISA Vulnrichment (SSVC decision points and CWE assignments)
 
-Embedded in `crates/rikitikitavi-analysis/src/vulnrichment_db.rs` (29 records).
+Embedded in `crates/rikitikitavi-analysis/src/vulnrichment_db.rs` (26 records).
 
 - Source: https://github.com/cisagov/vulnrichment (branch `develop`, commit 3d608e158)
 - Snapshot taken: 2026-09-17
 - Licence: CC0 1.0 Universal (public domain dedication), https://creativecommons.org/publicdomain/zero/1.0/
 - Extracted fields: `cveId`, and from the `CISA-ADP` container only, the SSVC decision points (Exploitation, Automatable, Technical Impact) and the CWE id. No CNA-container content is embedded.
 - As with the KEV catalog, "public domain" does not extend to third-party links inside the upstream records, and this use does not imply CISA endorsement nor authorise the CISA logo or DHS seal.
-- Regenerate with `uv run python scripts/gen_vulnrichment_db.py --clone <path>`.
+- Regenerate with `uv run python scripts/gen_vulnrichment_db.py --clone <path>`. Rows
+  are selected by the CVE ids production crate source references, plus the explicit
+  allowlist in `scripts/vulnrichment_extra_cves.txt`; test fixtures select nothing.
 
 ## Home Assistant generated discovery tables
 
@@ -271,6 +273,17 @@ Copyright: 2014, Rapid7, Inc.
 License: BSD-2-clause
 ```
 
+## TP-Link Kasa local protocol (softScheck/tplink-smartplug)
+
+- Source: https://github.com/softScheck/tplink-smartplug
+- Licence: Apache-2.0, https://github.com/softScheck/tplink-smartplug/blob/master/LICENSE
+- Taken: the protocol description (4-byte big-endian length prefix, XOR autokey
+  stream with initial key 171) reproduced in the module doc of
+  `crates/rikitikitavi-scanners/src/kasa.rs`, and one published 29-byte
+  `get_sysinfo` ciphertext used as a test vector
+  (`GET_SYSINFO_CIPHERTEXT` in that file's test module). No source code was
+  copied; the encoder, decoder and scanner are ours.
+
 ## Concepts referenced, with no code or data copied
 
 These projects and specifications informed features in this repository. Nothing
@@ -284,6 +297,12 @@ was vendored from them: no source, no fixtures, no data tables, no wording.
 - **WatchYourLAN** (MIT) — prior art for exporting LAN-scan state as metrics.
   No code or metric definitions were taken. Source:
   https://github.com/aceberg/WatchYourLAN
+- **tinytuya** (MIT) — the Tuya local discovery protocol, including the fixed
+  broadcast key `md5("yGAdlopoPVldABfn")` embedded as `UDP_KEY` in
+  `crates/rikitikitavi-scanners/src/tuya.rs`. That key is a published protocol
+  constant, identical in every device and every client library; no tinytuya
+  source, fixture or wording was copied, and the frame parsers and AES calls are
+  ours. Source: https://github.com/jasonacox/tinytuya
 - **NetAlertX** (GPL-3.0) — prior art for presenting per-device new/known state
   alongside the device inventory. The idea only; no GPL code, strings or schema
   is present, and the implementation reuses this repository's own

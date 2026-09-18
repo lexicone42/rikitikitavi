@@ -1,0 +1,14 @@
+# Extra CVE ids for gen_vulnrichment_db.py, one per line.
+#
+# The generator harvests production crate source only, so ids that appear just in
+# tests are not embedded. These are the ones the tests spot-check against upstream
+# and use as enrichment fixtures; every entry must be a real CVE.
+
+CVE-2014-0160   # Heartbleed: CISA-ADP CWE-125, the CWE-backfill fixture
+CVE-2014-6271   # Shellshock: KEV sample
+CVE-2017-0144   # EternalBlue: KEV sample
+CVE-2019-19781  # Citrix ADC: KEV sample
+CVE-2021-34527  # PrintNightmare: KEV sample
+CVE-2021-44228  # Log4Shell: the `active` tier fixture
+CVE-2023-4966   # Citrix Bleed: KEV sample
+CVE-2024-3400   # PAN-OS GlobalProtect: KEV sample

@@ -119,8 +119,6 @@ mod tests {
         assert_eq!(color, "low");
     }
 
-    // ─── Vulnrichment tiers ───────────────────────────────────────────
-
     fn finding_with_cve(sev: Severity, cve: &str) -> Finding {
         Finding::new("test", "t", "d", sev).with_cve_ids(vec![cve.to_owned()])
     }

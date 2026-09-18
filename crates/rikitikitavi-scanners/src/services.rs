@@ -709,13 +709,7 @@ fn ubuntu_last_eol(releases: &[&'static str]) -> Option<&'static str> {
 
 /// Ubuntu releases that shipped `OpenSSH` (major, minor), newest last.
 ///
-/// Distribution-specific: endoflife.date does not track OpenSSH, so the release
-/// is inferred, not read. Several `OpenSSH` releases shipped in two consecutive
-/// Ubuntu releases — 8.4p1 in 21.04 and 21.10, 9.0p1 in 22.10 and 23.04 — so
-/// this returns every candidate rather than naming one. Verified against
-/// Launchpad's published-sources history; a series' entry here is the version
-/// it released with, not the intermediate versions carried during its
-/// development cycle. Codename and EOL date come from `eol_db`.
+/// Some versions shipped in two releases, so every candidate is returned.
 const fn ubuntu_from_openssh(major: u32, minor: u32) -> &'static [&'static str] {
     match (major, minor) {
         (7, 2) => &["16.04"],
@@ -738,14 +732,9 @@ const fn ubuntu_from_openssh(major: u32, minor: u32) -> &'static [&'static str] 
 
 /// Finding if the SSH banner indicates an EOL, or LTS-only, Debian/Ubuntu release.
 ///
-/// Dates come from `eol_db`. Debian gets two tiers because both of its dates are
-/// security dates: `eoas_from` is the day Debian's own security team stops and the
-/// community LTS project takes over (Medium), `eol_from` the day LTS itself ends
-/// (High). Ubuntu gets one tier only, because its `eoas_from` is the last point
-/// release ("Hardware & Maintenance") and not a patching change — keying on it
-/// would fire on 22.04, which is supported to 2027. Ubuntu's `eol_from` is the end
-/// of standard Maintenance & Security Support, which a paid ESM subscription can
-/// extend.
+/// Dates come from `eol_db`. Debian is tiered on both of its dates (`eoas_from`
+/// Medium, `eol_from` High); Ubuntu only on `eol_from`, since its `eoas_from` is
+/// a point-release date, not a patching change.
 pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
     let lower = banner.to_lowercase();
     let today = today();
@@ -894,10 +883,7 @@ pub(crate) fn eol_product(token: &str) -> Option<&'static str> {
 
 /// Sentence naming a still-supported branch of `product`, from `eol_db`.
 ///
-/// Deliberately not phrased as "upgrade to X" unless upstream supports exactly
-/// one branch. Where several are supported at once the right target depends on
-/// the track the host is on — nginx keeps mainline and stable alive together,
-/// so naming the newest would push a stable install onto mainline.
+/// Phrased as "upgrade to X" only where upstream supports exactly one branch.
 pub(crate) fn upgrade_target(product: &str) -> String {
     let Some(current) = eol_db::current(product) else {
         return String::new();
@@ -960,43 +946,58 @@ fn is_ssh_banner(banner: &str) -> bool {
     })
 }
 
+/// True when `s` names ASUS as a token: `pegasus` is not ASUS hardware, and
+/// `dropbear` alone is not ASUS firmware (`OpenWrt` ships it too).
+fn names_asus(s: &str) -> bool {
+    s.split(|c: char| !c.is_ascii_alphanumeric()).any(|tok| {
+        ["asus", "asustek", "asuswrt"]
+            .iter()
+            .any(|k| tok.eq_ignore_ascii_case(k))
+    })
+}
+
 /// What the scan knows about a host's routing role. The `AyySSHush` attribution
 /// needs more than an open port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostRole {
     /// The host is this network's default gateway.
     pub is_gateway: bool,
-    /// Device type or OUI vendor says router, access point or ASUS hardware.
+    /// Device type or OUI vendor says router or access point.
     pub router_like: bool,
+    /// Vendor names ASUS as a token. CVE-2023-39780 is ASUS-only, so only this
+    /// tier carries it.
+    pub is_asus: bool,
 }
 
 impl HostRole {
-    /// The default gateway.
+    /// The default gateway, hardware unidentified.
     pub const GATEWAY: Self = Self {
         is_gateway: true,
         router_like: true,
+        is_asus: false,
     };
 
     /// A host with no known routing role.
     pub const UNKNOWN: Self = Self {
         is_gateway: false,
         router_like: false,
+        is_asus: false,
     };
 
-    /// Role of a discovered device.
+    /// Role of a discovered device. `is_asus` reads the vendor only: hostname
+    /// and OS guess are strings the scanned host chooses.
     fn of_device(device: &Device, is_gateway: bool) -> Self {
+        let is_asus = device.vendor.as_deref().is_some_and(names_asus);
         let router_like = is_gateway
+            || is_asus
             || matches!(
                 device.device_type,
                 DeviceType::Router | DeviceType::AccessPoint
-            )
-            || device
-                .vendor
-                .as_deref()
-                .is_some_and(|v| v.to_lowercase().contains("asus"));
+            );
         Self {
             is_gateway,
             router_like,
+            is_asus,
         }
     }
 }
@@ -1077,7 +1078,7 @@ fn gateway_ssh_remediation(port: u16) -> Remediation {
     }
 }
 
-/// TCP/53282 answering SSH on a router-shaped host: the campaign artefact.
+/// TCP/53282 answering SSH on identified ASUS hardware: the campaign artefact.
 fn ayysshush_finding(ip: IpAddr, banner: &str) -> Finding {
     Finding::new(
         "services",
@@ -1106,10 +1107,9 @@ fn ayysshush_finding(ip: IpAddr, banner: &str) -> Finding {
     .with_remediation(ayysshush_remediation())
 }
 
-/// TCP/53282 answering SSH on a host the scan cannot tie to ASUS hardware. The
-/// port is the campaign's; the attribution is not. A relocated SSH server or a
-/// published container port lands here too, so it stays `Probable` and the title
-/// claims only what the protocol answered.
+/// TCP/53282 answering SSH on a host the scan cannot tie to ASUS hardware: the
+/// port is the campaign's, the attribution is not. `Probable`, no CVE, and the
+/// title claims only what the protocol answered.
 fn unattributed_port_finding(ip: IpAddr, banner: &str) -> Finding {
     Finding::new(
         "services",
@@ -1117,8 +1117,8 @@ fn unattributed_port_finding(ip: IpAddr, banner: &str) -> Finding {
         &format!(
             "An SSH server answered on {ip}:{AYYSSHUSH_PORT}. That is the listener the \
              AyySSHush campaign opens on compromised ASUS routers (CVE-2023-39780, CISA KEV \
-             2025-06-02), but this host does not look like an ASUS router or access point, so \
-             a deliberately relocated SSH server or a published container port explains it \
+             2025-06-02), but nothing identifies this host as ASUS hardware, so a \
+             deliberately relocated SSH server or a published container port explains it \
              equally well. Identify the listener before acting."
         ),
         Severity::High,
@@ -1137,12 +1137,11 @@ fn unattributed_port_finding(ip: IpAddr, banner: &str) -> Finding {
 
 /// SSH answering on a port it has no business listening on.
 ///
-/// TCP/53282 is the `AyySSHush` artefact: the attacker enables SSH there and writes a
-/// key into NVRAM, so it outlives reboots and firmware updates. The campaign
-/// attribution — and its destructive remediation — is asserted only for a
-/// router-shaped host; elsewhere the same answer is reported neutrally. SSH on any
-/// other non-22 port of the gateway is the same shape with a benign explanation
-/// available, so it stays `Probable`.
+/// TCP/53282 is the `AyySSHush` artefact. The campaign attribution — and its
+/// destructive remediation — is asserted only where the vendor
+/// (`HostRole::is_asus`) or the banner names ASUS; every other host gets the
+/// vendor-neutral finding. SSH on another non-22 port of the gateway stays
+/// `Probable`.
 pub fn classify_backdoor_ssh(
     ip: IpAddr,
     port: u16,
@@ -1154,7 +1153,7 @@ pub fn classify_backdoor_ssh(
     }
 
     if port == AYYSSHUSH_PORT {
-        return Some(if role.router_like {
+        return Some(if role.is_asus || names_asus(banner) {
             ayysshush_finding(ip, banner)
         } else {
             unattributed_port_finding(ip, banner)
@@ -1195,6 +1194,20 @@ pub fn classify_backdoor_ssh(
         .with_evidence(banner)
         .with_remediation(gateway_ssh_remediation(port)),
     )
+}
+
+/// Role of a host with no discovered device: the ARP cache's MAC carries the
+/// OUI vendor, which is all `is_asus` reads.
+fn role_from_arp(ip: IpAddr, is_gateway: bool, entries: &[ArpEntry]) -> HostRole {
+    let is_asus = entries
+        .iter()
+        .filter(|e| e.ip == ip)
+        .any(|e| crate::oui_db::ieee_oui_lookup(&e.mac).is_some_and(names_asus));
+    HostRole {
+        is_gateway,
+        router_like: is_gateway || is_asus,
+        is_asus,
+    }
 }
 
 /// Banner-grab one TCP port directly and classify what answers. Used for ports no
@@ -1665,7 +1678,7 @@ fn check_eol_table(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     let product = eol_product(&sv.product)?;
     let summary = eol_summary(product, &format!("{}.{}.{}", sv.major, sv.minor, sv.patch))?;
     Some(ServerVersionIssue {
-        severity: Severity::Medium,
+        severity: eol_severity(&sv.raw),
         description: format!("{summary} Banner: {}", sv.raw),
         cwe: Some("CWE-1104"),
         cve_refs: Vec::new(),
@@ -1868,6 +1881,60 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     None
 }
 
+/// Distribution markers in a `Server` or `X-Powered-By` value: a parenthesised
+/// distribution name, or a distribution suffix on the version.
+const DISTRO_MARKERS: &[&str] = &[
+    "(debian",
+    "(centos",
+    "(red hat",
+    "(rocky",
+    "(almalinux",
+    "(fedora",
+    "(suse",
+    "(amazon",
+    "(raspbian",
+    "(alpine",
+    "ubuntu",
+    "+deb",
+    "~deb",
+    "~bpo",
+    ".el7",
+    ".el8",
+    ".el9",
+];
+
+/// True when `lower` names a distribution generation that is itself
+/// end-of-life, so no backport is patching the component either.
+fn dead_distro_marker(lower: &str) -> bool {
+    // CentOS Linux 7 ended 2024-06-30 and 8 ended 2021-12; Stream is separate.
+    if lower.contains("(centos") && !lower.contains("(centos stream") {
+        return true;
+    }
+    if lower.contains(".el7") || lower.contains(".el8") {
+        return true;
+    }
+    // `~deb11u1` names the same release as `+deb11u1`.
+    debian_release(&lower.replace('~', "+")).is_some_and(|release| {
+        eol_db::lookup("debian", &release.to_string())
+            .is_some_and(|entry| eol_db::is_eol_on(entry, &today()))
+    })
+}
+
+/// Severity for an EOL join made from the `eol_db` table alone.
+///
+/// The table carries upstream dates. A distribution backport can still be
+/// patching a cycle upstream calls dead, so a distribution marker in `context`
+/// drops the claim to `Low` — unless the marker names a distribution generation
+/// that is itself dead, where nothing is backporting.
+pub(crate) fn eol_severity(context: &str) -> Severity {
+    let lower = context.to_ascii_lowercase();
+    if DISTRO_MARKERS.iter().any(|m| lower.contains(m)) && !dead_distro_marker(&lower) {
+        Severity::Low
+    } else {
+        Severity::Medium
+    }
+}
+
 /// EOL findings for secondary `name/version` tokens in a `Server` header.
 ///
 /// `Apache/2.4.6 (CentOS) OpenSSL/1.0.2k PHP/5.4.45` — the leading token is
@@ -1885,7 +1952,7 @@ fn check_header_components(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> 
                     "services",
                     &format!("End-of-life {product} component on {ip}:{port}"),
                     &format!("The Server header advertises {token}. {summary} Header: {server}"),
-                    Severity::Medium,
+                    eol_severity(server),
                 )
                 .with_ip(ip)
                 .with_port(port)
@@ -1943,6 +2010,15 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> {
     findings
 }
 
+/// True when this scanner should Recog-identify an HTTP port.
+///
+/// The HTTP audit identifies its own ports from header, realm and title
+/// together, but only at Active+ and only on `AUDIT_PORTS`; every other
+/// HTTP-ish port is ours at every intensity.
+fn recog_identifies_http(port: u16, active: bool) -> bool {
+    !(active && crate::http_audit::AUDIT_PORTS.contains(&port))
+}
+
 /// Heuristic: is this port likely serving HTTP?
 const fn is_likely_http_port(port: u16) -> bool {
     matches!(
@@ -1988,8 +2064,7 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
     let ip = device.ip;
     let mut findings = Vec::new();
 
-    // TCP/53282 is in no port list, so reach it deliberately on router-shaped
-    // hosts — unless the port scanner was configured wide enough to find it first.
+    // Reach for TCP/53282 on router-shaped hosts unless phase 1 already found it.
     if active && role.router_like && !device.open_ports.iter().any(|p| p.port == AYYSSHUSH_PORT) {
         findings.extend(probe_ssh_port(ip, AYYSSHUSH_PORT, role).await);
     }
@@ -2010,10 +2085,7 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
         } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
             if let Some(server) = grab_http_server(ip, port).await {
                 findings.extend(classify_http_server(ip, port, &server));
-                // At Active+ the HTTP audit identifies this endpoint from the
-                // header, the realm and the page title together; identify here
-                // only when that scanner will not run.
-                if !active {
+                if recog_identifies_http(port, active) {
                     findings.extend(recog::identify_finding(
                         "services",
                         ip,
@@ -2093,7 +2165,9 @@ impl Scanner for ServicesScanner {
                 && !ctx.discovered_devices.iter().any(|d| d.ip == gateway)
                 && unvouched_probe_allowed(gateway, &exclusions)
             {
-                findings.extend(probe_ssh_port(gateway, AYYSSHUSH_PORT, HostRole::GATEWAY).await);
+                let arp = rikitikitavi_network::read_arp_cache().unwrap_or_default();
+                let role = role_from_arp(gateway, true, &arp);
+                findings.extend(probe_ssh_port(gateway, AYYSSHUSH_PORT, role).await);
             }
 
             tracing::info!(
@@ -2123,11 +2197,7 @@ impl Scanner for ServicesScanner {
         tracing::info!(target_count = targets.len(), "banner grabbing targets");
 
         for &ip in &targets {
-            let role = if ctx.gateway == Some(ip) {
-                HostRole::GATEWAY
-            } else {
-                HostRole::UNKNOWN
-            };
+            let role = role_from_arp(ip, ctx.gateway == Some(ip), &arp_entries);
             for &port in BANNER_PORTS {
                 // Nothing suggested 53282 was open; only reach for it at Active+.
                 if port == AYYSSHUSH_PORT && !active {
@@ -2376,7 +2446,8 @@ mod tests {
         );
     }
 
-    /// Secondary `Server` tokens are joined to the table independently.
+    /// Secondary `Server` tokens are joined to the table independently. `CentOS`
+    /// Linux is itself end-of-life, so the marker does not downgrade this one.
     #[test]
     fn test_classify_http_server_openssl_component() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
@@ -2479,6 +2550,75 @@ mod tests {
         let current = eol_db::current("nginx").expect("nginx current");
         assert!(upgrade_target("nginx").contains(current.cycle));
         assert_eq!(upgrade_target("not-a-product"), "");
+    }
+
+    /// A distribution build is still being patched; the upstream date alone is
+    /// not evidence that it is not.
+    #[test]
+    fn distro_builds_downgrade_the_table_only_eol_join() {
+        assert_eq!(eol_severity("Apache/2.4.57 (Debian)"), Severity::Low);
+        assert_eq!(eol_severity("Apache/2.4.52 (Ubuntu)"), Severity::Low);
+        assert_eq!(eol_severity("PHP/8.1.2-1ubuntu2.14"), Severity::Low);
+        let live = eol_db::current("debian").expect("debian current").cycle;
+        assert_eq!(
+            eol_severity(&format!("nginx/1.26.0-1+deb{live}u1")),
+            Severity::Low
+        );
+        // No distribution context: the upstream date is all there is.
+        assert_eq!(
+            eol_severity("Apache/2.4.6 OpenSSL/1.0.2k"),
+            Severity::Medium
+        );
+        assert_eq!(eol_severity("PHP/5.6.40"), Severity::Medium);
+        assert_eq!(eol_severity(""), Severity::Medium);
+    }
+
+    /// A distribution generation that is itself dead backports nothing, so the
+    /// marker does not downgrade.
+    #[test]
+    fn a_dead_distro_generation_does_not_downgrade() {
+        // Debian 10 Buster: LTS ended 2024-06-30.
+        assert_eq!(eol_severity("nginx/1.14.2-2+deb10u4"), Severity::Medium);
+        assert_eq!(
+            eol_severity("Apache/2.4.6 (CentOS) PHP/5.4.45"),
+            Severity::Medium
+        );
+        assert_eq!(eol_severity("PHP/7.2.24-1.el7.remi"), Severity::Medium);
+        assert_eq!(eol_severity("nginx/1.18.0-6.1~deb11u3"), Severity::Medium);
+        // CentOS Stream is a live distribution, not CentOS Linux.
+        assert_eq!(
+            eol_severity("Apache/2.4.62 (CentOS Stream) OpenSSL/3.2.2"),
+            Severity::Low
+        );
+    }
+
+    /// The leading token's own table-only EOL join takes the same severity rule.
+    #[test]
+    fn leading_token_eol_follows_the_distro_rule() {
+        let sv = parse_server_header("PHP/8.1.2-1ubuntu2.14").expect("parsed");
+        assert_eq!(
+            check_server_version(&sv).expect("eol").severity,
+            Severity::Low
+        );
+        let sv = parse_server_header("PHP/8.1.2").expect("parsed");
+        assert_eq!(
+            check_server_version(&sv).expect("eol").severity,
+            Severity::Medium
+        );
+    }
+
+    /// The `Server` header's own distribution marker reaches the component join.
+    #[test]
+    fn header_component_eol_is_low_on_a_distro_build() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let debian = check_header_components(ip, 80, "Apache/2.4.57 (Debian) OpenSSL/1.0.2k");
+        assert_eq!(debian.len(), 1);
+        assert_eq!(debian[0].severity, Severity::Low);
+        let upstream = check_header_components(ip, 80, "Apache/2.4.57 OpenSSL/1.0.2k");
+        assert_eq!(upstream.len(), 1);
+        assert_eq!(upstream[0].severity, Severity::Medium);
+        // Same title either way: only the severity moves.
+        assert_eq!(debian[0].title, upstream[0].title);
     }
 
     #[test]
@@ -3650,10 +3790,18 @@ mod backdoor_ssh_tests {
     /// Real ASUS/Dropbear identification string (RT-AX55 firmware line).
     const DROPBEAR_BANNER: &str = "SSH-2.0-dropbear_2020.81";
 
-    /// A host that looks like ASUS hardware but is not the gateway.
+    /// An ASUS access point that is not the gateway.
     const ASUS_AP: HostRole = HostRole {
         is_gateway: false,
         router_like: true,
+        is_asus: true,
+    };
+
+    /// The gateway, identified as ASUS hardware.
+    const ASUS_GATEWAY: HostRole = HostRole {
+        is_gateway: true,
+        router_like: true,
+        is_asus: true,
     };
 
     #[test]
@@ -3699,8 +3847,8 @@ mod backdoor_ssh_tests {
     }
 
     #[test]
-    fn ayysshush_port_on_router_is_critical_and_confirmed() {
-        let f = classify_backdoor_ssh(ip(GW), 53282, DROPBEAR_BANNER, HostRole::GATEWAY).unwrap();
+    fn ayysshush_port_on_asus_router_is_critical_and_confirmed() {
+        let f = classify_backdoor_ssh(ip(GW), 53282, DROPBEAR_BANNER, ASUS_GATEWAY).unwrap();
         assert_eq!(f.title, "ASUS AyySSHush SSH backdoor listener on TCP/53282");
         assert_eq!(f.severity, Severity::Critical);
         assert_eq!(f.confidence, Confidence::Confirmed);
@@ -3736,6 +3884,75 @@ mod backdoor_ssh_tests {
         assert!(f.cve_ids.is_empty(), "no CVE asserted without attribution");
         let rem = f.remediation.unwrap();
         assert!(!rem.steps.iter().any(|s| s.starts_with("Factory reset")));
+    }
+
+    /// CVE-2023-39780 is ASUS-only: a non-ASUS gateway (`OpenWrt`, pfSense, a
+    /// Linux box) gets the vendor-neutral finding, not a factory-reset order.
+    #[test]
+    fn ayysshush_port_on_a_non_asus_gateway_is_not_attributed() {
+        let f =
+            classify_backdoor_ssh(ip(GW), 53282, "SSH-2.0-OpenSSH_9.6", HostRole::GATEWAY).unwrap();
+        assert_eq!(
+            f.title,
+            "SSH server on TCP/53282, the AyySSHush backdoor port"
+        );
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert!(
+            f.cve_ids.is_empty(),
+            "{CVE} does not apply to this hardware"
+        );
+    }
+
+    /// ASUS is read from the vendor alone; hostname and OS guess are the
+    /// scanned host's own claims.
+    #[test]
+    fn host_role_identifies_asus_hardware() {
+        let mut d = Device::new(ip(HOST));
+        assert!(!HostRole::of_device(&d, true).is_asus, "gateway alone");
+
+        d.vendor = Some("ASUSTek COMPUTER INC.".to_owned());
+        assert!(HostRole::of_device(&d, false).is_asus);
+
+        d.vendor = None;
+        d.hostname = Some("RT-AX55-asus.lan".to_owned());
+        d.os_guess = Some("ASUSWRT 3.0.0.4".to_owned());
+        assert!(
+            !HostRole::of_device(&d, false).is_asus,
+            "mDNS name and banner hint are claims, not hardware"
+        );
+    }
+
+    /// Token match, not substring: `Pegasus` is a real OUI vendor.
+    #[test]
+    fn a_pegasus_host_is_not_asus_hardware() {
+        let mut d = Device::new(ip(HOST));
+        d.vendor = Some("Pegasus Technologies".to_owned());
+        d.hostname = Some("pegasus.lan".to_owned());
+        let role = HostRole::of_device(&d, false);
+        assert!(!role.is_asus);
+        assert!(!role.router_like, "and it is not probed as a router");
+
+        let f = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-OpenSSH_9.6", role).unwrap();
+        assert_eq!(
+            f.title,
+            "SSH server on TCP/53282, the AyySSHush backdoor port"
+        );
+        assert!(f.cve_ids.is_empty());
+    }
+
+    /// The firmware banner attributes too; `dropbear` alone does not, since
+    /// `OpenWrt` ships it.
+    #[test]
+    fn an_asuswrt_banner_attributes_without_vendor_data() {
+        let f = classify_backdoor_ssh(ip(GW), 53282, "SSH-2.0-asuswrt_dropbear", HostRole::GATEWAY)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.confidence, Confidence::Confirmed);
+
+        let f = classify_backdoor_ssh(ip(GW), 53282, DROPBEAR_BANNER, HostRole::GATEWAY).unwrap();
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert!(f.cve_ids.is_empty());
     }
 
     #[test]
@@ -3792,7 +4009,7 @@ mod backdoor_ssh_tests {
 
     #[test]
     fn titles_are_stable_across_hosts_and_ports() {
-        let a = classify_backdoor_ssh(ip(GW), 53282, "SSH-2.0-A", HostRole::GATEWAY).unwrap();
+        let a = classify_backdoor_ssh(ip(GW), 53282, "SSH-2.0-A", ASUS_GATEWAY).unwrap();
         let b = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-B", ASUS_AP).unwrap();
         assert_eq!(a.title, b.title);
 
@@ -3808,6 +4025,25 @@ mod backdoor_ssh_tests {
         // generic "Service banner" arm and lost CVE correlation.
         let f = classify_banner(ip(GW), 53282, "SSH-2.0-OpenSSH_8.9p1").unwrap();
         assert_eq!(f.affected_service.as_deref(), Some("SSH"));
+    }
+
+    /// Ports the HTTP audit never visits stay identified at every intensity.
+    #[test]
+    fn recog_identifies_http_ports_the_audit_skips() {
+        for port in [5000u16, 8008, 8444, 8880, 9000, 9443] {
+            assert!(is_likely_http_port(port) || HTTP_PORTS.contains(&port));
+            assert!(
+                !crate::http_audit::AUDIT_PORTS.contains(&port),
+                "{port} is audited"
+            );
+            assert!(recog_identifies_http(port, true), "{port} at Active");
+            assert!(recog_identifies_http(port, false), "{port} at Passive");
+        }
+        // The audit's own ports are left to it at Active+ only.
+        for &port in crate::http_audit::AUDIT_PORTS {
+            assert!(!recog_identifies_http(port, true), "{port} at Active");
+            assert!(recog_identifies_http(port, false), "{port} at Passive");
+        }
     }
 
     #[test]
@@ -3977,32 +4213,37 @@ mod backdoor_ssh_tests {
             port in any::<u16>(),
             is_gateway in any::<bool>(),
             router_like in any::<bool>(),
+            is_asus in any::<bool>(),
         ) {
-            let role = HostRole { is_gateway, router_like: router_like || is_gateway };
+            let role = HostRole {
+                is_gateway,
+                router_like: router_like || is_gateway,
+                is_asus,
+            };
             let banner = String::from_utf8_lossy(&data);
             let out = classify_backdoor_ssh(ip(GW), port, &banner, role);
             if let Some(f) = out {
                 prop_assert!(is_ssh_banner(&banner));
                 prop_assert!(port == AYYSSHUSH_PORT || (role.is_gateway && port != 22));
-                // Campaign attribution only where the host could be ASUS hardware.
+                // Campaign attribution only where ASUS is named.
                 if f.confidence == Confidence::Confirmed {
-                    prop_assert!(role.router_like);
+                    prop_assert!(role.is_asus || names_asus(&banner));
                     prop_assert_eq!(port, AYYSSHUSH_PORT);
                 }
             }
         }
 
-        /// An SSH banner on 53282 is always reported; Critical only for a
-        /// router-shaped host, and never attributed to the campaign otherwise.
+        /// An SSH banner on 53282 is always reported; Critical only on ASUS
+        /// hardware, and never attributed to the campaign otherwise.
         #[test]
         fn prop_ayysshush_port_always_reported(
             software in "[ -~]{0,64}",
-            router_like in any::<bool>(),
+            is_asus in any::<bool>(),
         ) {
-            let role = HostRole { is_gateway: false, router_like };
+            let role = HostRole { is_gateway: false, router_like: true, is_asus };
             let banner = format!("SSH-2.0-{software}");
             let f = classify_backdoor_ssh(ip(GW), AYYSSHUSH_PORT, &banner, role).unwrap();
-            if router_like {
+            if is_asus || names_asus(&banner) {
                 prop_assert_eq!(f.severity, Severity::Critical);
                 prop_assert_eq!(f.confidence, Confidence::Confirmed);
             } else {

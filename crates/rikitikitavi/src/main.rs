@@ -257,6 +257,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
             );
         }
         results.findings.extend(new_devices);
+        regrade(&mut results, Some(known));
     }
     if let Some(path) = args.write_known_devices.as_ref() {
         match write_known_devices_file(path, &results.devices) {
@@ -310,6 +311,9 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         let before = results.findings.len();
         results.findings.retain(|f| !set.contains(&f.fingerprint()));
         let suppressed = before - results.findings.len();
+        if suppressed > 0 {
+            regrade(&mut results, known_devices.as_ref());
+        }
         if !args.quiet {
             println!(
                 "Suppressed {suppressed} finding(s) listed in {}",
@@ -553,6 +557,20 @@ fn mark_device_status(
     }
 }
 
+/// Recompute risk score and report cards after `results.findings` changed;
+/// known/new status is re-applied.
+fn regrade(
+    results: &mut rikitikitavi_models::ScanResults,
+    known: Option<&std::collections::HashSet<String>>,
+) {
+    results.risk_score = rikitikitavi_analysis::calculate_risk_score(&results.findings);
+    results.report_cards =
+        rikitikitavi_analysis::grade_devices(&results.devices, &results.findings);
+    if let Some(known) = known {
+        mark_device_status(results, known);
+    }
+}
+
 /// Grade the devices of a scan loaded from history that predates report cards.
 fn backfill_report_cards(
     mut results: rikitikitavi_models::ScanResults,
@@ -634,16 +652,16 @@ const fn fail_on_threshold(arg: cli::FailOnArg) -> Option<rikitikitavi_core::Sev
     }
 }
 
-#[allow(clippy::too_many_lines)]
 /// Device label such as `"HP (Printer)"`, `"(Camera)"`, or empty when nothing is known.
+/// Uses the human label, not the wire name.
 fn device_identity_label(d: &rikitikitavi_models::Device) -> String {
     use rikitikitavi_models::DeviceType;
     let name = d.vendor.as_deref().or(d.hostname.as_deref());
     match (name, d.device_type) {
         (Some(n), DeviceType::Unknown) => format!("({n})"),
-        (Some(n), k) => format!("{n} ({k})"),
+        (Some(n), k) => format!("{n} ({})", k.label()),
         (None, DeviceType::Unknown) => String::new(),
-        (None, k) => format!("({k})"),
+        (None, k) => format!("({})", k.label()),
     }
 }
 
@@ -2097,6 +2115,79 @@ mod tests {
     }
 
     #[test]
+    fn device_identity_label_uses_human_labels() {
+        use crate::device_identity_label;
+        use rikitikitavi_models::{Device, DeviceType};
+
+        let dev = |vendor: Option<&str>, dt: DeviceType| {
+            let mut d = Device::new("10.0.0.9".parse().unwrap()).with_device_type(dt);
+            d.vendor = vendor.map(ToOwned::to_owned);
+            d
+        };
+        assert_eq!(
+            device_identity_label(&dev(Some("Amazon"), DeviceType::IoT)),
+            "Amazon (IoT)"
+        );
+        assert_eq!(
+            device_identity_label(&dev(None, DeviceType::SmartTv)),
+            "(Smart TV)"
+        );
+        assert_eq!(
+            device_identity_label(&dev(Some("Netgear"), DeviceType::AccessPoint)),
+            "Netgear (Access Point)"
+        );
+        assert_eq!(
+            device_identity_label(&dev(Some("Acme"), DeviceType::Unknown)),
+            "(Acme)"
+        );
+        assert_eq!(device_identity_label(&dev(None, DeviceType::Unknown)), "");
+    }
+
+    #[test]
+    fn regrade_follows_changed_findings() {
+        use crate::{new_device_finding, regrade};
+        use rikitikitavi_models::DeviceStatus;
+        use std::collections::HashSet;
+
+        fn card<'a>(
+            results: &'a rikitikitavi_models::ScanResults,
+            ip: &str,
+        ) -> &'a rikitikitavi_models::DeviceReportCard {
+            results
+                .report_cards
+                .iter()
+                .find(|c| c.ip.to_string() == ip)
+                .unwrap()
+        }
+
+        let mut results = two_device_results();
+        results.risk_score = 74.0;
+        let new_finding = new_device_finding(&results.devices[1]);
+        results.findings.push(new_finding);
+
+        let known: HashSet<String> = HashSet::from(["aa:bb:cc:dd:ee:ff".to_owned()]);
+        regrade(&mut results, Some(&known));
+        assert_eq!(
+            card(&results, "10.0.0.6").medium,
+            1,
+            "new-device finding not graded"
+        );
+        assert_eq!(card(&results, "10.0.0.6").status, DeviceStatus::New);
+        assert_eq!(card(&results, "10.0.0.5").status, DeviceStatus::Known);
+        assert!(
+            (results.risk_score - 74.0).abs() > f64::EPSILON,
+            "risk score kept the runner's value"
+        );
+
+        // Suppressing it again leaves no graded finding and no risk behind.
+        results.findings.clear();
+        regrade(&mut results, Some(&known));
+        assert_eq!(card(&results, "10.0.0.6").medium, 0);
+        assert_eq!(card(&results, "10.0.0.6").status, DeviceStatus::New);
+        assert!(results.risk_score.abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn backfill_grades_a_scan_loaded_without_cards() {
         use crate::backfill_report_cards;
 
@@ -2119,7 +2210,7 @@ mod tests {
         .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(body.contains("rikitikitavi_devices_total 2"));
+        assert!(body.contains("rikitikitavi_devices 2"));
         assert!(!body.contains("# EOF"));
     }
 

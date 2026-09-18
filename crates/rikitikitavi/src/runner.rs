@@ -364,6 +364,7 @@ fn filter_phase2<'a>(
     // Scanners that run at Passive intensity even without matching open ports.
     let passive_essential: &[&str] = &[
         "credentials",
+        "lan_client_exposure",
         "router",
         "wifi",
         "dns",
@@ -660,8 +661,8 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
 
 /// Deduplicate findings keyed by `(affected_ip, affected_port)`.
 ///
-/// Findings lacking IP or port are kept as-is. Per key, all findings from the scanner
-/// with the highest `detail_score` are kept; non-`ports` scanners get +1 to that score.
+/// Findings lacking IP or port are kept as-is. Per key, all findings from the
+/// scanner group ranked highest by [`dedup_rank`] are kept.
 fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::HashMap;
 
@@ -689,30 +690,40 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
 
     let mut result: Vec<Finding> = unkeyed;
     for (_key, scanner_groups) in by_port {
-        if scanner_groups.len() == 1 {
-            result.extend(scanner_groups.into_iter().flat_map(|(_, f)| f));
-        } else {
-            let mut best_scanner = String::new();
-            let mut best_score = 0_u32;
-            for (scanner, group) in &scanner_groups {
-                let max_score = group.iter().map(detail_score).max().unwrap_or(0);
-                let is_ports = scanner == "ports";
-                let adjusted = if is_ports { max_score } else { max_score + 1 };
-                if adjusted > best_score {
-                    best_score = adjusted;
-                    scanner.clone_into(&mut best_scanner);
-                }
-            }
-            for (scanner, group) in scanner_groups {
-                if scanner == best_scanner {
-                    result.extend(group);
-                }
+        let mut groups = scanner_groups.into_iter();
+        // A `by_port` entry exists only because a group was pushed into it.
+        let Some(mut winner) = groups.next() else {
+            continue;
+        };
+        for group in groups {
+            if dedup_rank(&group) > dedup_rank(&winner) {
+                winner = group;
             }
         }
+        result.extend(winner.1);
     }
 
     result.sort_by_key(|f| std::cmp::Reverse(f.severity));
     result
+}
+
+/// Rank one scanner's findings for an (ip, port): highest severity first, then
+/// highest `detail_score` (non-`ports` scanners get +1), then lowest scanner id.
+fn dedup_rank(
+    (scanner, group): &(String, Vec<Finding>),
+) -> (
+    Option<rikitikitavi_core::Severity>,
+    u32,
+    std::cmp::Reverse<&str>,
+) {
+    let max_severity = group.iter().map(|f| f.severity).max();
+    let max_score = group.iter().map(detail_score).max().unwrap_or(0);
+    let adjusted = if scanner == "ports" {
+        max_score
+    } else {
+        max_score + 1
+    };
+    (max_severity, adjusted, std::cmp::Reverse(scanner.as_str()))
 }
 
 /// Score a finding by how much useful detail it contains.
@@ -901,13 +912,8 @@ const MDNS_SERVICE_TYPES: &[(&str, &[&str])] = &[
     ("Thread", &["_meshcop._udp.local", "_meshcop-e._udp.local"]),
 ];
 
-/// A name glob or TXT predicate had to fire to produce this hint's integration
-/// domains, rather than the service type alone.
-///
-/// HA's table is asked which domains a bare match on the same service type yields;
-/// a domain outside that set can only have come from a qualified matcher. The
-/// `_http._tcp` responder that resolves to `shelly` is qualified; the
-/// `_googlecast._tcp` responder that resolves to `cast` is not.
+/// True when a name glob or TXT predicate, rather than the service type alone,
+/// produced this hint's integration domains.
 fn mdns_hint_is_qualified(service: Option<&str>, hint: &DeviceHint) -> bool {
     use rikitikitavi_scanners::ha_discovery_db::zeroconf_domains;
 
@@ -998,6 +1004,7 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
         });
 
         let mut changed = false;
+        let mut class_paired_with_subtype = false;
         for (_, hint) in &sorted {
             if let Some(vendor) = &hint.vendor {
                 vendor.clone_into(device.vendor.get_or_insert_with(String::new));
@@ -1010,13 +1017,20 @@ fn post_enrich_devices(devices: &mut [Device], findings: &[Finding]) {
                 device.hostname = Some(clean);
                 changed = true;
             }
-            if let Some(dt) = hint.device_type
-                && dt != DeviceType::Unknown
-            {
+            // A subtype-only hint clears the class only when that class came in
+            // on the same hint as the subtype it is replacing.
+            if let Some(dt) = hint.device_type.filter(|dt| *dt != DeviceType::Unknown) {
                 device.device_type = dt;
+                class_paired_with_subtype = hint.device_subtype.is_some();
+                if class_paired_with_subtype {
+                    device.device_subtype.clone_from(&hint.device_subtype);
+                }
                 changed = true;
-            }
-            if let Some(subtype) = &hint.device_subtype {
+            } else if let Some(subtype) = &hint.device_subtype {
+                if class_paired_with_subtype {
+                    device.device_type = DeviceType::Unknown;
+                    class_paired_with_subtype = false;
+                }
                 subtype.clone_into(device.device_subtype.get_or_insert_with(String::new));
                 changed = true;
             }
@@ -1488,6 +1502,41 @@ mod tests {
     }
 
     #[test]
+    fn dedup_info_group_never_evicts_a_vulnerability() {
+        let info = basic_finding("nuclei-detect", Severity::Info, ip("10.0.0.1"), 21)
+            .with_evidence("220 ProFTPD")
+            .with_service("ftp")
+            .with_remediation(Remediation {
+                description: "Fix".to_owned(),
+                steps: vec!["Do it".to_owned()],
+                effort: None,
+            });
+        let high = basic_finding("services", Severity::High, ip("10.0.0.1"), 21)
+            .with_cwe("CWE-319")
+            .with_service("ftp");
+        assert!(detail_score(&info) > detail_score(&high));
+
+        let result = deduplicate_findings(vec![info, high]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "services");
+        assert_eq!(result[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn dedup_tie_break_is_deterministic() {
+        let mut winners = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let a = basic_finding("ssl", Severity::High, ip("10.0.0.20"), 443).with_cwe("CWE-295");
+            let b = basic_finding("http_audit", Severity::High, ip("10.0.0.20"), 443)
+                .with_cwe("CWE-693");
+            let result = deduplicate_findings(vec![a, b]);
+            assert_eq!(result.len(), 1);
+            winners.insert(result[0].scanner.clone());
+        }
+        assert_eq!(winners.len(), 1, "tie-break varied: {winners:?}");
+    }
+
+    #[test]
     fn test_dedup_empty() {
         let result = deduplicate_findings(Vec::new());
         assert!(result.is_empty());
@@ -1755,6 +1804,83 @@ mod tests {
     }
 
     #[test]
+    fn post_enrich_subtype_only_hint_does_not_keep_a_weaker_class() {
+        let bare = Finding::new("mdns", "HomeKit accessory", "desc", Severity::Info)
+            .with_ip(ip("192.168.1.42"))
+            .with_service("HomeKit")
+            .with_device_hint(
+                DeviceHint::new()
+                    .with_device_type(DeviceType::Hub)
+                    .with_device_subtype("homekit_controller"),
+            );
+        let qualified = Finding::new("mdns", "HTTP service advertised", "desc", Severity::Info)
+            .with_ip(ip("192.168.1.42"))
+            .with_service("HTTP")
+            .with_device_hint(DeviceHint::new().with_device_subtype("loqed"));
+        assert!(mdns_hint_is_qualified(
+            qualified.affected_service.as_deref(),
+            qualified.device_hint.as_ref().unwrap()
+        ));
+
+        let mut devices = vec![Device::new(ip("192.168.1.42"))];
+        post_enrich_devices(&mut devices, &[bare, qualified]);
+        assert_eq!(devices[0].device_subtype.as_deref(), Some("loqed"));
+        assert_eq!(
+            devices[0].device_type,
+            DeviceType::Unknown,
+            "class borrowed from the weaker hint"
+        );
+    }
+
+    #[test]
+    fn post_enrich_subtype_only_hint_keeps_a_class_only_hints_type() {
+        let cases = [
+            ("services", DeviceType::IoT, "homewizard"),
+            ("device", DeviceType::AccessPoint, "matter"),
+        ];
+        for (scanner, class, subtype) in cases {
+            let classed = Finding::new(scanner, "Service", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.44"))
+                .with_device_hint(DeviceHint::new().with_device_type(class));
+            let subtyped = Finding::new("mdns", "mDNS service", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.44"))
+                .with_service("Matter")
+                .with_device_hint(DeviceHint::new().with_device_subtype(subtype));
+
+            let mut devices = vec![Device::new(ip("192.168.1.44"))];
+            post_enrich_devices(&mut devices, &[classed, subtyped]);
+            assert_eq!(devices[0].device_type, class, "{scanner} class dropped");
+            assert_eq!(devices[0].device_subtype.as_deref(), Some(subtype));
+        }
+    }
+
+    #[test]
+    fn post_enrich_class_only_hint_keeps_an_existing_subtype() {
+        let mdns = Finding::new("mdns", "Hue bridge", "desc", Severity::Info)
+            .with_ip(ip("192.168.1.43"))
+            .with_service("mDNS")
+            .with_device_hint(
+                DeviceHint::new()
+                    .with_device_type(DeviceType::IoT)
+                    .with_device_subtype("hue"),
+            );
+        let upnp = Finding::new("mdns", "UPnP root device", "desc", Severity::Info)
+            .with_ip(ip("192.168.1.43"))
+            .with_service("UPnP")
+            .with_device_hint(
+                DeviceHint::new()
+                    .with_vendor("Signify")
+                    .with_device_type(DeviceType::IoT),
+            );
+
+        let mut devices = vec![Device::new(ip("192.168.1.43"))];
+        post_enrich_devices(&mut devices, &[mdns, upnp]);
+        assert_eq!(devices[0].device_type, DeviceType::IoT);
+        assert_eq!(devices[0].device_subtype.as_deref(), Some("hue"));
+        assert_eq!(devices[0].vendor.as_deref(), Some("Signify"));
+    }
+
+    #[test]
     fn test_post_enrich_same_rank_hints_are_order_independent() {
         let hints = [
             DeviceHint::new()
@@ -1869,6 +1995,26 @@ mod tests {
             let original_len = findings.len();
             let deduped = deduplicate_findings(findings);
             assert!(deduped.len() <= original_len);
+        }
+
+        #[test]
+        fn prop_dedup_keeps_max_severity_per_key(
+            findings in proptest::collection::vec(arb_finding_for_dedup(), 0..50)
+        ) {
+            let worst_per_key = |fs: &[Finding]| {
+                let mut m: std::collections::HashMap<(IpAddr, u16), Severity> =
+                    std::collections::HashMap::new();
+                for f in fs {
+                    if let (Some(ip), Some(port)) = (f.affected_ip, f.affected_port) {
+                        let e = m.entry((ip, port)).or_insert(f.severity);
+                        *e = (*e).max(f.severity);
+                    }
+                }
+                m
+            };
+            let before = worst_per_key(&findings);
+            let deduped = deduplicate_findings(findings);
+            assert_eq!(before, worst_per_key(&deduped));
         }
     }
     #[test]

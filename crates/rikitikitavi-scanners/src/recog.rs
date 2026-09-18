@@ -154,10 +154,9 @@ impl RecogMatch {
         self.device_class().and_then(device_type_for)
     }
 
-    /// `"Vendor Product Version"` for a service label, or `None` when the
-    /// fingerprint names no software.
+    /// `"Vendor Product"`, or `None` when the fingerprint names no software.
     #[must_use]
-    pub fn service_label(&self) -> Option<String> {
+    pub fn product_label(&self) -> Option<String> {
         let product = self.product()?;
         let mut label = String::new();
         if let Some(vendor) = self.first(&[RecogField::ServiceVendor, RecogField::OsVendor])
@@ -167,6 +166,14 @@ impl RecogMatch {
             label.push(' ');
         }
         label.push_str(product);
+        Some(label)
+    }
+
+    /// `"Vendor Product Version"` for a service label, or `None` when the
+    /// fingerprint names no software.
+    #[must_use]
+    pub fn service_label(&self) -> Option<String> {
+        let mut label = self.product_label()?;
         if let Some(version) = self.version() {
             label.push(' ');
             label.push_str(version);
@@ -222,6 +229,16 @@ impl RecogMatch {
     pub fn label(&self) -> String {
         self.hardware_label()
             .or_else(|| self.service_label())
+            .unwrap_or_else(|| self.description.to_owned())
+    }
+
+    /// [`Self::label`] without the service version, for finding titles:
+    /// `Finding::fingerprint` hashes the title, so a patch upgrade must not
+    /// change it.
+    #[must_use]
+    pub fn stable_label(&self) -> String {
+        self.hardware_label()
+            .or_else(|| self.product_label())
             .unwrap_or_else(|| self.description.to_owned())
     }
 
@@ -420,7 +437,7 @@ pub fn identification_finding(
 
     let mut finding = Finding::new(
         scanner,
-        &format!("{} identified at {where_}", primary.label()),
+        &format!("{} identified at {where_}", primary.stable_label()),
         &description,
         Severity::Info,
     )
@@ -458,8 +475,8 @@ pub fn ssh_software(banner: &str) -> Option<&str> {
     let line = banner.lines().find(|l| {
         l.trim_start()
             .as_bytes()
-            .first_chunk::<4>()
-            .is_some_and(|p| p.eq_ignore_ascii_case(b"SSH-"))
+            .first_chunk::<5>()
+            .is_some_and(|p| p[..4].eq_ignore_ascii_case(b"SSH-") && p[4].is_ascii_digit())
     })?;
     let rest = line.trim().get(4..)?;
     let dash = rest.find('-')?;
@@ -483,10 +500,20 @@ mod tests {
             ssh_software("SSH-2.0-dropbear_2020.81"),
             Some("dropbear_2020.81")
         );
-        // Not an identification string.
-        assert_eq!(ssh_software("ssh-rsa AAAAB3Nza"), None);
         assert_eq!(ssh_software("SSH-2.0-"), None);
         assert_eq!(ssh_software(""), None);
+    }
+
+    /// Public-key material is not an RFC 4253 identification string: the byte
+    /// after `SSH-` must be a digit.
+    #[test]
+    fn ssh_software_rejects_key_material() {
+        assert_eq!(ssh_software("ssh-rsa AAAAB3Nza"), None);
+        assert_eq!(ssh_software("ssh-rsa AAAAB3Nza comment-with-dash"), None);
+        assert_eq!(
+            ssh_software("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@my-laptop"),
+            None
+        );
     }
 
     #[test]
@@ -548,6 +575,34 @@ mod tests {
         let evidence = finding.evidence.as_deref().unwrap_or_default();
         assert!(evidence.contains("http_header.server"));
         assert!(evidence.contains("html_title"));
+    }
+
+    /// The title is version-free, so a patch upgrade does not resolve the old
+    /// finding and raise a new one.
+    #[test]
+    fn the_title_omits_the_service_version() {
+        let ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let fp = |server: &str| {
+            let f = identify_finding("services", ip, Some(80), RecogKey::HttpServer, server)
+                .expect(server);
+            (f.title.clone(), f.fingerprint())
+        };
+        let (old_title, old_fp) = fp("nginx/1.18.0");
+        let (new_title, new_fp) = fp("nginx/1.24.0");
+        assert_eq!(old_title, "nginx identified at 192.168.1.5:80");
+        assert_eq!(old_title, new_title);
+        assert_eq!(old_fp, new_fp);
+        // The version is still reported, just not in the hashed title.
+        let f = identify_finding(
+            "services",
+            ip,
+            Some(80),
+            RecogKey::HttpServer,
+            "nginx/1.24.0",
+        )
+        .unwrap();
+        assert!(f.description.contains("1.24.0"), "{}", f.description);
+        assert_eq!(f.affected_service.as_deref(), Some("nginx 1.24.0"));
     }
 
     /// Recog resolves against the first matching pattern in file order.

@@ -1,18 +1,14 @@
 //! Home media servers: Plex (32400) and Jellyfin (8096 / 8920 / UDP 7359).
 //!
-//! Read-only and unauthenticated. Plex is identified from `GET /identity`, which
-//! returns the machine identifier and version to any peer; `/myplex/account`,
-//! the endpoint CVE-2025-34158 abuses, is never requested. Jellyfin is
-//! identified from `GET /System/Info/Public`, the only unauthenticated source of
-//! its version, optionally located first by the UDP/7359 discovery datagram,
-//! which works unicast and needs no broadcast. The `Address` in a discovery reply
-//! is attacker-controlled text: it is accepted only when its host is the literal
-//! IP that sent the reply, and the URL that is then fetched is rebuilt from that
-//! IP, so a reply can never steer a request at a third host or past an exclusion.
+//! Read-only and unauthenticated. Plex is read from `GET /identity`;
+//! `/myplex/account`, the endpoint CVE-2025-34158 abuses, is never requested.
+//! Jellyfin is read from `GET /System/Info/Public`, optionally located first by
+//! the unicast UDP/7359 discovery datagram. A discovery reply's `Address` is
+//! accepted only when its host is the IP that sent the reply, and the URL then
+//! fetched is rebuilt from that IP.
 //!
-//! Version checks: CVE-2020-5741 (Plex Media Server before 1.19.3, CISA KEV) and
-//! CVE-2025-34158 (1.41.7.x-1.42.0.x, fixed 1.42.1). Both are reported at
-//! Probable — a version string is a banner, not a demonstration.
+//! Version checks, both reported at Probable: CVE-2020-5741 (Plex before
+//! 1.19.3, CISA KEV) and CVE-2025-34158 (1.41.7.x-1.42.0.x, fixed 1.42.1).
 
 use async_trait::async_trait;
 use reqwest::redirect::Policy;
@@ -66,6 +62,32 @@ const PLEX_KEV_FIXED: [u32; 3] = [1, 19, 3];
 const PLEX_2025_FIRST: [u32; 3] = [1, 41, 7];
 /// Release that fixes CVE-2025-34158.
 const PLEX_2025_FIXED: [u32; 3] = [1, 42, 1];
+
+/// `Server` only when `current` is `Unknown` or `Server`; a specific type is never
+/// generalised (see `a_specific_device_type_is_not_overwritten_by_the_server_hint`).
+pub(crate) const fn server_hint_type(current: DeviceType) -> Option<DeviceType> {
+    match current {
+        DeviceType::Unknown | DeviceType::Server => Some(DeviceType::Server),
+        _ => None,
+    }
+}
+
+/// Discovery's current type for `ip`, or `Unknown`.
+fn device_type_of(ctx: &ScanContext, ip: IpAddr) -> DeviceType {
+    ctx.discovered_devices
+        .iter()
+        .find(|d| d.ip == ip)
+        .map_or(DeviceType::Unknown, |d| d.device_type)
+}
+
+/// Hint carrying `subtype`, and `DeviceType::Server` only when `current` allows.
+fn media_server_hint(current: DeviceType, subtype: &str) -> DeviceHint {
+    let hint = DeviceHint::new().with_device_subtype(subtype);
+    match server_hint_type(current) {
+        Some(dt) => hint.with_device_type(dt),
+        None => hint,
+    }
+}
 
 // ── Version handling ────────────────────────────────────────────────────────
 
@@ -324,7 +346,13 @@ fn plex_evidence(identity: &PlexIdentity, url: &str) -> String {
 }
 
 /// Finding for one Plex server.
-fn plex_finding(ip: IpAddr, port: u16, identity: &PlexIdentity, url: &str) -> Finding {
+fn plex_finding(
+    ip: IpAddr,
+    port: u16,
+    identity: &PlexIdentity,
+    url: &str,
+    current_type: DeviceType,
+) -> Finding {
     let parsed = identity.version.as_deref().and_then(parse_version);
     let verdict = classify_plex(parsed.as_deref());
     let reported = identity.version.as_deref().unwrap_or("unknown");
@@ -384,11 +412,7 @@ fn plex_finding(ip: IpAddr, port: u16, identity: &PlexIdentity, url: &str) -> Fi
         .with_evidence(plex_evidence(identity, url))
         .with_remediation(plex_remediation())
         .with_references(plex_references())
-        .with_device_hint(
-            DeviceHint::new()
-                .with_device_type(DeviceType::Server)
-                .with_device_subtype("plex_media_server"),
-        );
+        .with_device_hint(media_server_hint(current_type, "plex_media_server"));
 
     match verdict {
         PlexVerdict::KevRce => finding
@@ -427,7 +451,13 @@ fn jellyfin_evidence(info: &JellyfinInfo, url: &str) -> String {
 }
 
 /// Presence finding for one Jellyfin server.
-fn jellyfin_finding(ip: IpAddr, port: u16, info: &JellyfinInfo, url: &str) -> Finding {
+fn jellyfin_finding(
+    ip: IpAddr,
+    port: u16,
+    info: &JellyfinInfo,
+    url: &str,
+    current_type: DeviceType,
+) -> Finding {
     let version = info.version.as_deref().unwrap_or("unknown");
     let os = info.operating_system.as_deref().unwrap_or("unreported");
 
@@ -452,11 +482,7 @@ fn jellyfin_finding(ip: IpAddr, port: u16, info: &JellyfinInfo, url: &str) -> Fi
     .with_cwe("CWE-200")
     .with_evidence(jellyfin_evidence(info, url))
     .with_references(jellyfin_references())
-    .with_device_hint(
-        DeviceHint::new()
-            .with_device_type(DeviceType::Server)
-            .with_device_subtype("jellyfin"),
-    )
+    .with_device_hint(media_server_hint(current_type, "jellyfin"))
 }
 
 /// First-run wizard still open: anyone on the network can claim the server.
@@ -673,7 +699,13 @@ impl Scanner for MediaServerScanner {
                         if let Some((identity, url)) =
                             probe_plex(&client, device.ip, open.port).await
                         {
-                            findings.push(plex_finding(device.ip, open.port, &identity, &url));
+                            findings.push(plex_finding(
+                                device.ip,
+                                open.port,
+                                &identity,
+                                &url,
+                                device.device_type,
+                            ));
                         }
                     }
                     JELLYFIN_PORT | JELLYFIN_TLS_PORT => {
@@ -682,7 +714,13 @@ impl Scanner for MediaServerScanner {
                         {
                             findings
                                 .extend(jellyfin_wizard_finding(device.ip, open.port, &info, &url));
-                            findings.push(jellyfin_finding(device.ip, open.port, &info, &url));
+                            findings.push(jellyfin_finding(
+                                device.ip,
+                                open.port,
+                                &info,
+                                &url,
+                                device.device_type,
+                            ));
                         }
                     }
                     _ => {}
@@ -704,7 +742,13 @@ impl Scanner for MediaServerScanner {
             };
             if let Some((info, url)) = probe_jellyfin_at(&client, &base).await {
                 findings.extend(jellyfin_wizard_finding(ip, port, &info, &url));
-                findings.push(jellyfin_finding(ip, port, &info, &url));
+                findings.push(jellyfin_finding(
+                    ip,
+                    port,
+                    &info,
+                    &url,
+                    device_type_of(ctx, ip),
+                ));
             }
         }
 
@@ -848,7 +892,13 @@ mod tests {
         assert_eq!(PLEX_PATH, "/identity");
         // The endpoint CVE-2025-34158 abuses is named in the finding text and
         // never fetched: the probe concatenates PLEX_PATH and nothing else.
-        let finding = plex_finding(ip(), PLEX_PORT, &plex_with("1.41.9.9961"), "u");
+        let finding = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.41.9.9961"),
+            "u",
+            DeviceType::Unknown,
+        );
         assert!(finding.description.contains("never requested"));
     }
 
@@ -998,7 +1048,13 @@ mod tests {
 
     #[test]
     fn kev_plex_finding_carries_the_kev_cve() {
-        let finding = plex_finding(ip(), PLEX_PORT, &plex_with("1.18.2.2029"), "u");
+        let finding = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.18.2.2029"),
+            "u",
+            DeviceType::Unknown,
+        );
         assert_eq!(finding.severity, Severity::High);
         assert_eq!(finding.confidence, Confidence::Probable);
         assert_eq!(finding.cve_ids, vec!["CVE-2020-5741".to_owned()]);
@@ -1006,7 +1062,13 @@ mod tests {
 
     #[test]
     fn credential_exposure_finding_is_medium_and_names_its_precondition() {
-        let finding = plex_finding(ip(), PLEX_PORT, &plex_with("1.41.9.9961"), "u");
+        let finding = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.41.9.9961"),
+            "u",
+            DeviceType::Unknown,
+        );
         assert_eq!(finding.severity, Severity::Medium);
         assert_eq!(finding.cve_ids, vec!["CVE-2025-34158".to_owned()]);
         assert!(
@@ -1019,7 +1081,13 @@ mod tests {
 
     #[test]
     fn current_plex_carries_no_cve() {
-        let finding = plex_finding(ip(), PLEX_PORT, &plex_with("1.42.1.10060"), "u");
+        let finding = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.42.1.10060"),
+            "u",
+            DeviceType::Unknown,
+        );
         assert_eq!(finding.severity, Severity::Info);
         assert!(finding.cve_ids.is_empty());
         assert_eq!(finding.confidence, Confidence::Confirmed);
@@ -1031,31 +1099,78 @@ mod tests {
             machine_identifier: Some("abc".to_owned()),
             ..PlexIdentity::default()
         };
-        let finding = plex_finding(ip(), PLEX_PORT, &identity, "u");
+        let finding = plex_finding(ip(), PLEX_PORT, &identity, "u", DeviceType::Unknown);
         assert_eq!(finding.confidence, Confidence::Inferred);
         assert!(finding.cve_ids.is_empty());
     }
 
     #[test]
     fn plex_titles_are_stable_per_verdict() {
-        let a = plex_finding(ip(), PLEX_PORT, &plex_with("1.41.8.1"), "u").title;
-        let b = plex_finding(ip(), PLEX_PORT, &plex_with("1.42.0.500"), "u").title;
+        let a = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.41.8.1"),
+            "u",
+            DeviceType::Unknown,
+        )
+        .title;
+        let b = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.42.0.500"),
+            "u",
+            DeviceType::Unknown,
+        )
+        .title;
         assert_eq!(a, b);
     }
 
     #[test]
     fn plex_hint_is_a_server() {
-        let hint = plex_finding(ip(), PLEX_PORT, &plex_with("1.42.1"), "u")
-            .device_hint
-            .expect("hint");
+        let hint = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.42.1"),
+            "u",
+            DeviceType::Unknown,
+        )
+        .device_hint
+        .expect("hint");
         assert_eq!(hint.device_type, Some(DeviceType::Server));
         assert_eq!(hint.device_subtype.as_deref(), Some("plex_media_server"));
     }
 
     #[test]
+    fn a_specific_device_type_is_not_overwritten_by_the_server_hint() {
+        for current in [DeviceType::Nas, DeviceType::Desktop, DeviceType::Router] {
+            assert_eq!(server_hint_type(current), None, "{current}");
+            let hint = plex_finding(ip(), PLEX_PORT, &plex_with("1.42.1"), "u", current)
+                .device_hint
+                .expect("hint");
+            assert_eq!(hint.device_type, None, "{current}");
+            assert_eq!(hint.device_subtype.as_deref(), Some("plex_media_server"));
+
+            let info = parse_jellyfin_info(JELLYFIN_INFO).unwrap();
+            let hint = jellyfin_finding(ip(), JELLYFIN_PORT, &info, "u", current)
+                .device_hint
+                .expect("hint");
+            assert_eq!(hint.device_type, None, "{current}");
+            assert_eq!(hint.device_subtype.as_deref(), Some("jellyfin"));
+        }
+        assert_eq!(
+            server_hint_type(DeviceType::Unknown),
+            Some(DeviceType::Server)
+        );
+        assert_eq!(
+            server_hint_type(DeviceType::Server),
+            Some(DeviceType::Server)
+        );
+    }
+
+    #[test]
     fn jellyfin_presence_is_info_and_confirmed() {
         let info = parse_jellyfin_info(JELLYFIN_INFO).unwrap();
-        let finding = jellyfin_finding(ip(), JELLYFIN_PORT, &info, "u");
+        let finding = jellyfin_finding(ip(), JELLYFIN_PORT, &info, "u", DeviceType::Unknown);
         assert_eq!(finding.severity, Severity::Info);
         assert_eq!(finding.confidence, Confidence::Confirmed);
         assert_eq!(finding.cwe_id.as_deref(), Some("CWE-200"));
@@ -1119,7 +1234,7 @@ mod tests {
                 version: Some(raw),
                 ..PlexIdentity::default()
             };
-            let finding = plex_finding(ip(), PLEX_PORT, &identity, "u");
+            let finding = plex_finding(ip(), PLEX_PORT, &identity, "u", DeviceType::Unknown);
             prop_assert!(finding.title.starts_with("Plex Media Server"));
         }
     }

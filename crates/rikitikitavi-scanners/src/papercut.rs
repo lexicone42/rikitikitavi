@@ -1,10 +1,12 @@
 use async_trait::async_trait;
+use futures::stream::StreamExt as _;
 use reqwest::redirect::Policy;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::Scanner;
 
@@ -28,6 +30,12 @@ const ADMIN_PORT: u16 = 9191;
 /// `PaperCut` admin interface (HTTPS, usually a self-signed certificate).
 const ADMIN_TLS_PORT: u16 = 9192;
 const PAPERCUT_PORTS: &[u16] = &[ADMIN_PORT, ADMIN_TLS_PORT];
+
+/// Deadline for the whole probe phase, below the runner's per-scanner budget.
+const PROBE_BUDGET: Duration = Duration::from_secs(40);
+
+/// Cap on concurrent host probes.
+const MAX_PARALLELISM: usize = 16;
 
 /// Paths probed, in order. All are GETs of unauthenticated endpoints.
 const ASSET_PATHS: &[&str] = &["/", "/app"];
@@ -225,9 +233,11 @@ fn papercut_references() -> Vec<String> {
 
 /// Build the finding for one identified endpoint.
 ///
-/// Three stable titles, one per [`BuildVerdict`]. A build matching a published
-/// fixed build yields an exposure note with no CVEs attached, so risk scoring
-/// does not charge a patched server for a KEV entry.
+/// Three stable titles, one per [`BuildVerdict`]. `cve_ids` is attached only for
+/// [`BuildVerdict::NotFixed`], where a build id was actually read: KEV
+/// enrichment raises any CVE-carrying finding to High regardless of confidence,
+/// which would make the Fixed and Unknown gradings unreachable. The CVE ids stay
+/// in the description and references for those two.
 fn build_papercut_finding(ip: IpAddr, port: u16, probe: &PaperCutProbe) -> Finding {
     let verdict = classify_build(probe.asset);
     let edition = probe
@@ -289,7 +299,8 @@ fn build_papercut_finding(ip: IpAddr, port: u16, probe: &PaperCutProbe) -> Findi
 
     match verdict {
         BuildVerdict::Fixed(_) => finding,
-        BuildVerdict::NotFixed | BuildVerdict::Unknown => finding
+        BuildVerdict::Unknown => finding.with_cwe("CWE-470"),
+        BuildVerdict::NotFixed => finding
             .with_cwe("CWE-470")
             .with_cve_ids(PAPERCUT_CVES.iter().map(|s| (*s).to_owned()).collect()),
     }
@@ -347,6 +358,30 @@ async fn probe_papercut(ip: IpAddr, port: u16) -> Option<PaperCutProbe> {
     probe.identified().then_some(probe)
 }
 
+/// Try the admin ports in preference order (TLS first) and stop at the first
+/// answer. A default install listens on both 9191 and 9192 for the same
+/// service, so probing both would double-report every host.
+async fn first_answer<F, Fut>(open: &[u16], probe: F) -> Option<(u16, PaperCutProbe)>
+where
+    F: Fn(u16) -> Fut,
+    Fut: std::future::Future<Output = Option<PaperCutProbe>>,
+{
+    for &port in &[ADMIN_TLS_PORT, ADMIN_PORT] {
+        if !open.contains(&port) {
+            continue;
+        }
+        if let Some(found) = probe(port).await {
+            return Some((port, found));
+        }
+    }
+    None
+}
+
+/// Probe one host's open admin ports.
+async fn probe_host(ip: IpAddr, open: &[u16]) -> Option<(u16, PaperCutProbe)> {
+    first_answer(open, |port| probe_papercut(ip, port)).await
+}
+
 #[async_trait]
 impl Scanner for PaperCutScanner {
     fn id(&self) -> &'static str {
@@ -387,19 +422,45 @@ impl Scanner for PaperCutScanner {
                 message: e.to_string(),
             })?;
 
-        for device in &ctx.discovered_devices {
-            if exclusions.excludes_device(device) {
-                continue;
-            }
-            for open in &device.open_ports {
-                if !PAPERCUT_PORTS.contains(&open.port) {
-                    continue;
+        let targets: Vec<(IpAddr, Vec<u16>)> = ctx
+            .discovered_devices
+            .iter()
+            .filter(|device| !exclusions.excludes_device(device))
+            .filter_map(|device| {
+                let ports: Vec<u16> = device
+                    .open_ports
+                    .iter()
+                    .map(|p| p.port)
+                    .filter(|p| PAPERCUT_PORTS.contains(p))
+                    .collect();
+                (!ports.is_empty()).then_some((device.ip, ports))
+            })
+            .collect();
+
+        // Bounded concurrency behind a phase deadline; findings collected so
+        // far survive an overrun.
+        let parallelism = ctx.config.parallelism.clamp(1, MAX_PARALLELISM);
+        let deadline = Instant::now() + PROBE_BUDGET;
+        let mut probes = futures::stream::iter(targets)
+            .map(|(ip, ports)| async move { (ip, probe_host(ip, &ports).await) })
+            .buffer_unordered(parallelism);
+        loop {
+            match tokio::time::timeout_at(deadline, probes.next()).await {
+                Ok(Some((ip, Some((port, probe))))) => {
+                    findings.push(build_papercut_finding(ip, port, &probe));
                 }
-                if let Some(probe) = probe_papercut(device.ip, open.port).await {
-                    findings.push(build_papercut_finding(device.ip, open.port, &probe));
+                Ok(Some((_, None))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        budget_secs = PROBE_BUDGET.as_secs(),
+                        "PaperCut probe phase timed out; keeping the findings collected so far"
+                    );
+                    break;
                 }
             }
         }
+        findings.sort_by_key(|f| f.affected_ip);
 
         tracing::info!(
             findings_count = findings.len(),
@@ -704,9 +765,45 @@ mod tests {
         let f = build_papercut_finding(ip, 9192, &probe);
         assert_eq!(f.severity, Severity::Medium);
         assert_eq!(f.confidence, Confidence::Inferred);
-        assert_eq!(f.cve_ids.len(), 2);
         assert_eq!(f.affected_port, Some(9192));
         assert!(f.evidence.as_deref().is_some_and(|e| e.contains("401")));
+    }
+
+    #[test]
+    fn unverified_build_carries_no_cve_ids() {
+        // KEV enrichment raises any CVE-carrying finding to High regardless of
+        // confidence, which would make this verdict's Medium unreachable.
+        let ip: IpAddr = "192.168.1.22".parse().unwrap();
+        let f = build_papercut_finding(ip, 9191, &probe_with(None));
+        assert!(f.cve_ids.is_empty());
+        assert!(f.description.contains("CVE-2026-81578"));
+        assert!(f.description.contains("CVE-2026-82078"));
+        assert!(f.references.iter().any(|r| r.contains("CVE-2026-81578")));
+    }
+
+    #[tokio::test]
+    async fn a_host_listening_on_both_admin_ports_yields_one_finding() {
+        use std::cell::RefCell;
+        let probed: RefCell<Vec<u16>> = RefCell::new(Vec::new());
+        let found = first_answer(&[ADMIN_PORT, ADMIN_TLS_PORT], |port| {
+            probed.borrow_mut().push(port);
+            async move { Some(probe_with(None)) }
+        })
+        .await;
+        assert_eq!(found.map(|(port, _)| port), Some(ADMIN_TLS_PORT));
+        assert_eq!(*probed.borrow(), vec![ADMIN_TLS_PORT]);
+    }
+
+    #[tokio::test]
+    async fn a_silent_tls_port_falls_back_to_the_http_admin_port() {
+        let found = first_answer(&[ADMIN_PORT, ADMIN_TLS_PORT], |port| async move {
+            (port == ADMIN_PORT).then(|| probe_with(None))
+        })
+        .await;
+        assert_eq!(found.map(|(port, _)| port), Some(ADMIN_PORT));
+
+        let none = first_answer(&[ADMIN_PORT], |_| async { None }).await;
+        assert!(none.is_none());
     }
 
     #[test]

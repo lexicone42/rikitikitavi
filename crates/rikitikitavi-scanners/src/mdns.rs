@@ -407,7 +407,7 @@ struct MdnsIdentity {
 
 impl MdnsIdentity {
     fn of(service: &MdnsService) -> Self {
-        let txt = MdnsTxt::parse(&service.txt_records);
+        let txt = MdnsTxt::parse(&service.service_type, &service.txt_records);
         // HA matches the full instance name, trailing dot included.
         let full_name = format!("{}.{}.", service.name, service.service_type);
         let mut domains = zeroconf_domains(&service.service_type, &full_name, &service.txt_records);

@@ -2,14 +2,14 @@
 //!
 //! Source: <https://github.com/cisagov/vulnrichment> (branch `develop`, commit 3d608e158)
 //! Licence: CC0-1.0 Universal (public domain dedication)
-//! Snapshot: 2026-09-17 | Entries: 29 (active 13, poc 9, none 7)
-//! Mode: workspace CVEs
+//! Snapshot: 2026-09-17 | Entries: 26 (active 13, poc 9, none 4)
+//! Mode: production CVE references + `vulnrichment_extra_cves.txt` (--clone)
 //!
-//! Regenerate with `uv run python scripts/gen_vulnrichment_db.py`.
+//! Regenerate with `uv run python scripts/gen_vulnrichment_db.py --clone <path>`;
+//! `--check <this file>` re-runs the row selection offline.
 //!
-//! The `poc` tier is what KEV and EPSS cannot express: public exploit code
-//! exists, exploitation in the wild has not been observed. `active` overlaps
-//! KEV almost exactly; it is kept so the tier is total over the table.
+//! The `poc` tier — public exploit code, no observed exploitation — is the part KEV
+//! and EPSS cannot express. `active` overlaps KEV almost exactly.
 
 /// SSVC Exploitation: evidence that a vulnerability is being exploited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -73,7 +73,6 @@ pub fn lookup_ssvc(cve: &str) -> Option<&'static Ssvc> {
 /// Records sorted by CVE id.
 #[rustfmt::skip]
 static SSVC_ENTRIES: &[Ssvc] = &[
-    Ssvc { cve: "CVE-1999-0524", exploitation: Exploitation::None, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: Some("CWE-200") },
     Ssvc { cve: "CVE-2008-5161", exploitation: Exploitation::None, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: Some("CWE-329") },
     Ssvc { cve: "CVE-2014-0160", exploitation: Exploitation::Active, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Partial), cwe: Some("CWE-125") },
     Ssvc { cve: "CVE-2014-6271", exploitation: Exploitation::Active, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: Some("CWE-78") },
@@ -91,7 +90,6 @@ static SSVC_ENTRIES: &[Ssvc] = &[
     Ssvc { cve: "CVE-2023-38408", exploitation: Exploitation::None, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: Some("CWE-428") },
     Ssvc { cve: "CVE-2023-48795", exploitation: Exploitation::Poc, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: Some("CWE-354") },
     Ssvc { cve: "CVE-2023-4966", exploitation: Exploitation::Active, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: None },
-    Ssvc { cve: "CVE-2024-1234", exploitation: Exploitation::None, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: None },
     Ssvc { cve: "CVE-2024-3400", exploitation: Exploitation::Active, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: None },
     Ssvc { cve: "CVE-2024-47076", exploitation: Exploitation::Poc, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: None },
     Ssvc { cve: "CVE-2024-47175", exploitation: Exploitation::Poc, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Total), cwe: None },
@@ -99,7 +97,6 @@ static SSVC_ENTRIES: &[Ssvc] = &[
     Ssvc { cve: "CVE-2024-51138", exploitation: Exploitation::None, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: Some("CWE-121") },
     Ssvc { cve: "CVE-2024-51977", exploitation: Exploitation::Poc, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Partial), cwe: None },
     Ssvc { cve: "CVE-2024-51978", exploitation: Exploitation::Poc, automatable: Some(Automatable::Yes), technical_impact: Some(TechnicalImpact::Total), cwe: None },
-    Ssvc { cve: "CVE-2024-5678", exploitation: Exploitation::None, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Partial), cwe: None },
     Ssvc { cve: "CVE-2024-6387", exploitation: Exploitation::Poc, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Total), cwe: None },
     Ssvc { cve: "CVE-2025-9961", exploitation: Exploitation::Poc, automatable: Some(Automatable::No), technical_impact: Some(TechnicalImpact::Total), cwe: None },
 ];

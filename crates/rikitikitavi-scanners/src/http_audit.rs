@@ -20,7 +20,7 @@ pub struct HttpAuditScanner;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HTTP(S) ports to audit.
-const AUDIT_PORTS: &[u16] = &[80, 443, 8080, 8443, 8888, 8000, 8081, 3000, 9090];
+pub(crate) const AUDIT_PORTS: &[u16] = &[80, 443, 8080, 8443, 8888, 8000, 8081, 3000, 9090];
 
 /// Common admin paths to probe.
 const ADMIN_PATHS: &[&str] = &[
@@ -294,7 +294,7 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
 ///
 /// `PHP/8.0.30` is the common case; `ASP.NET` and `Express` carry no version and
 /// yield nothing. The EOL join lives in `services` because that is where the
-/// `eol_db` glue is.
+/// `eol_db` glue is, and so does the distribution-backport severity rule.
 pub fn check_powered_by_eol(ip: IpAddr, port: u16, powered_by: &str) -> Vec<Finding> {
     powered_by
         .split([',', ' ', ';'])
@@ -308,7 +308,7 @@ pub fn check_powered_by_eol(ip: IpAddr, port: u16, powered_by: &str) -> Vec<Find
                     "http_audit",
                     &format!("End-of-life {product} on {ip}:{port}"),
                     &format!("The X-Powered-By header advertises {token}. {summary}"),
-                    Severity::Medium,
+                    crate::services::eol_severity(powered_by),
                 )
                 .with_ip(ip)
                 .with_port(port)

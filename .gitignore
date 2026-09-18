@@ -39,3 +39,5 @@ fuzz-*.log
 
 # Playwright MCP scratch
 .playwright-mcp/
+
+__pycache__/

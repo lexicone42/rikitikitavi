@@ -13,6 +13,7 @@ use tokio::net::TcpStream;
 
 use crate::Scanner;
 use crate::http_util::{read_body_capped, unauthenticated_probe_client};
+use crate::media_server::server_hint_type;
 use crate::nuclei_db::{
     ByteMatcher, Condition, HTTP_TEMPLATES, HttpMatcher, HttpPart, HttpTemplate, Probe,
     TCP_TEMPLATES, TcpTemplate, is_http_port, tcp_templates_for_port,
@@ -47,6 +48,8 @@ const MAX_CONCURRENCY: usize = 8;
 const MAX_HTTP_PATHS: usize = 16;
 /// Paths fetched in parallel per HTTP target.
 const MAX_HTTP_PATH_CONCURRENCY: usize = 4;
+/// Same-origin redirect hops followed per request.
+const MAX_HTTP_REDIRECTS: usize = 2;
 /// Probe groups run per TCP target.
 const MAX_PROBE_GROUPS: usize = 6;
 /// A match this long is product-specific rather than a generic protocol word.
@@ -140,7 +143,6 @@ fn matcher_hit(matcher: &ByteMatcher, parts: &TcpParts) -> (bool, usize) {
 struct Hit {
     id: &'static str,
     product: &'static str,
-    vendor: Option<&'static str>,
     /// Longest pattern that matched: how specific the evidence is.
     longest: usize,
     labels: Vec<&'static str>,
@@ -205,7 +207,6 @@ fn template_hit(template: &'static TcpTemplate, parts: &TcpParts) -> Option<Hit>
     Some(Hit {
         id: template.id,
         product: template.product,
-        vendor: template.vendor,
         longest,
         labels,
         evidence: matched.join(", "),
@@ -330,7 +331,6 @@ fn http_template_hit(template: &'static HttpTemplate, parts: &HttpParts) -> Opti
     Some(Hit {
         id: template.id,
         product: template.product,
-        vendor: template.vendor,
         longest,
         labels,
         evidence: format!("GET {} {} {}", parts.path, parts.status, matched.join(", ")),
@@ -372,7 +372,18 @@ fn group_by_probe(templates: &[&'static TcpTemplate]) -> Vec<ProbeGroup> {
             });
         }
     }
-    groups.truncate(MAX_PROBE_GROUPS);
+    if groups.len() > MAX_PROBE_GROUPS {
+        let dropped: Vec<&str> = groups[MAX_PROBE_GROUPS..]
+            .iter()
+            .flat_map(|g| g.templates.iter().map(|t| t.id))
+            .collect();
+        tracing::warn!(
+            dropped = dropped.len(),
+            templates = ?dropped,
+            "probe groups over the per-port cap; these templates will not fire"
+        );
+        groups.truncate(MAX_PROBE_GROUPS);
+    }
     groups
 }
 
@@ -492,6 +503,29 @@ const fn scheme_for(port: u16) -> &'static str {
         443 | 8443 => "https",
         _ => "http",
     }
+}
+
+/// Follow a redirect only back to the same origin, so a hit is always attributed
+/// to the `ip:port` that was requested (see `a_redirect_off_the_target_origin_is_not_followed`).
+fn same_origin_redirects() -> Policy {
+    Policy::custom(|attempt| {
+        let Some(origin) = attempt.previous().first() else {
+            return attempt.stop();
+        };
+        let next = attempt.url();
+        let same_origin = next.scheme() == origin.scheme()
+            && next.host_str() == origin.host_str()
+            && next.port_or_known_default() == origin.port_or_known_default();
+        if same_origin && attempt.previous().len() <= MAX_HTTP_REDIRECTS {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+fn http_probe_client() -> reqwest::Result<reqwest::Client> {
+    unauthenticated_probe_client(HTTP_TIMEOUT, same_origin_redirects())
 }
 
 /// Headers rendered one `name: value` line each, as nuclei's `header` part is,
@@ -622,25 +656,28 @@ const HINTS: &[(&str, Option<&str>, DeviceType)] = &[
 
 /// A hint overwrites the device's vendor and type in `post_enrich_devices`, so
 /// only evidence specific enough to be at least [`Confidence::Probable`] may.
-fn device_hint(matched: &Hit) -> Option<DeviceHint> {
+/// `current` is the device's type today: a generic `Server` row never replaces a
+/// type already resolved (see `a_generic_server_row_never_replaces_a_specific_type`).
+fn device_hint(matched: &Hit, current: DeviceType) -> Option<DeviceHint> {
     if confidence_for(matched.longest) < Confidence::Probable {
         return None;
     }
     let product = matched.product.to_lowercase();
-    let mut hint = DeviceHint::new();
-    let mut any = false;
+    let (_, vendor, device_type) = HINTS.iter().find(|(key, _, _)| product.contains(key))?;
 
-    if let Some((_, vendor, device_type)) = HINTS.iter().find(|(key, _, _)| product.contains(key)) {
-        hint = hint.with_device_type(*device_type);
-        any = true;
-        if let Some(vendor) = vendor {
-            hint = hint.with_vendor(*vendor);
-        }
+    let mut hint = DeviceHint::new().with_device_subtype(matched.id);
+    if let Some(vendor) = vendor {
+        hint = hint.with_vendor(*vendor);
     }
-    if any {
-        hint = hint.with_device_subtype(matched.id);
+    let applied = if matches!(*device_type, DeviceType::Server) {
+        server_hint_type(current)
+    } else {
+        Some(*device_type)
+    };
+    if let Some(device_type) = applied {
+        hint = hint.with_device_type(device_type);
     }
-    any.then_some(hint)
+    Some(hint)
 }
 
 /// Longest matched pattern first: the most specific evidence names the product.
@@ -678,7 +715,7 @@ fn service_slug(product: &str) -> String {
     slug.trim_end_matches('-').to_owned()
 }
 
-fn identification_finding(ip: IpAddr, port: u16, hits: &[Hit]) -> Finding {
+fn identification_finding(ip: IpAddr, port: u16, hits: &[Hit], current: DeviceType) -> Finding {
     let hit = primary(hits);
     let also: Vec<&str> = hits
         .iter()
@@ -747,7 +784,7 @@ fn identification_finding(ip: IpAddr, port: u16, hits: &[Hit]) -> Finding {
         "https://github.com/projectdiscovery/nuclei-templates",
     ]);
 
-    match device_hint(hit) {
+    match device_hint(hit, current) {
         Some(device) => finding.with_device_hint(device),
         None => finding,
     }
@@ -760,6 +797,8 @@ fn identification_finding(ip: IpAddr, port: u16, hits: &[Hit]) -> Finding {
 struct Target {
     ip: IpAddr,
     port: u16,
+    /// The device's type before this pass; gates the generic `Server` hint.
+    device_type: DeviceType,
 }
 
 /// Ports worth probing on one device: those some template declares.
@@ -775,6 +814,7 @@ fn targets_for(ctx: &ScanContext, exclusions: &ExclusionSet) -> Vec<Target> {
                 targets.push(Target {
                     ip: device.ip,
                     port,
+                    device_type: device.device_type,
                 });
             }
         }
@@ -828,13 +868,10 @@ impl Scanner for NucleiDetectScanner {
             "probing"
         );
 
-        let client =
-            unauthenticated_probe_client(HTTP_TIMEOUT, Policy::limited(2)).map_err(|e| {
-                ScanError::ScannerFailed {
-                    scanner: "nuclei-detect".to_owned(),
-                    message: e.to_string(),
-                }
-            })?;
+        let client = http_probe_client().map_err(|e| ScanError::ScannerFailed {
+            scanner: "nuclei-detect".to_owned(),
+            message: e.to_string(),
+        })?;
 
         let concurrency = ctx.config.parallelism.clamp(1, MAX_CONCURRENCY);
         let findings: Vec<Finding> = futures::stream::iter(targets.into_iter().map(|target| {
@@ -849,7 +886,8 @@ impl Scanner for NucleiDetectScanner {
         }))
         .buffer_unordered(concurrency)
         .filter_map(|(target, hits)| async move {
-            (!hits.is_empty()).then(|| identification_finding(target.ip, target.port, &hits))
+            (!hits.is_empty())
+                .then(|| identification_finding(target.ip, target.port, &hits, target.device_type))
         })
         .collect()
         .await;
@@ -1035,6 +1073,25 @@ mod tests {
     }
 
     #[test]
+    fn no_port_loses_templates_to_the_probe_group_cap() {
+        for &port in crate::nuclei_db::NUCLEI_PORTS {
+            let templates: Vec<&'static TcpTemplate> = tcp_templates_for_port(port).collect();
+            if templates.is_empty() {
+                continue;
+            }
+            let groups = group_by_probe(&templates);
+            let grouped: usize = groups.iter().map(|g| g.templates.len()).sum();
+            assert_eq!(
+                grouped,
+                templates.len(),
+                "port {port} plans more than {MAX_PROBE_GROUPS} probe groups; \
+                 {} templates are dropped",
+                templates.len() - grouped
+            );
+        }
+    }
+
+    #[test]
     fn grouping_keeps_the_largest_read_size() {
         let templates: Vec<&'static TcpTemplate> = tcp_templates_for_port(21).collect();
         for group in group_by_probe(&templates) {
@@ -1098,6 +1155,102 @@ mod tests {
     }
 
     // ── HTTP ────────────────────────────────────────────────────────
+
+    /// Serve one canned response per connection until the test drops the task.
+    async fn serve_http(listener: tokio::net::TcpListener, response: String) {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let response = response.clone();
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 1024];
+                let _ = sock.read(&mut scratch).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+            });
+        }
+    }
+
+    /// Answer `/` with a 302 to `/login`, and every other path with `page`.
+    async fn serve_login_redirect(listener: tokio::net::TcpListener, page: String) {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let page = page.clone();
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 1024];
+                let read = sock.read(&mut scratch).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&scratch[..read]).into_owned();
+                let response = if request.starts_with("GET / ") {
+                    "HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Length: 0\r\n\
+                     Connection: close\r\n\r\n"
+                        .to_owned()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                        page.len()
+                    )
+                };
+                let _ = sock.write_all(response.as_bytes()).await;
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_off_the_target_origin_is_not_followed() {
+        let page = "<html><head><title>Hello! Welcome to Synology Web Station!</title>\
+                    </head><body></body></html>";
+        let elsewhere = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let elsewhere_port = elsewhere.local_addr().unwrap().port();
+        tokio::spawn(serve_http(
+            elsewhere,
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                page.len()
+            ),
+        ));
+
+        let redirector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirector_port = redirector.local_addr().unwrap().port();
+        tokio::spawn(serve_http(
+            redirector,
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{elsewhere_port}/\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        ));
+
+        let client = http_probe_client().unwrap();
+        // The redirect target on its own does identify Synology.
+        let direct = probe_http_port(&client, "127.0.0.1".parse().unwrap(), elsewhere_port).await;
+        assert!(
+            direct.iter().any(|h| h.id == "synology-web-station"),
+            "the fixture no longer identifies anything: {direct:?}"
+        );
+        // Through the redirector it must not.
+        let hits = probe_http_port(&client, "127.0.0.1".parse().unwrap(), redirector_port).await;
+        assert!(
+            !hits.iter().any(|h| h.id == "synology-web-station"),
+            "a redirect credited another origin's response to this target: {hits:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_origin_redirect_is_followed() {
+        let page = "<html><head><title>Hello! Welcome to Synology Web Station!</title>\
+                    </head><body></body></html>";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_login_redirect(listener, page.to_owned()));
+
+        let client = http_probe_client().unwrap();
+        let hits = probe_http_port(&client, "127.0.0.1".parse().unwrap(), port).await;
+        assert!(
+            hits.iter().any(|h| h.id == "synology-web-station"),
+            "a same-origin redirect lost the identification: {hits:?}"
+        );
+    }
 
     fn http(path: &str, status: u16, headers: &str, page: &str) -> HttpParts {
         HttpParts {
@@ -1193,7 +1346,7 @@ mod tests {
             }
         });
 
-        let client = unauthenticated_probe_client(HTTP_TIMEOUT, Policy::limited(2)).unwrap();
+        let client = http_probe_client().unwrap();
         let hits = probe_http_port(&client, addr.ip(), addr.port()).await;
         assert!(
             hits.iter().any(|h| h.id == "boa-web-server"),
@@ -1248,7 +1401,6 @@ mod tests {
             Hit {
                 id: "ftp-detect",
                 product: "FTP Service",
-                vendor: None,
                 longest: 3,
                 labels: Vec::new(),
                 evidence: "body~\"ftp\"".to_owned(),
@@ -1262,7 +1414,7 @@ mod tests {
         assert_eq!(primary(&hits).id, "diskstation-ftp-detect");
 
         let ip: IpAddr = "192.168.1.10".parse().unwrap();
-        let finding = identification_finding(ip, 21, &hits);
+        let finding = identification_finding(ip, 21, &hits, DeviceType::Unknown);
         assert_eq!(
             finding.title,
             "DiskStation FTP Service identified on 192.168.1.10:21"
@@ -1317,19 +1469,18 @@ mod tests {
         let weak = Hit {
             id: "x",
             product: "Synology DiskStation",
-            vendor: Some("Synology"),
             longest: PROBABLE_PATTERN_BYTES - 1,
             labels: Vec::new(),
             evidence: String::new(),
         };
         assert_eq!(confidence_for(weak.longest), Confidence::Inferred);
-        assert!(device_hint(&weak).is_none());
+        assert!(device_hint(&weak, DeviceType::Unknown).is_none());
 
         let strong = Hit {
             longest: PROBABLE_PATTERN_BYTES,
             ..weak
         };
-        assert!(device_hint(&strong).is_some());
+        assert!(device_hint(&strong, DeviceType::Unknown).is_some());
     }
 
     /// Every hint-emitting template must clear the Probable bar even on its
@@ -1339,13 +1490,13 @@ mod tests {
     fn hint_emitting_templates_match_specifically_enough() {
         let rows = TCP_TEMPLATES
             .iter()
-            .map(|t| (t.id, t.product, t.vendor, worst_case_tcp(t)))
+            .map(|t| (t.id, t.product, worst_case_tcp(t)))
             .chain(
                 HTTP_TEMPLATES
                     .iter()
-                    .map(|t| (t.id, t.product, t.vendor, worst_case_http(t))),
+                    .map(|t| (t.id, t.product, worst_case_http(t))),
             );
-        for (id, product, vendor, worst) in rows {
+        for (id, product, worst) in rows {
             let lowered = product.to_lowercase();
             let emits = HINTS.iter().any(|(key, _, _)| lowered.contains(key));
             if !emits {
@@ -1354,13 +1505,12 @@ mod tests {
             let hit = Hit {
                 id,
                 product,
-                vendor,
                 longest: worst,
                 labels: Vec::new(),
                 evidence: String::new(),
             };
             assert!(
-                device_hint(&hit).is_some(),
+                device_hint(&hit, DeviceType::Unknown).is_some(),
                 "{id} can write a device hint off a {worst}-byte match"
             );
         }
@@ -1389,20 +1539,24 @@ mod tests {
         let hit = Hit {
             id: template.id,
             product: template.product,
-            vendor: template.vendor,
             longest: 20,
             labels: Vec::new(),
             evidence: String::new(),
         };
-        assert!(device_hint(&hit).is_none());
+        assert!(device_hint(&hit, DeviceType::Unknown).is_none());
         // The finding still says what is listening.
-        let finding = identification_finding("10.0.0.3".parse().unwrap(), 631, &[hit]);
+        let finding = identification_finding(
+            "10.0.0.3".parse().unwrap(),
+            631,
+            &[hit],
+            DeviceType::Unknown,
+        );
         assert_eq!(finding.affected_service.as_deref(), Some("cups"));
     }
 
     #[test]
     fn a_recognised_product_carries_a_device_hint() {
-        let hint = device_hint(&sample_hits()[0]).unwrap();
+        let hint = device_hint(&sample_hits()[0], DeviceType::Unknown).unwrap();
         assert_eq!(hint.vendor.as_deref(), Some("Synology"));
         assert_eq!(hint.device_type, Some(DeviceType::Nas));
         assert_eq!(
@@ -1412,16 +1566,83 @@ mod tests {
     }
 
     #[test]
+    fn a_generic_server_row_never_replaces_a_specific_type() {
+        let page = "<html><body>var nc_lastLogin = 0; var nc_pageLoad = 1;</body></html>";
+        let parts = http("/", 200, "", page);
+        let nextcloud = http_template_hit(http_template("nextcloud-detect").unwrap(), &parts)
+            .expect("nextcloud-detect matches");
+        assert_eq!(confidence_for(nextcloud.longest), Confidence::Confirmed);
+
+        for current in [DeviceType::Nas, DeviceType::Router, DeviceType::Camera] {
+            let hint = device_hint(&nextcloud, current).expect("hint");
+            assert_eq!(hint.device_type, None, "{current}");
+            assert_eq!(hint.device_subtype.as_deref(), Some("nextcloud-detect"));
+
+            let finding = identification_finding(
+                "10.0.0.9".parse().unwrap(),
+                443,
+                std::slice::from_ref(&nextcloud),
+                current,
+            );
+            assert_eq!(
+                finding.device_hint.expect("hint").device_type,
+                None,
+                "{current}"
+            );
+        }
+        for current in [DeviceType::Unknown, DeviceType::Server] {
+            let hint = device_hint(&nextcloud, current).expect("hint");
+            assert_eq!(hint.device_type, Some(DeviceType::Server), "{current}");
+        }
+
+        // A specific row still applies over any current type.
+        assert_eq!(
+            device_hint(&sample_hits()[0], DeviceType::Server)
+                .unwrap()
+                .device_type,
+            Some(DeviceType::Nas)
+        );
+    }
+
+    #[test]
+    fn every_generic_server_row_is_gated_on_the_current_type() {
+        let generic = HINTS
+            .iter()
+            .filter(|(_, _, device_type)| matches!(device_type, DeviceType::Server));
+        let mut checked = 0;
+        for (key, _, _) in generic {
+            let hit = Hit {
+                id: "x",
+                product: key,
+                longest: CONFIRMED_PATTERN_BYTES,
+                labels: Vec::new(),
+                evidence: String::new(),
+            };
+            assert_eq!(
+                device_hint(&hit, DeviceType::Nas).unwrap().device_type,
+                None,
+                "{key}"
+            );
+            assert_eq!(
+                device_hint(&hit, DeviceType::Unknown).unwrap().device_type,
+                Some(DeviceType::Server),
+                "{key}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} generic rows checked");
+    }
+
+    #[test]
     fn an_unrecognised_product_carries_no_hint() {
         let hit = Hit {
             id: "x",
             product: "Some Unmapped Service",
-            vendor: None,
             longest: 9,
             labels: Vec::new(),
             evidence: String::new(),
         };
-        assert!(device_hint(&hit).is_none());
+        assert!(device_hint(&hit, DeviceType::Unknown).is_none());
     }
 
     #[test]
@@ -1510,12 +1731,16 @@ mod tests {
         let hits = vec![Hit {
             id: "nfs-v3-exposed",
             product: "NFSv3 Exposed",
-            vendor: None,
             longest: 24,
             labels: vec!["nfs-v3-success"],
             evidence: "body~\"VER3\"".to_owned(),
         }];
-        let finding = identification_finding("10.0.0.2".parse().unwrap(), 2049, &hits);
+        let finding = identification_finding(
+            "10.0.0.2".parse().unwrap(),
+            2049,
+            &hits,
+            DeviceType::Unknown,
+        );
         assert_eq!(finding.title, "NFSv3 Exposed identified on 10.0.0.2:2049");
         assert!(finding.evidence.unwrap().contains("[nfs-v3-success]"));
     }
