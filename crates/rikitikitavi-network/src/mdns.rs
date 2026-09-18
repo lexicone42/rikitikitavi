@@ -281,6 +281,10 @@ pub fn parse_resource_record(data: &[u8], offset: usize) -> Option<(DnsRecord, u
 }
 
 /// Parse TXT record rdata: sequence of length-prefixed strings.
+///
+/// RFC 6763 §6.5 allows arbitrary binary values; Thread's `_meshcop._udp` uses
+/// them for `sb`, `xp` and `omr`. A value that is not printable UTF-8 is rendered
+/// as [`HEX_VALUE_PREFIX`] plus lowercase hex rather than lossily replaced.
 fn parse_txt_rdata(data: &[u8]) -> Vec<String> {
     let mut entries = Vec::new();
     let mut pos = 0;
@@ -290,13 +294,210 @@ fn parse_txt_rdata(data: &[u8]) -> Vec<String> {
         if pos + len > data.len() {
             break;
         }
-        let entry = String::from_utf8_lossy(&data[pos..pos + len]).into_owned();
+        let entry = render_txt_entry(&data[pos..pos + len]);
         if !entry.is_empty() {
             entries.push(entry);
         }
         pos += len;
     }
     entries
+}
+
+/// Marker prefixing a hex-rendered binary TXT value.
+pub const HEX_VALUE_PREFIX: &str = "0x";
+
+/// Whether `bytes` is UTF-8 with no control characters.
+fn is_printable(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|s| !s.chars().any(char::is_control))
+}
+
+/// Render one TXT entry, hex-encoding a binary value.
+fn render_txt_entry(raw: &[u8]) -> String {
+    let Some(eq) = raw.iter().position(|&b| b == b'=') else {
+        return String::from_utf8_lossy(raw).into_owned();
+    };
+    let (key, value) = (&raw[..eq], &raw[eq + 1..]);
+    if !is_printable(key) {
+        return String::from_utf8_lossy(raw).into_owned();
+    }
+    let key = String::from_utf8_lossy(key);
+    if is_printable(value) {
+        format!("{key}={}", String::from_utf8_lossy(value))
+    } else {
+        let mut out = format!("{key}={HEX_VALUE_PREFIX}");
+        for b in value {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+}
+
+/// Value of TXT key `key`, or `None`.
+///
+/// Keys are case-insensitive (RFC 6763 §6.4). A boolean attribute — a key with
+/// no `=` — yields `Some("")`.
+#[must_use]
+pub fn txt_get<'a>(txt: &'a [String], key: &str) -> Option<&'a str> {
+    txt.iter().find_map(|entry| match entry.split_once('=') {
+        Some((k, v)) => k.eq_ignore_ascii_case(key).then_some(v),
+        None => entry.eq_ignore_ascii_case(key).then_some(""),
+    })
+}
+
+/// Well-known mDNS TXT keys, interpreted.
+///
+/// Sources for the key meanings: RFC 6763 §6, Apple's `_device-info._tcp` and
+/// `_raop._tcp` conventions, the Matter specification's commissionable-node
+/// records, and `ot-br-posix`'s `_meshcop._udp` border-agent record.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MdnsTxt {
+    /// `md` / `model` / `am` / `mn`: hardware model.
+    pub model: Option<String>,
+    /// `fn` / `n`: friendly name chosen by the owner.
+    pub friendly_name: Option<String>,
+    /// `gen`: protocol/hardware generation (Shelly, Google Cast).
+    pub generation: Option<String>,
+    /// `manufacturer` / `vendor` / `vn`.
+    pub manufacturer: Option<String>,
+    /// `VP`: Matter vendor and product id, `vid+pid`.
+    pub vendor_product: Option<String>,
+    /// `CM`: Matter commissioning mode. Non-zero means a window is open.
+    pub commissioning_mode: Option<u8>,
+    /// `D`: Matter discriminator.
+    pub discriminator: Option<String>,
+    /// `DT`: Matter device type id.
+    pub device_type_id: Option<String>,
+    /// `DN`: Matter device name.
+    pub device_name: Option<String>,
+    /// `nn`: Thread network name.
+    pub thread_network_name: Option<String>,
+    /// `xp`: Thread extended PAN id.
+    pub thread_extended_pan_id: Option<String>,
+    /// `omr`: Thread off-mesh-routable IPv6 prefix.
+    pub thread_omr_prefix: Option<String>,
+    /// `sb`: Thread border-agent state bitmap.
+    pub thread_state_bitmap: Option<String>,
+    /// `tv`: Thread stack version.
+    pub thread_version: Option<String>,
+}
+
+impl MdnsTxt {
+    /// Interpret the well-known keys of a TXT record set.
+    #[must_use]
+    pub fn parse(txt: &[String]) -> Self {
+        let first = |keys: &[&str]| -> Option<String> {
+            keys.iter()
+                .find_map(|k| txt_get(txt, k))
+                .filter(|v| !v.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        Self {
+            model: first(&["md", "model", "am", "mdl", "mn"]),
+            friendly_name: first(&["fn", "n"]),
+            generation: first(&["gen"]),
+            manufacturer: first(&["manufacturer", "vendor", "vn"]),
+            vendor_product: first(&["vp"]),
+            commissioning_mode: first(&["cm"]).and_then(|v| v.parse().ok()),
+            discriminator: first(&["d"]),
+            device_type_id: first(&["dt"]),
+            device_name: first(&["dn"]),
+            thread_network_name: first(&["nn"]),
+            thread_extended_pan_id: first(&["xp"]),
+            thread_omr_prefix: first(&["omr"]),
+            thread_state_bitmap: first(&["sb"]),
+            thread_version: first(&["tv"]),
+        }
+    }
+}
+
+/// Decoded Thread border-agent state bitmap (the `sb` TXT key).
+///
+/// Field layout from `ot-br-posix`'s border agent (BSD-3-Clause; the layout is
+/// read from the Thread specification, no code was copied): connection mode in
+/// bits 0-2, Thread interface status 3-4, availability 5-6, backbone router
+/// active 7, backbone router primary 8, Thread role 9-10, ePSKc supported 11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadStateBitmap {
+    /// The undecoded 32-bit value.
+    pub raw: u32,
+    /// How a commissioner may connect: 0 none, 1 `PSKc`, 2 `PSKd`, 3 vendor, 4 X.509.
+    pub connection_mode: u8,
+    /// 0 not initialised, 1 initialised but not attached, 2 active.
+    pub interface_status: u8,
+    /// 0 infrequent, 1 high.
+    pub availability: u8,
+    /// Backbone router function is running.
+    pub bbr_active: bool,
+    /// This border router is the primary backbone router.
+    pub bbr_primary: bool,
+    /// Thread role: 0 disabled or detached, 1 child, 2 router, 3 leader.
+    pub thread_role: u8,
+    /// Ephemeral-key commissioning (`_meshcop-e._udp`) is supported.
+    pub epskc_supported: bool,
+}
+
+impl ThreadStateBitmap {
+    /// Decode the bit fields of a raw `sb` value.
+    #[must_use]
+    pub const fn from_bits(raw: u32) -> Self {
+        Self {
+            raw,
+            connection_mode: (raw & 0b111) as u8,
+            interface_status: ((raw >> 3) & 0b11) as u8,
+            availability: ((raw >> 5) & 0b11) as u8,
+            bbr_active: (raw >> 7) & 1 == 1,
+            bbr_primary: (raw >> 8) & 1 == 1,
+            thread_role: ((raw >> 9) & 0b11) as u8,
+            epskc_supported: (raw >> 11) & 1 == 1,
+        }
+    }
+
+    /// Parse an `sb` TXT value: `0x`-prefixed hex (how a binary TXT value is
+    /// rendered here) or decimal.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        let raw = match value.strip_prefix(HEX_VALUE_PREFIX) {
+            Some(hex) if hex.chars().all(|c| c.is_ascii_hexdigit()) && !hex.is_empty() => {
+                u32::from_str_radix(hex, 16).ok()?
+            }
+            Some(_) => return None,
+            None => value.parse::<u32>().ok()?,
+        };
+        Some(Self::from_bits(raw))
+    }
+
+    /// How a commissioner may connect to the border agent.
+    #[must_use]
+    pub const fn connection_mode_name(self) -> &'static str {
+        match self.connection_mode {
+            0 => "no commissioner connection allowed",
+            1 => "PSKc, the key derived from the network passphrase",
+            2 => "PSKd, a device-specific join passcode",
+            3 => "a vendor-specific credential",
+            4 => "an X.509 certificate",
+            _ => "a connection mode this build does not recognise",
+        }
+    }
+
+    /// State of the border router's own Thread interface.
+    #[must_use]
+    pub const fn interface_status_name(self) -> &'static str {
+        match self.interface_status {
+            0 => "not initialised",
+            1 => "initialised but not attached to a mesh",
+            2 => "active on a mesh",
+            _ => "in an unrecognised state",
+        }
+    }
+
+    /// A commissioner could start a session now: the interface is active and the
+    /// agent accepts some credential.
+    #[must_use]
+    pub const fn commissioning_path_open(self) -> bool {
+        self.connection_mode != 0 && self.interface_status == 2
+    }
 }
 
 /// Parse a DNS packet: header plus answer, authority, and additional records.
@@ -370,17 +571,158 @@ fn encode_dns_name(buf: &mut Vec<u8>, name: &str) {
 }
 
 /// Service types queried by [`discover_services`].
-const SERVICE_QUERIES: &[&str] = &[
+///
+/// The consumer set: the 113 types Home Assistant's `generated/zeroconf.py`
+/// enumerates (Apache-2.0 — see `THIRD-PARTY-NOTICES.md`), plus the general
+/// host/file-sharing types and the Matter and Thread types from the Matter
+/// specification and `ot-br-posix`, which HA does not list in full.
+///
+/// Sent in batches of [`QUERY_BATCH`]; see [`discover_services_blocking`].
+pub const SERVICE_QUERIES: &[&str] = &[
+    // DNS-SD meta-query: best-effort, many embedded responders ignore it.
     "_services._dns-sd._udp.local",
+    // General host, file sharing and management.
     "_http._tcp.local",
+    "_https._tcp.local",
     "_ssh._tcp.local",
+    "_sftp-ssh._tcp.local",
+    "_smb._tcp.local",
+    "_afpovertcp._tcp.local",
+    "_nfs._tcp.local",
+    "_workstation._tcp.local",
+    "_device-info._tcp.local",
+    "_system-bridge._tcp.local",
+    "_rfb._tcp.local",
+    // Printers and 3D printers.
     "_ipp._tcp.local",
+    "_ipps._tcp.local",
+    "_printer._tcp.local",
+    "_pdl-datastream._tcp.local",
+    "_scanner._tcp.local",
+    "_uscan._tcp.local",
+    "_octoprint._tcp.local",
+    // Apple ecosystem.
     "_airplay._tcp.local",
     "_raop._tcp.local",
-    "_smb._tcp.local",
+    "_airport._tcp.local",
+    "_appletv-v2._tcp.local",
+    "_companion-link._tcp.local",
+    "_hscp._tcp.local",
+    "_mediaremotetv._tcp.local",
+    "_sleep-proxy._udp.local",
+    "_touch-able._tcp.local",
+    "_daap._tcp.local",
+    // Casting, televisions and media.
     "_googlecast._tcp.local",
+    "_androidtvremote2._tcp.local",
+    "_philipstv_rpc._tcp.local",
+    "_philipstv_s_rpc._tcp.local",
+    "_viziocast._tcp.local",
+    "_plexmediasvr._tcp.local",
+    "_xbmc-jsonrpc-h._tcp.local",
+    "_Volumio._tcp.local",
+    "_mass._tcp.local",
+    "_kiosker._tcp.local",
+    "_tvm._tcp.local",
+    // Speakers and audio.
+    "_sonos._tcp.local",
+    "_heos-audio._tcp.local",
+    "_musc._tcp.local",
+    "_bangolufsen._tcp.local",
+    "_linkplay._tcp.local",
+    "_soundtouch._tcp.local",
+    "_devialet-http._tcp.local",
+    "_smoip._tcp.local",
+    "_stream-magic._tcp.local",
+    "_rio._tcp.local",
+    // Home automation hubs, bridges and coordinators.
     "_hap._tcp.local",
+    "_hap._udp.local",
+    "_homekit._tcp.local",
+    "_hue._tcp.local",
+    "_lutron._tcp.local",
+    "_bond._tcp.local",
+    "_deako._tcp.local",
+    "_kizbox._tcp.local",
+    "_kizboxdev._tcp.local",
+    "_czc._tcp.local",
+    "_slzb-06._tcp.local",
+    "_uzg-01._tcp.local",
+    "_xzg._tcp.local",
+    "_zigate-zigbee-gateway._tcp.local",
+    "_zigbee-coordinator._tcp.local",
+    "_zigstar_gw._tcp.local",
+    "_zwave-js-server._tcp.local",
+    "_esphomelib._tcp.local",
+    "_wyoming._tcp.local",
+    "_lookin._tcp.local",
+    "_bbxsrv._tcp.local",
+    "_dvl-deviceapi._tcp.local",
+    "_powerhub._udp.local",
+    "_systemnexa2._tcp.local",
+    // Matter and Thread. Matter mandates IPv6 and this socket is IPv4-only, so
+    // Thread-attached nodes answer only through their border router.
+    "_matter._tcp.local",
+    "_matterc._udp.local",
+    "_matterd._udp.local",
+    "_meshcop._udp.local",
+    "_meshcop-e._udp.local",
+    // Lighting, blinds and small IoT.
+    "_nanoleafapi._tcp.local",
+    "_nanoleafms._tcp.local",
+    "_wled._tcp.local",
+    "_elg._tcp.local",
+    "_shelly._tcp.local",
+    "_powerview._tcp.local",
+    "_PowerView-G3._tcp.local",
+    "_miio._udp.local",
+    "_aicu-http._tcp.local",
+    "_amzn-alexa._tcp.local",
+    "_vege._tcp.local",
+    // Solar, battery, energy metering and EV charging.
+    "_enphase-envoy._tcp.local",
+    "_solaredge-modbus._tcp.local",
+    "_solarman._tcp.local",
+    "_mypv._tcp.local",
+    "_iometer._tcp.local",
+    "_homewizard._tcp.local",
+    "_hwenergy._tcp.local",
+    "_openevse._tcp.local",
+    "_nrgkick._tcp.local",
+    "_technove-stations._tcp.local",
+    "_gasleser._tcp.local",
+    "_gaspulse._tcp.local",
+    "_stromleser._tcp.local",
+    "_waermeleser._tcp.local",
+    "_wasserleser._tcp.local",
+    "_wattwaechter._tcp.local",
+    // Climate, appliances and sensors.
+    "_ecobee._tcp.local",
+    "_sideplay._tcp.local",
+    "_dkapi._tcp.local",
+    "_plugwise._tcp.local",
+    "_homeconnect._tcp.local",
+    "_mieleathome._tcp.local",
+    "_prana._tcp.local",
+    "_rabbitair._udp.local",
+    "_airgradient._tcp.local",
+    "_altruist._tcp.local",
+    "_owserver._tcp.local",
+    "_nut._tcp.local",
+    "_droplet._tcp.local",
+    "_ws._tcp.local",
+    "_tbk_vmc._tcp.local",
+    // Cameras, doorbells, security and network appliances.
+    "_axis-video._tcp.local",
+    "_elmax-ssl._tcp.local",
+    "_fbx-api._tcp.local",
+    "_easylink._tcp.local",
+    "_api._tcp.local",
+    "_api._udp.local",
 ];
+
+/// PTR queries sent back-to-back before pausing to read responses.
+const QUERY_BATCH: usize = 12;
 
 /// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until
 /// `timeout_secs` (minimum 1) elapses or [`MAX_MDNS_RECORDS`] are collected.
@@ -392,6 +734,10 @@ pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
 }
 
 /// Blocking half of [`discover_services`].
+///
+/// Queries go out in batches of [`QUERY_BATCH`] rather than one burst, with a
+/// slice of the remaining budget spent reading after each batch; the tail of the
+/// budget is left for the last batch's answers.
 fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
@@ -404,14 +750,28 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
     let deadline = Instant::now() + discovery_timeout(timeout_secs);
     let dest = SocketAddr::new(IpAddr::V4(MDNS_MULTICAST), MDNS_PORT);
 
-    for &svc_name in SERVICE_QUERIES {
-        let query = build_mdns_query(svc_name, TYPE_PTR);
-        if socket.send_to(&query, dest).is_err() {
-            tracing::debug!(service = svc_name, "could not send mDNS query");
+    let batches = SERVICE_QUERIES.len().div_ceil(QUERY_BATCH);
+    let mut all_records: Vec<(IpAddr, DnsRecord)> = Vec::new();
+
+    for (i, batch) in SERVICE_QUERIES.chunks(QUERY_BATCH).enumerate() {
+        for &svc_name in batch {
+            let query = build_mdns_query(svc_name, TYPE_PTR);
+            if socket.send_to(&query, dest).is_err() {
+                tracing::debug!(service = svc_name, "could not send mDNS query");
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // One share per remaining batch plus one for the tail; always >= 2.
+        let shares = u32::try_from(batches - i + 1).unwrap_or(u32::MAX);
+        let slice = Instant::now() + remaining / shares;
+        collect_mdns_records(&socket, slice, MAX_MDNS_RECORDS, &mut all_records);
+        if all_records.len() >= MAX_MDNS_RECORDS {
+            break;
         }
     }
 
-    let all_records = collect_mdns_records(&socket, deadline, MAX_MDNS_RECORDS);
+    collect_mdns_records(&socket, deadline, MAX_MDNS_RECORDS, &mut all_records);
     correlate_mdns_records(&all_records)
 }
 
@@ -426,8 +786,8 @@ fn collect_mdns_records(
     socket: &UdpSocket,
     deadline: Instant,
     max_records: usize,
-) -> Vec<(IpAddr, DnsRecord)> {
-    let mut all_records: Vec<(IpAddr, DnsRecord)> = Vec::new();
+    all_records: &mut Vec<(IpAddr, DnsRecord)>,
+) {
     let mut buf = [0u8; 4096];
 
     while all_records.len() < max_records {
@@ -451,8 +811,6 @@ fn collect_mdns_records(
             }
         }
     }
-
-    all_records
 }
 
 /// Build services by following PTR → SRV → A/AAAA/TXT. Unresolved targets fall
@@ -1248,7 +1606,8 @@ mod tests {
     fn test_collect_records_past_deadline_does_not_block() {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let start = Instant::now();
-        let records = collect_mdns_records(&socket, start, 10);
+        let mut records = Vec::new();
+        collect_mdns_records(&socket, start, 10, &mut records);
         assert!(records.is_empty());
         assert!(start.elapsed() < Duration::from_millis(500));
     }
@@ -1257,7 +1616,13 @@ mod tests {
     fn test_collect_records_returns_at_deadline() {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let start = Instant::now();
-        let records = collect_mdns_records(&socket, start + Duration::from_millis(200), 10);
+        let mut records = Vec::new();
+        collect_mdns_records(
+            &socket,
+            start + Duration::from_millis(200),
+            10,
+            &mut records,
+        );
         assert!(records.is_empty());
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
@@ -1284,7 +1649,8 @@ mod tests {
         }
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        let records = collect_mdns_records(&receiver, deadline, 5);
+        let mut records = Vec::new();
+        collect_mdns_records(&receiver, deadline, 5, &mut records);
         assert_eq!(records.len(), 5);
         assert!(
             records
@@ -1324,12 +1690,223 @@ mod tests {
         assert_eq!(record.name(), "host.local");
     }
 
+    // ── TXT interpretation ─────────────────────────────────────────
+
+    fn txt(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_txt_get_is_case_insensitive_on_keys() {
+        let records = txt(&["MD=Shelly", "fn=Kitchen"]);
+        assert_eq!(txt_get(&records, "md"), Some("Shelly"));
+        assert_eq!(txt_get(&records, "FN"), Some("Kitchen"));
+        assert_eq!(txt_get(&records, "gen"), None);
+    }
+
+    #[test]
+    fn test_txt_get_boolean_attribute() {
+        let records = txt(&["sf", "ci=2"]);
+        assert_eq!(txt_get(&records, "sf"), Some(""));
+    }
+
+    #[test]
+    fn test_txt_get_empty_value() {
+        let records = txt(&["md="]);
+        assert_eq!(txt_get(&records, "md"), Some(""));
+    }
+
+    #[test]
+    fn test_render_txt_entry_keeps_printable_utf8() {
+        assert_eq!(
+            render_txt_entry(b"nn=OpenThread-a1b2"),
+            "nn=OpenThread-a1b2"
+        );
+    }
+
+    #[test]
+    fn test_render_txt_entry_hex_encodes_binary_value() {
+        // Thread `xp` is an 8-byte extended PAN id, not text.
+        let mut raw = b"xp=".to_vec();
+        raw.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03]);
+        assert_eq!(render_txt_entry(&raw), "xp=0xdeadbeef00010203");
+    }
+
+    #[test]
+    fn test_render_txt_entry_without_equals() {
+        assert_eq!(render_txt_entry(b"flag"), "flag");
+    }
+
+    #[test]
+    fn test_mdns_txt_parses_homekit_and_shelly_keys() {
+        let records = txt(&["md=Shelly Plus 1", "fn=Porch", "gen=2"]);
+        let parsed = MdnsTxt::parse(&records);
+        assert_eq!(parsed.model.as_deref(), Some("Shelly Plus 1"));
+        assert_eq!(parsed.friendly_name.as_deref(), Some("Porch"));
+        assert_eq!(parsed.generation.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_mdns_txt_parses_matter_commissioning_keys() {
+        let records = txt(&["VP=65521+32769", "CM=2", "D=3840", "DT=21", "DN=Front Lamp"]);
+        let parsed = MdnsTxt::parse(&records);
+        assert_eq!(parsed.vendor_product.as_deref(), Some("65521+32769"));
+        assert_eq!(parsed.commissioning_mode, Some(2));
+        assert_eq!(parsed.discriminator.as_deref(), Some("3840"));
+        assert_eq!(parsed.device_type_id.as_deref(), Some("21"));
+        assert_eq!(parsed.device_name.as_deref(), Some("Front Lamp"));
+    }
+
+    #[test]
+    fn test_mdns_txt_parses_thread_border_agent_keys() {
+        let records = txt(&[
+            "rv=1",
+            "tv=1.3.0",
+            "nn=HomeThread",
+            "xp=0xdead00beef00cafe",
+            "sb=0x00000131",
+            "omr=0xfd11223300000000",
+        ]);
+        let parsed = MdnsTxt::parse(&records);
+        assert_eq!(parsed.thread_network_name.as_deref(), Some("HomeThread"));
+        assert_eq!(parsed.thread_version.as_deref(), Some("1.3.0"));
+        assert_eq!(
+            parsed.thread_extended_pan_id.as_deref(),
+            Some("0xdead00beef00cafe")
+        );
+        assert_eq!(parsed.thread_state_bitmap.as_deref(), Some("0x00000131"));
+        assert_eq!(
+            parsed.thread_omr_prefix.as_deref(),
+            Some("0xfd11223300000000")
+        );
+    }
+
+    #[test]
+    fn test_mdns_txt_ignores_unparseable_commissioning_mode() {
+        assert_eq!(MdnsTxt::parse(&txt(&["CM=open"])).commissioning_mode, None);
+    }
+
+    // ── Service query list ─────────────────────────────────────────
+
+    #[test]
+    fn test_service_queries_are_unique_and_well_formed() {
+        let mut seen = std::collections::HashSet::new();
+        for &query in SERVICE_QUERIES {
+            assert!(seen.insert(query), "duplicate service query {query}");
+            assert!(query.starts_with('_'), "{query}");
+            assert!(
+                query
+                    .rsplit_once('.')
+                    .is_some_and(|(_, tld)| tld == "local"),
+                "{query}"
+            );
+            assert!(!query.ends_with('.'), "{query}");
+        }
+    }
+
+    /// The query list must actually be spread over several batches: one burst of
+    /// 127 PTR packets is what the batching exists to avoid.
+    #[test]
+    fn test_service_queries_are_spread_over_several_batches() {
+        const { assert!(QUERY_BATCH > 0) };
+        let batches: Vec<_> = SERVICE_QUERIES.chunks(QUERY_BATCH).collect();
+        assert!(batches.len() >= 8, "{} batches", batches.len());
+        assert_eq!(
+            batches.iter().map(|b| b.len()).sum::<usize>(),
+            SERVICE_QUERIES.len()
+        );
+        // `discover_services_blocking` divides the remaining budget by
+        // `batches - i + 1`; even at the 1s floor every share must stay non-zero.
+        let budget = discovery_timeout(0);
+        for i in 0..batches.len() {
+            let shares = u32::try_from(batches.len() - i + 1).expect("batch count fits u32");
+            assert!(!(budget / shares).is_zero(), "batch {i}");
+        }
+    }
+
+    // ── Thread border-agent state bitmap ───────────────────────────
+
+    /// Live value from a Thread border router on the author's LAN.
+    #[test]
+    fn test_thread_state_bitmap_decodes_a_live_value() {
+        let s = ThreadStateBitmap::parse("0x00000fb1").expect("parses");
+        assert_eq!(s.raw, 0x0000_0fb1);
+        assert_eq!(s.connection_mode, 1);
+        assert_eq!(s.interface_status, 2);
+        assert_eq!(s.availability, 1);
+        assert!(s.bbr_active);
+        assert!(s.bbr_primary);
+        assert_eq!(s.thread_role, 3);
+        assert!(s.epskc_supported);
+        assert!(s.commissioning_path_open());
+    }
+
+    #[test]
+    fn test_thread_state_bitmap_closed_agent() {
+        // Interface active, connection mode 0: nothing can connect.
+        let s = ThreadStateBitmap::from_bits(0b1_0000);
+        assert_eq!(s.connection_mode, 0);
+        assert_eq!(s.interface_status, 2);
+        assert!(!s.commissioning_path_open());
+        // Connection mode offered but the interface is not up.
+        let s = ThreadStateBitmap::from_bits(0b1);
+        assert!(!s.commissioning_path_open());
+    }
+
+    #[test]
+    fn test_thread_state_bitmap_accepts_decimal_and_rejects_junk() {
+        assert_eq!(
+            ThreadStateBitmap::parse("4017"),
+            ThreadStateBitmap::parse("0x00000fb1")
+        );
+        assert!(ThreadStateBitmap::parse("").is_none());
+        assert!(ThreadStateBitmap::parse("0x").is_none());
+        assert!(ThreadStateBitmap::parse("0xzz").is_none());
+        assert!(ThreadStateBitmap::parse("0x1ffffffff").is_none());
+        assert!(ThreadStateBitmap::parse("nope").is_none());
+    }
+
+    #[test]
+    fn test_thread_state_bitmap_names_unknown_values() {
+        let s = ThreadStateBitmap::from_bits(0b111 | (0b11 << 3));
+        assert!(s.connection_mode_name().contains("does not recognise"));
+        assert!(s.interface_status_name().contains("unrecognised"));
+    }
+
     // ── Proptest: never panic on arbitrary input ───────────────────
 
     proptest! {
         #[test]
+        fn prop_render_txt_entry_no_panic(data in proptest::collection::vec(any::<u8>(), 0..300)) {
+            let _ = render_txt_entry(&data);
+        }
+
+        #[test]
+        fn prop_parse_txt_rdata_no_panic(data in proptest::collection::vec(any::<u8>(), 0..600)) {
+            let entries = parse_txt_rdata(&data);
+            let _ = MdnsTxt::parse(&entries);
+            let _ = txt_get(&entries, "md");
+        }
+
+        #[test]
         fn prop_parse_dns_packet_no_panic(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
             let _ = parse_dns_packet(&data);
+        }
+
+        #[test]
+        fn prop_thread_state_bitmap_no_panic(raw in ".*") {
+            if let Some(s) = ThreadStateBitmap::parse(&raw) {
+                let _ = s.connection_mode_name();
+                let _ = s.interface_status_name();
+                let _ = s.commissioning_path_open();
+            }
+        }
+
+        #[test]
+        fn prop_thread_state_bitmap_roundtrips(raw in any::<u32>()) {
+            let s = ThreadStateBitmap::from_bits(raw);
+            prop_assert_eq!(s.raw, raw);
+            prop_assert_eq!(ThreadStateBitmap::parse(&format!("{raw}")), Some(s));
         }
 
         #[test]

@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, MacAddr, ScanContext};
 
+use std::fmt::Write as _;
+
 use crate::Scanner;
+use crate::ha_discovery_db::{OUI_NIBBLES, consensus_device_type, mac_prefix_match};
 use crate::oui_db::ieee_oui_lookup;
 
 /// Device fingerprinting scanner — MAC OUI lookup and open-port profiling.
@@ -79,7 +82,25 @@ const fn vendor_to_device_type(vendor: &str) -> DeviceType {
     }
 }
 
+/// Product identity for a MAC, from Home Assistant's DHCP MAC globs.
+///
+/// Names the integration HA associates with the prefix, which is finer than the
+/// IEEE vendor string. A `DeviceType` comes back only when the matched prefix is
+/// longer than the 24-bit OUI the vendor tier already used: all but one carried
+/// prefix is exactly an OUI, and an OUI names a registrant whose catalogue spans
+/// several device classes. Returns the domains, the type and the prefix length.
+fn ha_mac_identity(mac: &str) -> Option<(DeviceType, String, usize)> {
+    let hit = mac_prefix_match(mac)?;
+    let device_type = if hit.finer_than_oui() {
+        consensus_device_type(&hit.domains)
+    } else {
+        DeviceType::Unknown
+    };
+    Some((device_type, hit.domains.join("/"), hit.nibbles))
+}
+
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl Scanner for DeviceScanner {
     fn id(&self) -> &'static str {
         "device"
@@ -149,30 +170,59 @@ impl Scanner for DeviceScanner {
             }
 
             let vendor = ieee_oui_lookup(&entry.mac);
+            let ha = ha_mac_identity(&entry.mac);
 
-            if let Some(vendor_name) = vendor {
-                identified += 1;
-                let device_class = classify_by_vendor(vendor_name);
-                let hint = DeviceHint::new()
-                    .with_vendor(vendor_name)
-                    .with_device_type(vendor_to_device_type(vendor_name));
-                findings.push(
-                    Finding::new(
-                        "device",
-                        &format!("{vendor_name} device at {}", entry.ip),
-                        &format!(
-                            "MAC {mac} belongs to {vendor_name}. Likely device type: {device_class}.",
-                            mac = entry.mac
-                        ),
-                        Severity::Info,
-                    )
-                    .with_ip(entry.ip)
-                    .with_mac(&entry.mac)
-                    .with_device_hint(hint),
-                );
-            } else {
+            if vendor.is_none() && ha.is_none() {
                 unidentified += 1;
+                continue;
             }
+            identified += 1;
+
+            let mut device_type = vendor.map_or(DeviceType::Unknown, vendor_to_device_type);
+            let mut hint = DeviceHint::new();
+            if let Some(name) = vendor {
+                hint = hint.with_vendor(name);
+            }
+
+            let mut description = format!(
+                "MAC {mac} belongs to {vendor_name}. Likely device type: {class}.",
+                mac = entry.mac,
+                vendor_name = vendor.unwrap_or("no registered OUI vendor"),
+                class = vendor.map_or("Unknown", classify_by_vendor),
+            );
+            let mut label = vendor.map(ToOwned::to_owned);
+            if let Some((ha_type, ha_subtype, nibbles)) = ha {
+                if ha_type != DeviceType::Unknown {
+                    device_type = ha_type;
+                }
+                hint = hint.with_device_subtype(&ha_subtype);
+                let _ = write!(
+                    description,
+                    " Home Assistant's DHCP table associates this MAC prefix with the \
+                     {ha_subtype} integration."
+                );
+                if nibbles <= OUI_NIBBLES {
+                    description.push_str(
+                        " The prefix is a whole OUI, so it names the registrant, not a \
+                         device class.",
+                    );
+                }
+                label = label.or(Some(ha_subtype));
+            }
+            hint = hint.with_device_type(device_type);
+            let label = label.unwrap_or_else(|| "Unknown".to_owned());
+
+            findings.push(
+                Finding::new(
+                    "device",
+                    &format!("{label} device at {}", entry.ip),
+                    &description,
+                    Severity::Info,
+                )
+                .with_ip(entry.ip)
+                .with_mac(&entry.mac)
+                .with_device_hint(hint),
+            );
         }
 
         if unidentified > 0 {
@@ -219,6 +269,52 @@ impl Scanner for DeviceScanner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A nibble-granular HA glob outranks the 3-byte OUI it sits inside.
+    #[test]
+    fn ha_mac_identity_refines_the_oui_tier() {
+        let (device_type, subtype, nibbles) = ha_mac_identity("98:6d:35:c1:bb:cc").unwrap();
+        assert_eq!(device_type, DeviceType::Inverter);
+        assert_eq!(subtype, "my_pv");
+        assert_eq!(nibbles, 7);
+        // The OUI tier alone cannot express this.
+        assert_eq!(
+            ieee_oui_lookup("98:6d:35:c1:bb:cc").map(vendor_to_device_type),
+            Some(DeviceType::Unknown)
+        );
+    }
+
+    /// A whole-OUI prefix yields the integration name but no device class: the
+    /// Ubiquiti OUIs cover APs, switches, gateways and cameras alike.
+    #[test]
+    fn ha_mac_identity_asserts_no_type_from_a_whole_oui() {
+        let (device_type, subtype, nibbles) = ha_mac_identity("b4:fb:e4:11:22:33").unwrap();
+        assert_eq!(device_type, DeviceType::Unknown);
+        assert_eq!(subtype, "unifi_discovery");
+        assert_eq!(nibbles, OUI_NIBBLES);
+    }
+
+    /// Upstream gates these on a hostname we never see, so they are not carried.
+    #[test]
+    fn ha_mac_identity_ignores_hostname_gated_prefixes() {
+        // WNC and AMPAK module OUIs that HA pairs with `connect`/`august*`.
+        assert!(ha_mac_identity("d8:61:62:aa:bb:cc").is_none());
+        assert!(ha_mac_identity("e0:76:d0:aa:bb:cc").is_none());
+        // Tesla Wall Connector, gated on `teslawallconnector_*`.
+        assert!(ha_mac_identity("dc:44:27:1a:bb:cc").is_none());
+    }
+
+    #[test]
+    fn ha_mac_identity_is_none_for_unlisted_prefixes() {
+        assert!(ha_mac_identity("02:00:00:00:00:01").is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn prop_ha_mac_identity_no_panic(mac in ".*") {
+            let _ = ha_mac_identity(&mac);
+        }
+    }
 
     /// Vendor tables must be keyed on strings the OUI database actually emits;
     /// a typo here silently classifies nothing.

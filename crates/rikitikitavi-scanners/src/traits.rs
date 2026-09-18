@@ -78,6 +78,7 @@ impl ScannerRegistry {
                 Box::new(crate::papercut::PaperCutScanner),
                 Box::new(crate::sadp::SadpScanner),
                 Box::new(crate::tuya::TuyaScanner),
+                Box::new(crate::nuclei_detect::NucleiDetectScanner),
             ],
         }
     }

@@ -288,6 +288,37 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
     None
 }
 
+/// End-of-life findings for versioned products named in `X-Powered-By`.
+///
+/// `PHP/8.0.30` is the common case; `ASP.NET` and `Express` carry no version and
+/// yield nothing. The EOL join lives in `services` because that is where the
+/// `eol_db` glue is.
+pub fn check_powered_by_eol(ip: IpAddr, port: u16, powered_by: &str) -> Vec<Finding> {
+    powered_by
+        .split([',', ' ', ';'])
+        .filter_map(|token| {
+            let token = token.trim();
+            let (name, version) = token.split_once('/')?;
+            let product = crate::services::eol_product(&name.to_ascii_lowercase())?;
+            let summary = crate::services::eol_summary(product, version)?;
+            Some(
+                Finding::new(
+                    "http_audit",
+                    &format!("End-of-life {product} on {ip}:{port}"),
+                    &format!("The X-Powered-By header advertises {token}. {summary}"),
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_confidence(rikitikitavi_core::Confidence::Probable)
+                .with_cwe("CWE-1104")
+                .with_evidence(powered_by),
+            )
+        })
+        .collect()
+}
+
 /// Set of security headers found in a response.
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -1317,6 +1348,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
             .get("x-powered-by")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
+
+        if let Some(ref pb) = powered_by {
+            findings.extend(check_powered_by_eol(ip, port, pb));
+        }
 
         let csp_value = resp
             .headers()
@@ -2548,7 +2583,124 @@ mod tests {
         assert!(!is_security_relevant_cookie("lang"));
     }
 
+    #[test]
+    fn test_powered_by_eol_php() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let findings = check_powered_by_eol(ip, 80, "PHP/7.4.33");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].title, format!("End-of-life php on {ip}:80"));
+        assert!(
+            findings[0]
+                .description
+                .contains("end-of-life on 2022-11-28")
+        );
+        assert_eq!(findings[0].cwe_id.as_deref(), Some("CWE-1104"));
+    }
+
+    #[test]
+    fn test_powered_by_eol_ignores_supported_and_unversioned() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let latest = crate::eol_db::current("php")
+            .and_then(|c| c.latest)
+            .unwrap();
+        assert!(check_powered_by_eol(ip, 80, &format!("PHP/{latest}")).is_empty());
+        assert!(check_powered_by_eol(ip, 80, "ASP.NET").is_empty());
+        assert!(check_powered_by_eol(ip, 80, "Express").is_empty());
+        assert!(check_powered_by_eol(ip, 80, "").is_empty());
+    }
+
+    /// Multi-token headers are split; each versioned product is judged separately.
+    #[test]
+    fn test_powered_by_eol_multiple_tokens() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let findings = check_powered_by_eol(ip, 80, "PHP/5.6.40, ASP.NET");
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("php 5.6"));
+    }
+
+    /// `name/version` tokens built from real table cycles. A bare `".*"`
+    /// strategy essentially never produces `PHP/7.4.33`, so assertions inside
+    /// the findings loop would never execute.
+    fn real_powered_by_tokens() -> Vec<String> {
+        [("PHP", "php"), ("php-fpm", "php"), ("Python", "python")]
+            .iter()
+            .flat_map(|(token, product)| {
+                crate::eol_db::product_cycles(product)
+                    .iter()
+                    .flat_map(move |row| {
+                        [
+                            format!("{token}/{}", row.cycle),
+                            format!("{token}/{}.7", row.cycle),
+                        ]
+                    })
+            })
+            .collect()
+    }
+
+    /// `X-Powered-By`-shaped headers that reach the end-of-life join, mixed
+    /// with unmapped products and junk.
+    /// Guards `prop_powered_by_eol_no_panic` against going vacuous: its
+    /// assertions sit inside `for finding in ...`, so they only mean something
+    /// while the strategy still reaches findings. Measured ~69% of samples.
+    #[test]
+    fn arb_powered_by_reaches_findings() {
+        use proptest::test_runner::{Config, TestRunner};
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+        let hits = std::cell::Cell::new(0_u32);
+        runner
+            .run(&arb_powered_by(), |header| {
+                if !check_powered_by_eol(ip, 80, &header).is_empty() {
+                    hits.set(hits.get() + 1);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(hits.get() > 20, "only {} of 256 samples fired", hits.get());
+    }
+
+    fn arb_powered_by() -> impl Strategy<Value = String> {
+        let token = prop_oneof![
+            6 => prop::sample::select(real_powered_by_tokens()),
+            1 => (
+                prop::sample::select(vec!["ASP.NET", "Express", "mysql"]),
+                "[0-9]{1,2}(\\.[0-9]{1,2}){0,3}",
+            )
+                .prop_map(|(name, version)| format!("{name}/{version}")),
+            1 => "[!-~]{0,12}".prop_map(String::from),
+        ];
+        prop_oneof![
+            1 => any::<String>(),
+            9 => prop::collection::vec(token, 1..4).prop_map(|parts| parts.join(", ")),
+        ]
+    }
+
     proptest! {
+        /// `check_powered_by_eol` never panics, and only reports mapped products.
+        #[test]
+        fn prop_powered_by_eol_no_panic(header in arb_powered_by()) {
+            let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            for finding in check_powered_by_eol(ip, 80, &header) {
+                prop_assert!(finding.title.starts_with("End-of-life "));
+                prop_assert_eq!(finding.cwe_id.as_deref(), Some("CWE-1104"));
+                prop_assert_eq!(finding.severity, Severity::Medium);
+                let product = finding
+                    .title
+                    .strip_prefix("End-of-life ")
+                    .and_then(|rest| rest.split(' ').next())
+                    .unwrap_or("");
+                prop_assert!(
+                    crate::services::eol_product(product).is_some(),
+                    "{}",
+                    finding.title
+                );
+            }
+        }
+
         /// classify_missing_headers never panics with any combination of bools
         #[test]
         fn prop_classify_missing_headers_no_panic(

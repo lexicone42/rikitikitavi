@@ -15,7 +15,9 @@ pub mod database;
 pub mod device;
 pub mod dhcp;
 pub mod dns;
+pub mod eol_db;
 pub mod exposure;
+pub mod ha_discovery_db;
 pub mod http_audit;
 pub mod http_util;
 pub mod isolation;
@@ -26,6 +28,8 @@ pub mod modbus;
 pub mod mqtt;
 pub mod neighbor;
 pub mod network;
+pub mod nuclei_db;
+pub mod nuclei_detect;
 pub mod oui_db;
 pub mod papercut;
 #[cfg(feature = "monitor")]

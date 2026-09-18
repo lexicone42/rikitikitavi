@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::Scanner;
+use crate::eol_db;
 
 /// Service banner scanner: banner grabs, HTTP `Server` header version checks,
 /// and protocol probes (SSH `kex_init`, SMTP `EHLO`, FTP `FEAT`).
@@ -598,139 +599,285 @@ pub struct OsFingerprint {
     pub is_eol: bool,
 }
 
-/// Debian release from the `+debXXuY` banner suffix (e.g. `Debian-5+deb11u5` → Debian 11).
-fn parse_debian_version(banner: &str) -> Option<String> {
+/// Debian major release from a `+deb<N>` banner suffix (`Debian-5+deb11u5` → 11).
+fn debian_release(banner: &str) -> Option<u32> {
     let lower = banner.to_lowercase();
     let deb_idx = lower.find("+deb")?;
-    let after_deb = &lower[deb_idx + 4..];
-    let version_str: String = after_deb.chars().take_while(char::is_ascii_digit).collect();
-    let version: u32 = version_str.parse().ok()?;
-
-    let (codename, eol) = debian_version_info(version);
-    Some(codename.map_or_else(
-        || format!("Linux (Debian {version})"),
-        |name| format!("Linux (Debian {version} {name}, EOL: {eol})"),
-    ))
+    let digits: String = lower[deb_idx + 4..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
-/// Map Debian major version to codename and EOL date.
-const fn debian_version_info(version: u32) -> (Option<&'static str>, &'static str) {
-    match version {
-        8 => (Some("Jessie"), "2020-06-30"),
-        9 => (Some("Stretch"), "2022-07-01"),
-        10 => (Some("Buster"), "2024-06-30"),
-        11 => (Some("Bullseye"), "2026-06-30"),
-        12 => (Some("Bookworm"), "2028-06-30"),
-        13 => (Some("Trixie"), "2030-06-30"),
-        _ => (None, "unknown"),
-    }
+/// Debian release from the `+debXXuY` banner suffix (e.g. `Debian-5+deb11u5` → Debian 11).
+fn parse_debian_version(banner: &str) -> Option<String> {
+    let version = debian_release(banner)?;
+    let named = eol_db::lookup("debian", &version.to_string())
+        .and_then(|entry| entry.codename.zip(entry.eol_from));
+    Some(named.map_or_else(
+        || format!("Linux (Debian {version})"),
+        |(name, eol)| format!("Linux (Debian {version} {name}, EOL: {eol})"),
+    ))
 }
 
 /// Ubuntu release inferred from the bundled `OpenSSH` version (e.g. 8.9 → 22.04).
 fn parse_ubuntu_version(banner: &str) -> Option<String> {
     let (major, minor) = extract_ssh_version(banner)?;
-    let (release, codename, eol) = ubuntu_from_openssh(major, minor)?;
-    Some(format!("Linux (Ubuntu {release} {codename}, EOL: {eol})"))
+    let releases = ubuntu_from_openssh(major, minor);
+    let (first, rest) = releases.split_first()?;
+    if !rest.is_empty() {
+        // Ambiguous: name every candidate and the latest of their EOL dates.
+        let names = releases.join(" or ");
+        let eol = ubuntu_last_eol(releases).unwrap_or("unknown");
+        return Some(format!("Linux (Ubuntu {names}, EOL by {eol})"));
+    }
+    let entry = eol_db::lookup("ubuntu", first);
+    let codename = entry
+        .and_then(|e| e.codename)
+        .map_or_else(String::new, |name| format!(" {name}"));
+    let eol = entry.and_then(|e| e.eol_from).unwrap_or("unknown");
+    Some(format!("Linux (Ubuntu {first}{codename}, EOL: {eol})"))
 }
 
-/// Map `OpenSSH` (major, minor) to Ubuntu (release, codename, EOL date).
-const fn ubuntu_from_openssh(
-    major: u32,
-    minor: u32,
-) -> Option<(&'static str, &'static str, &'static str)> {
+/// Latest `eol_from` among `releases`; the safe claim when the release is ambiguous.
+fn ubuntu_last_eol(releases: &[&'static str]) -> Option<&'static str> {
+    releases
+        .iter()
+        .filter_map(|r| eol_db::lookup("ubuntu", r).and_then(|e| e.eol_from))
+        .max()
+}
+
+/// Ubuntu releases that shipped `OpenSSH` (major, minor), newest last.
+///
+/// Distribution-specific: endoflife.date does not track OpenSSH, so the release
+/// is inferred, not read. Several `OpenSSH` releases shipped in two consecutive
+/// Ubuntu releases — 8.4p1 in 21.04 and 21.10, 9.0p1 in 22.10 and 23.04 — so
+/// this returns every candidate rather than naming one. Verified against
+/// Launchpad's published-sources history; a series' entry here is the version
+/// it released with, not the intermediate versions carried during its
+/// development cycle. Codename and EOL date come from `eol_db`.
+const fn ubuntu_from_openssh(major: u32, minor: u32) -> &'static [&'static str] {
     match (major, minor) {
-        (7, 2) => Some(("18.04", "Bionic", "2028-04-30")),
-        (7, 6) => Some(("18.10", "Cosmic", "2019-07-18")),
-        (7, 9) => Some(("19.04", "Disco", "2020-01-23")),
-        (8, 0) => Some(("19.10", "Eoan", "2020-07-17")),
-        (8, 2) => Some(("20.04", "Focal", "2030-04-30")),
-        (8, 4) => Some(("20.10", "Groovy", "2021-07-22")),
-        (8, 6) => Some(("21.10", "Impish", "2022-07-14")),
-        (8, 9) => Some(("22.04", "Jammy", "2032-04-30")),
-        (9, 0) => Some(("22.10", "Kinetic", "2023-07-20")),
-        (9, 3) => Some(("23.10", "Mantic", "2024-07-11")),
-        (9, 6 | 7) => Some(("24.04", "Noble", "2034-04-30")),
-        (9, 9) => Some(("24.10", "Oracular", "2025-07-10")),
+        (7, 2) => &["16.04"],
+        (7, 6) => &["18.04"],
+        (7, 7) => &["18.10"],
+        (7, 9) => &["19.04"],
+        (8, 0) => &["19.10"],
+        (8, 2) => &["20.04"],
+        (8, 3) => &["20.10"],
+        (8, 4) => &["21.04", "21.10"],
+        (8, 9) => &["22.04"],
+        (9, 0) => &["22.10", "23.04"],
+        (9, 3) => &["23.10"],
+        (9, 6) => &["24.04"],
+        (9, 7) => &["24.10"],
+        (9, 9) => &["25.04"],
+        _ => &[],
+    }
+}
+
+/// Finding if the SSH banner indicates an EOL, or LTS-only, Debian/Ubuntu release.
+///
+/// Dates come from `eol_db`. Debian gets two tiers because both of its dates are
+/// security dates: `eoas_from` is the day Debian's own security team stops and the
+/// community LTS project takes over (Medium), `eol_from` the day LTS itself ends
+/// (High). Ubuntu gets one tier only, because its `eoas_from` is the last point
+/// release ("Hardware & Maintenance") and not a patching change — keying on it
+/// would fire on 22.04, which is supported to 2027. Ubuntu's `eol_from` is the end
+/// of standard Maintenance & Security Support, which a paid ESM subscription can
+/// extend.
+pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
+    let lower = banner.to_lowercase();
+    let today = today();
+
+    if lower.contains("debian") {
+        return check_debian_eol(ip, port, banner, &today);
+    }
+    if lower.contains("ubuntu") {
+        return check_ubuntu_eol(ip, port, banner, &today);
+    }
+    None
+}
+
+/// Debian tier from the `+debN` banner suffix: LTS ended (High), or only LTS left (Medium).
+fn check_debian_eol(ip: IpAddr, port: u16, banner: &str, today: &str) -> Option<Finding> {
+    let version = debian_release(banner)?;
+    let entry = eol_db::lookup("debian", &version.to_string())?;
+    let name = entry.codename.unwrap_or("unknown");
+
+    if eol_db::is_eol_on(entry, today) {
+        let ended = entry.eol_from.unwrap_or("an unpublished date");
+        return Some(
+            Finding::new(
+                "services",
+                &format!("End-of-life OS on {ip}:{port}"),
+                &format!(
+                    "SSH banner indicates Debian {version} {name}, whose support including \
+                     Debian LTS ended {ended} (endoflife.date snapshot {}). EOL operating \
+                     systems receive no security patches. Banner: {banner}",
+                    eol_db::EOL_SNAPSHOT
+                ),
+                Severity::High,
+            )
+            .with_ip(ip)
+            .with_port(port)
+            .with_service("SSH")
+            .with_confidence(Confidence::Probable)
+            .with_cwe("CWE-1104"),
+        );
+    }
+
+    // Debian's own security team has stopped; only the community LTS project
+    // remains, on a narrower architecture and package set.
+    let eoas = entry.eoas_from.filter(|date| *date <= today)?;
+    let lts_ends = entry.eol_from.unwrap_or("an unpublished date");
+    Some(
+        Finding::new(
+            "services",
+            &format!("OS on security-team support only on {ip}:{port}"),
+            &format!(
+                "SSH banner indicates Debian {version} {name}. Debian's own security team \
+                 stopped updating it on {eoas}; the community Debian LTS project covers it \
+                 until {lts_ends}, on a reduced set of architectures and packages \
+                 (endoflife.date snapshot {}). Plan the upgrade to Debian {} before then. \
+                 Banner: {banner}",
+                eol_db::EOL_SNAPSHOT,
+                eol_db::current("debian").map_or("stable", |c| c.cycle),
+            ),
+            Severity::Medium,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("SSH")
+        .with_confidence(Confidence::Probable)
+        .with_cwe("CWE-1104"),
+    )
+}
+
+/// Ubuntu tier, inferred from the bundled `OpenSSH` version.
+///
+/// When the version maps to more than one release, every candidate must be EOL
+/// before this fires, and the finding names them all with the latest of their
+/// dates — so an ambiguous banner is never reported as a specific release.
+fn check_ubuntu_eol(ip: IpAddr, port: u16, banner: &str, today: &str) -> Option<Finding> {
+    let (major, minor) = extract_ssh_version(banner)?;
+    let releases = ubuntu_from_openssh(major, minor);
+    let (first, rest) = releases.split_first()?;
+
+    let entries: Vec<_> = releases
+        .iter()
+        .filter_map(|r| eol_db::lookup("ubuntu", r))
+        .collect();
+    if entries.len() != releases.len() || !entries.iter().all(|e| eol_db::is_eol_on(e, today)) {
+        return None;
+    }
+
+    let which = if rest.is_empty() {
+        let name = entries[0].codename.unwrap_or("unknown");
+        let ended = entries[0].eol_from.unwrap_or("an unpublished date");
+        format!("Ubuntu {first} {name}, whose standard security maintenance ended {ended}")
+    } else {
+        let names = releases.join(" or ");
+        let ended = ubuntu_last_eol(releases).unwrap_or("an unpublished date");
+        format!(
+            "Ubuntu {names} — that OpenSSH shipped in both, and standard security \
+             maintenance ended no later than {ended}"
+        )
+    };
+
+    Some(
+        Finding::new(
+            "services",
+            &format!("End-of-life OS on {ip}:{port}"),
+            &format!(
+                "The bundled OpenSSH {major}.{minor} points to {which} (endoflife.date \
+                 snapshot {}). The release is inferred from the SSH version, not read \
+                 directly, and an ESM subscription can still be receiving patches. \
+                 Banner: {banner}",
+                eol_db::EOL_SNAPSHOT
+            ),
+            Severity::High,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("SSH")
+        .with_confidence(Confidence::Inferred)
+        .with_cwe("CWE-1104"),
+    )
+}
+
+/// Today as `YYYY-MM-DD`, the form `eol_db` compares against.
+pub(crate) fn today() -> String {
+    chrono::Utc::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// endoflife.date product name for a banner product token, where one exists.
+///
+/// Absent upstream, so deliberately unmapped: `openssh`, `lighttpd`,
+/// `microsoft-iis`, `openresty`, `miniserv` (Webmin). Tracked upstream but
+/// unmapped because no row is embedded for them: `mysql`, `mariadb`, `redis`
+/// — those versions come from `database.rs`, which does not call `eol_db`.
+pub(crate) fn eol_product(token: &str) -> Option<&'static str> {
+    match token {
+        "nginx" => Some("nginx"),
+        "apache" | "apache-httpd" | "httpd" => Some("apache-http-server"),
+        "jetty" => Some("eclipse-jetty"),
+        "openssl" => Some("openssl"),
+        "python" => Some("python"),
+        "php" | "php-fpm" => Some("php"),
         _ => None,
     }
 }
 
-/// Finding if the SSH banner indicates an EOL Debian/Ubuntu release.
-pub fn check_os_eol(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
-    let lower = banner.to_lowercase();
-
-    if lower.contains("debian") {
-        let deb_idx = lower.find("+deb")?;
-        let after_deb = &lower[deb_idx + 4..];
-        let version_str: String = after_deb.chars().take_while(char::is_ascii_digit).collect();
-        let version: u32 = version_str.parse().ok()?;
-
-        let (codename, eol_date) = debian_version_info(version);
-        if is_date_past(eol_date) {
-            let name = codename.unwrap_or("unknown");
-            return Some(
-                Finding::new(
-                    "services",
-                    &format!("End-of-life OS on {ip}:{port}"),
-                    &format!(
-                        "SSH banner indicates Debian {version} {name} which reached end-of-life \
-                         on {eol_date}. EOL operating systems receive no security patches. \
-                         Banner: {banner}"
-                    ),
-                    Severity::High,
-                )
-                .with_ip(ip)
-                .with_port(port)
-                .with_service("SSH")
-                .with_cwe("CWE-1104"),
-            );
-        }
-        return None;
+/// Sentence naming a still-supported branch of `product`, from `eol_db`.
+///
+/// Deliberately not phrased as "upgrade to X" unless upstream supports exactly
+/// one branch. Where several are supported at once the right target depends on
+/// the track the host is on — nginx keeps mainline and stable alive together,
+/// so naming the newest would push a stable install onto mainline.
+pub(crate) fn upgrade_target(product: &str) -> String {
+    let Some(current) = eol_db::current(product) else {
+        return String::new();
+    };
+    let release = current
+        .latest
+        .map_or_else(String::new, |latest| format!(" (latest {latest})"));
+    let cycle = current.cycle;
+    match (current.is_lts, current.other_supported) {
+        (true, _) => format!(" Upstream's long-term-support branch is {cycle}{release}."),
+        (false, true) => format!(
+            " The newest branch upstream still supports is {cycle}{release}; older branches \
+             are supported too, so move to the newest release on the track you are on."
+        ),
+        (false, false) => format!(" The only branch upstream still supports is {cycle}{release}."),
     }
-
-    if lower.contains("ubuntu") {
-        let (major, minor) = extract_ssh_version(banner)?;
-        let (release, codename, eol_date) = ubuntu_from_openssh(major, minor)?;
-        if is_date_past(eol_date) {
-            return Some(
-                Finding::new(
-                    "services",
-                    &format!("End-of-life OS on {ip}:{port}"),
-                    &format!(
-                        "SSH banner indicates Ubuntu {release} {codename} which reached \
-                         end-of-life on {eol_date}. EOL operating systems receive no \
-                         security patches. Banner: {banner}"
-                    ),
-                    Severity::High,
-                )
-                .with_ip(ip)
-                .with_port(port)
-                .with_service("SSH")
-                .with_cwe("CWE-1104"),
-            );
-        }
-        return None;
-    }
-
-    None
 }
 
-/// Check if a YYYY-MM-DD date is in the past.
-fn is_date_past(date_str: &str) -> bool {
-    let parts: Vec<&str> = date_str.split('-').collect();
-    if parts.len() != 3 {
-        return false;
+/// End-of-life sentence for `product` at `version`, or `None` while supported.
+pub(crate) fn eol_summary(product: &str, version: &str) -> Option<String> {
+    let entry = eol_db::lookup(product, version)?;
+    if !eol_db::is_eol_on(entry, &today()) {
+        return None;
     }
-    let (Ok(y), Ok(m), Ok(d)) = (
-        parts[0].parse::<i32>(),
-        parts[1].parse::<u32>(),
-        parts[2].parse::<u32>(),
-    ) else {
-        return false;
-    };
-
-    chrono::NaiveDate::from_ymd_opt(y, m, d)
-        .is_some_and(|eol| eol < chrono::Utc::now().date_naive())
+    let ended = entry.eol_from.map_or_else(
+        || {
+            format!(
+                "{product} {} is flagged end-of-life upstream with no date published",
+                entry.cycle
+            )
+        },
+        |date| format!("{product} {} reached end-of-life on {date}", entry.cycle),
+    );
+    Some(format!(
+        "{ended} (endoflife.date snapshot {}).{} A distribution backport can still be \
+         patching a cycle upstream calls dead.",
+        eol_db::EOL_SNAPSHOT,
+        upgrade_target(product),
+    ))
 }
 
 /// ASUS `AyySSHush` backdoor listener port (CVE-2023-39780, KEV 2025-06-02).
@@ -1425,9 +1572,12 @@ fn parse_version_numbers(version: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Known EOL / vulnerable version ranges per product; `None` if acceptable or unknown.
+///
+/// Hand-coded rules carry the CVE detail; anything they pass falls through to
+/// the `eol_db` table, which is the only source of support dates.
 #[allow(clippy::too_many_lines)]
 pub fn check_server_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
-    match sv.product.as_str() {
+    let hand_coded = match sv.product.as_str() {
         "nginx" => check_nginx_version(sv),
         "apache" => check_apache_version(sv),
         "lighttpd" => check_lighttpd_version(sv),
@@ -1447,7 +1597,20 @@ pub fn check_server_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
         "miniserv" => check_miniserv_version(sv),
         "jetty" => check_jetty_version(sv),
         _ => None,
-    }
+    };
+    hand_coded.or_else(|| check_eol_table(sv))
+}
+
+/// End-of-life straight from `eol_db`, for versions no hand-coded rule caught.
+fn check_eol_table(sv: &ServerVersion) -> Option<ServerVersionIssue> {
+    let product = eol_product(&sv.product)?;
+    let summary = eol_summary(product, &format!("{}.{}.{}", sv.major, sv.minor, sv.patch))?;
+    Some(ServerVersionIssue {
+        severity: Severity::Medium,
+        description: format!("{summary} Banner: {}", sv.raw),
+        cwe: Some("CWE-1104"),
+        cve_refs: Vec::new(),
+    })
 }
 
 /// Issue found for a specific server version.
@@ -1478,9 +1641,9 @@ fn check_nginx_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
                 Severity::Medium
             },
             description: format!(
-                "nginx {} is end-of-life. Current stable is 1.26.x. EOL versions \
-                 do not receive security patches.",
-                sv.raw
+                "nginx {} is end-of-life; EOL branches do not receive security patches.{}",
+                sv.raw,
+                upgrade_target("nginx")
             ),
             cwe: Some("CWE-1104"),
             cve_refs: refs,
@@ -1519,8 +1682,9 @@ fn check_apache_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
             return Some(ServerVersionIssue {
                 severity: Severity::Medium,
                 description: format!(
-                    "Apache {} has known vulnerabilities. Current stable is 2.4.62+.",
-                    sv.raw
+                    "Apache {} has known vulnerabilities.{}",
+                    sv.raw,
+                    upgrade_target("apache-http-server")
                 ),
                 cwe: Some("CWE-1104"),
                 cve_refs: refs,
@@ -1535,9 +1699,10 @@ fn check_lighttpd_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     if sv.major == 1 && sv.minor == 4 && sv.patch < 56 {
         return Some(ServerVersionIssue {
             severity: Severity::Medium,
+            // endoflife.date does not track lighttpd, so no dated claim is made here.
             description: format!(
                 "lighttpd {} is outdated. Versions < 1.4.56 are vulnerable to \
-                 CVE-2022-22707 (use-after-free). Current stable is 1.4.76+.",
+                 CVE-2022-22707 (use-after-free). Upgrade to the latest 1.4.x release.",
                 sv.raw
             ),
             cwe: Some("CWE-416"),
@@ -1584,10 +1749,13 @@ fn check_openresty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     if sv.major == 1 && sv.minor < 19 {
         return Some(ServerVersionIssue {
             severity: Severity::Medium,
+            // endoflife.date does not track OpenResty; the bundled nginx branch is
+            // what the table can speak to.
             description: format!(
-                "OpenResty {} bundles an outdated nginx version. \
-                 Current stable is 1.25.x. Upgrade to receive security patches.",
-                sv.raw
+                "OpenResty {} bundles an outdated nginx branch.{} Upgrade to receive \
+                 security patches.",
+                sv.raw,
+                upgrade_target("nginx")
             ),
             cwe: Some("CWE-1104"),
             cve_refs: Vec::new(),
@@ -1602,9 +1770,10 @@ fn check_miniserv_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     if webmin_version < 1990 {
         return Some(ServerVersionIssue {
             severity: Severity::High,
+            // endoflife.date does not track Webmin, so no "current version" claim.
             description: format!(
                 "Webmin/MiniServ {} is outdated. Versions before 1.990 are vulnerable \
-                 to CVE-2022-0824 (authenticated RCE). Current stable is 2.1+.",
+                 to CVE-2022-0824 (authenticated RCE). Upgrade to a current Webmin release.",
                 sv.raw
             ),
             cwe: Some("CWE-78"),
@@ -1629,8 +1798,9 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
             severity: Severity::Medium,
             description: format!(
                 "Jetty {} is end-of-life. The 9.x branch no longer receives \
-                 security updates. Upgrade to Jetty 12.x.",
-                sv.raw
+                 security updates.{}",
+                sv.raw,
+                upgrade_target("eclipse-jetty")
             ),
             cwe: Some("CWE-1104"),
             cve_refs: refs,
@@ -1639,8 +1809,41 @@ fn check_jetty_version(sv: &ServerVersion) -> Option<ServerVersionIssue> {
     None
 }
 
-/// Finding for a `Server` header: version issue if known, else Info disclosure.
-fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
+/// EOL findings for secondary `name/version` tokens in a `Server` header.
+///
+/// `Apache/2.4.6 (CentOS) OpenSSL/1.0.2k PHP/5.4.45` — the leading token is
+/// `check_server_version`'s, so it is skipped here.
+fn check_header_components(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> {
+    server
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|token| {
+            let (name, version) = token.split_once('/')?;
+            let product = eol_product(&name.to_ascii_lowercase())?;
+            let summary = eol_summary(product, version)?;
+            Some(
+                Finding::new(
+                    "services",
+                    &format!("End-of-life {product} component on {ip}:{port}"),
+                    &format!("The Server header advertises {token}. {summary} Header: {server}"),
+                    Severity::Medium,
+                )
+                .with_ip(ip)
+                .with_port(port)
+                .with_service("HTTP")
+                .with_confidence(Confidence::Probable)
+                .with_cwe("CWE-1104")
+                .with_evidence(server),
+            )
+        })
+        .collect()
+}
+
+/// Findings for a `Server` header: version issue if known, else Info disclosure,
+/// plus any end-of-life component named in the rest of the header.
+fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> {
+    let mut findings = check_header_components(ip, port, server);
+
     if let Some(sv) = parse_server_header(server)
         && let Some(issue) = check_server_version(&sv)
     {
@@ -1662,18 +1865,23 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Finding {
             finding = finding.with_references(issue.cve_refs);
         }
 
-        return finding;
+        findings.insert(0, finding);
+        return findings;
     }
 
-    Finding::new(
-        "services",
-        &format!("HTTP server version disclosure on {ip}:{port}"),
-        &format!("Server header: {server}"),
-        Severity::Info,
-    )
-    .with_ip(ip)
-    .with_port(port)
-    .with_service("HTTP")
+    findings.insert(
+        0,
+        Finding::new(
+            "services",
+            &format!("HTTP server version disclosure on {ip}:{port}"),
+            &format!("Server header: {server}"),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("HTTP"),
+    );
+    findings
 }
 
 /// Heuristic: is this port likely serving HTTP?
@@ -1741,7 +1949,7 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
             }
         } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
             if let Some(server) = grab_http_server(ip, port).await {
-                findings.push(classify_http_server(ip, port, &server));
+                findings.extend(classify_http_server(ip, port, &server));
             }
         } else {
             // Unknown port: plain banner grab
@@ -1861,7 +2069,7 @@ impl Scanner for ServicesScanner {
 
             for &port in HTTP_PORTS {
                 if let Some(server) = grab_http_server(ip, port).await {
-                    findings.push(classify_http_server(ip, port, &server));
+                    findings.extend(classify_http_server(ip, port, &server));
                 }
             }
         }
@@ -1979,7 +2187,8 @@ mod tests {
     #[test]
     fn test_classify_http_server_eol_nginx() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 80, "nginx/1.18.0");
+        let findings = classify_http_server(ip, 80, "nginx/1.18.0");
+        let finding = &findings[0];
         // nginx 1.18 is EOL → now correctly Medium+
         assert!(finding.severity >= Severity::Medium);
         assert_eq!(finding.scanner, "services");
@@ -1990,16 +2199,141 @@ mod tests {
     #[test]
     fn test_classify_http_server_current_nginx() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 80, "nginx/1.26.0");
-        // Current version → Info disclosure only
-        assert_eq!(finding.severity, Severity::Info);
+        // The newest supported branch comes from the table, so this test does not
+        // go stale when the table is regenerated.
+        let latest = eol_db::current("nginx").and_then(|c| c.latest).unwrap();
+        let findings = classify_http_server(ip, 80, &format!("nginx/{latest}"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    /// The claim this table replaced: nginx 1.26.x was hard-coded as "current stable".
+    #[test]
+    fn test_classify_http_server_nginx_126_is_eol() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = classify_http_server(ip, 80, "nginx/1.26.0");
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert!(
+            findings[0]
+                .description
+                .contains("end-of-life on 2025-04-23")
+        );
+    }
+
+    /// Secondary `Server` tokens are joined to the table independently.
+    #[test]
+    fn test_classify_http_server_openssl_component() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let findings = classify_http_server(ip, 443, "Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips");
+        let openssl = findings
+            .iter()
+            .find(|f| f.title.contains("openssl"))
+            .expect("openssl component finding");
+        assert_eq!(openssl.severity, Severity::Medium);
+        assert!(openssl.description.contains("openssl 1.0.2"));
+        assert_eq!(openssl.confidence, Confidence::Probable);
     }
 
     #[test]
     fn test_classify_http_server_empty() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 8080, "");
-        assert_eq!(finding.severity, Severity::Info);
+        let findings = classify_http_server(ip, 8080, "");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_eol_product_mapping() {
+        assert_eq!(eol_product("apache"), Some("apache-http-server"));
+        assert_eq!(eol_product("jetty"), Some("eclipse-jetty"));
+        assert_eq!(eol_product("nginx"), Some("nginx"));
+        // Not tracked by endoflife.date, so deliberately unmapped.
+        assert_eq!(eol_product("lighttpd"), None);
+        assert_eq!(eol_product("microsoft-iis"), None);
+        assert_eq!(eol_product("miniserv"), None);
+        // Tracked upstream, but database.rs owns these versions and does not
+        // call eol_db, so no rows are embedded and the token stays unmapped.
+        assert_eq!(eol_product("mysql"), None);
+        assert_eq!(eol_product("redis"), None);
+    }
+
+    /// A mapped token must have rows behind it, or it is a silent dead end.
+    #[test]
+    fn test_every_mapped_product_has_rows() {
+        for token in [
+            "nginx",
+            "apache",
+            "apache-httpd",
+            "httpd",
+            "jetty",
+            "openssl",
+            "python",
+            "php",
+            "php-fpm",
+        ] {
+            let product = eol_product(token).unwrap_or_else(|| panic!("{token} unmapped"));
+            assert!(
+                !eol_db::product_cycles(product).is_empty(),
+                "{token} maps to {product}, which has no rows"
+            );
+        }
+    }
+
+    /// The remediation sentence declines to pick a branch when several are live.
+    #[test]
+    fn test_upgrade_target_does_not_recommend_mainline() {
+        let nginx = upgrade_target("nginx");
+        assert!(nginx.contains("older branches"), "{nginx}");
+        assert!(nginx.contains("track you are on"), "{nginx}");
+        // OpenSSL marks an LTS branch, so that one is named outright.
+        let openssl = upgrade_target("openssl");
+        assert!(
+            openssl.contains("long-term-support branch is 3.5"),
+            "{openssl}"
+        );
+        assert!(upgrade_target("not-a-product").is_empty());
+    }
+
+    /// Ubuntu's `eoas_from` is hardware enablement, so no tier keys on it:
+    /// Jammy is past that date and still fully supported.
+    #[test]
+    fn test_check_os_eol_ubuntu_jammy_silent_past_eoas() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let jammy = eol_db::cycle("ubuntu", "22.04").expect("ubuntu 22.04");
+        assert!(jammy.eoas_from.is_some_and(|d| d <= today().as_str()));
+        assert!(!eol_db::is_eol_on(jammy, &today()));
+        assert!(check_os_eol(ip, 22, "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.13").is_none());
+    }
+
+    #[test]
+    fn test_eol_summary_names_date_and_upgrade_target() {
+        let summary = eol_summary("php", "7.4.33").expect("php 7.4 is EOL");
+        assert!(summary.contains("php 7.4 reached end-of-life on 2022-11-28"));
+        assert!(summary.contains("still supports"), "{summary}");
+        // A supported branch yields nothing at all.
+        let latest = eol_db::current("php").and_then(|c| c.latest).unwrap();
+        assert!(eol_summary("php", latest).is_none());
+        // Unknown product or version: no claim.
+        assert!(eol_summary("nginx", "99.99").is_none());
+        assert!(eol_summary("not-a-product", "1.0").is_none());
+    }
+
+    #[test]
+    fn test_upgrade_target_is_table_derived() {
+        let current = eol_db::current("nginx").expect("nginx current");
+        assert!(upgrade_target("nginx").contains(current.cycle));
+        assert_eq!(upgrade_target("not-a-product"), "");
+    }
+
+    #[test]
+    fn test_check_header_components_skips_the_leading_token() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // nginx is the leading token: check_server_version's job, not this one.
+        assert!(check_header_components(ip, 80, "nginx/1.18.0").is_empty());
+        assert_eq!(
+            check_header_components(ip, 80, "Apache/2.4.68 PHP/5.6.40").len(),
+            1
+        );
     }
 
     #[test]
@@ -2381,8 +2715,19 @@ mod tests {
 
     #[test]
     fn test_check_nginx_current() {
-        let sv = parse_server_header("nginx/1.26.0").unwrap();
+        let latest = eol_db::current("nginx").and_then(|c| c.latest).unwrap();
+        let sv = parse_server_header(&format!("nginx/{latest}")).unwrap();
         assert!(check_server_version(&sv).is_none());
+    }
+
+    /// The table catches branches the hand-coded `< 1.22` rule lets through.
+    #[test]
+    fn test_check_nginx_table_catches_post_122_eol() {
+        let sv = parse_server_header("nginx/1.26.0").unwrap();
+        let issue = check_server_version(&sv).unwrap();
+        assert_eq!(issue.severity, Severity::Medium);
+        assert_eq!(issue.cwe, Some("CWE-1104"));
+        assert!(issue.description.contains("end-of-life on 2025-04-23"));
     }
 
     #[test]
@@ -2471,24 +2816,26 @@ mod tests {
     #[test]
     fn test_classify_http_server_nginx_eol() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 80, "nginx/1.14.2");
-        assert!(finding.severity >= Severity::Medium);
-        assert!(finding.cwe_id.is_some());
+        let findings = classify_http_server(ip, 80, "nginx/1.14.2");
+        assert!(findings[0].severity >= Severity::Medium);
+        assert!(findings[0].cwe_id.is_some());
     }
 
     #[test]
     fn test_classify_http_server_unknown_product() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 80, "SynoHTTP/1.0");
+        let findings = classify_http_server(ip, 80, "SynoHTTP/1.0");
         // Unknown product → plain version disclosure (Info)
-        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
     }
 
     #[test]
     fn test_classify_http_server_no_version() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let finding = classify_http_server(ip, 80, "cloudflare");
-        assert_eq!(finding.severity, Severity::Info);
+        let findings = classify_http_server(ip, 80, "cloudflare");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
     }
 
     // ── SSH version extraction tests ──────────────────────────────────
@@ -2601,7 +2948,8 @@ mod tests {
         let s = result.unwrap();
         assert!(s.contains("Debian 11"));
         assert!(s.contains("Bullseye"));
-        assert!(s.contains("2026-06-30"));
+        // Date is the table's, not a hand-coded one.
+        assert!(s.contains("2026-08-31"), "{s}");
     }
 
     #[test]
@@ -2634,24 +2982,27 @@ mod tests {
         assert!(f.description.contains("Debian 10"));
     }
 
+    /// Trixie is on full security support, so neither tier fires.
     #[test]
-    fn test_check_os_eol_debian_bookworm_not_eol() {
+    fn test_check_os_eol_debian_trixie_not_eol() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        // Debian 12 Bookworm EOL is 2028-06-30 — use a release that is
-        // comfortably in-support so this test is not sensitive to the wall clock.
-        let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u5");
-        assert!(finding.is_none());
+        let trixie = eol_db::cycle("debian", "13").expect("debian 13");
+        // Guard the wall clock: this stays meaningful only until 2028-08-09.
+        assert!(trixie.eoas_from.is_some_and(|d| d > today().as_str()));
+        assert!(check_os_eol(ip, 22, "SSH-2.0-OpenSSH_10.0p1 Debian-8+deb13u1").is_none());
     }
 
     #[test]
-    fn test_check_os_eol_ubuntu_cosmic_eol() {
+    fn test_check_os_eol_ubuntu_bionic_eol() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        // Ubuntu 18.10 Cosmic is EOL (2019-07-18)
+        // 7.6p1-4ubuntu0.3 is bionic; standard security maintenance ended 2023-05-31.
         let finding = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.3");
         assert!(finding.is_some());
         let f = finding.unwrap();
         assert_eq!(f.severity, Severity::High);
-        assert!(f.description.contains("Ubuntu 18.10"));
+        assert!(f.description.contains("Ubuntu 18.04"), "{}", f.description);
+        // The release is inferred from the SSH version, so the finding says so.
+        assert_eq!(f.confidence, Confidence::Inferred);
     }
 
     #[test]
@@ -2671,30 +3022,94 @@ mod tests {
     }
 
     #[test]
-    fn test_debian_version_info() {
-        let (name, eol) = debian_version_info(11);
-        assert_eq!(name, Some("Bullseye"));
-        assert_eq!(eol, "2026-06-30");
+    fn test_debian_release_from_banner() {
+        assert_eq!(
+            debian_release("SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u5"),
+            Some(11)
+        );
+        assert_eq!(debian_release("SSH-2.0-OpenSSH_9.5"), None);
+    }
+
+    /// Codename and EOL date come from the table, not from this file.
+    #[test]
+    fn test_debian_release_dates_come_from_the_table() {
+        let entry = eol_db::lookup("debian", "11").expect("debian 11");
+        assert_eq!(entry.codename, Some("Bullseye"));
+        assert_eq!(entry.eol_from, Some("2026-08-31"));
     }
 
     #[test]
     fn test_ubuntu_from_openssh() {
-        assert_eq!(
-            ubuntu_from_openssh(8, 9),
-            Some(("22.04", "Jammy", "2032-04-30"))
-        );
-        assert_eq!(
-            ubuntu_from_openssh(9, 6),
-            Some(("24.04", "Noble", "2034-04-30"))
-        );
-        assert_eq!(ubuntu_from_openssh(10, 0), None);
+        assert_eq!(ubuntu_from_openssh(8, 9), ["22.04"]);
+        assert_eq!(ubuntu_from_openssh(9, 6), ["24.04"]);
+        // 7.6p1 is bionic (18.04), not cosmic: cosmic released with 7.7p1.
+        assert_eq!(ubuntu_from_openssh(7, 6), ["18.04"]);
+        assert!(ubuntu_from_openssh(10, 0).is_empty());
+        // 8.4p1 and 9.0p1 each shipped in two releases; both candidates are kept.
+        assert_eq!(ubuntu_from_openssh(8, 4), ["21.04", "21.10"]);
+        assert_eq!(ubuntu_from_openssh(9, 0), ["22.10", "23.04"]);
     }
 
+    /// Every mapped release exists in the table, so a hit can always be dated.
     #[test]
-    fn test_is_date_past() {
-        assert!(is_date_past("2020-01-01"));
-        assert!(!is_date_past("2099-12-31"));
-        assert!(!is_date_past("invalid"));
+    fn test_ubuntu_openssh_map_is_covered_by_the_table() {
+        for major in 6..=11 {
+            for minor in 0..=12 {
+                for release in ubuntu_from_openssh(major, minor) {
+                    assert!(
+                        eol_db::lookup("ubuntu", release).is_some(),
+                        "ubuntu {release} missing from the table"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An ambiguous OpenSSH version names both candidates, never one of them.
+    #[test]
+    fn test_check_os_eol_ubuntu_ambiguous_names_both() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let f = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.0p1 Ubuntu-1ubuntu7.4").unwrap();
+        assert_eq!(f.severity, Severity::High);
+        assert!(
+            f.description.contains("Ubuntu 22.10 or 23.04"),
+            "{}",
+            f.description
+        );
+        // 23.04 is the later of the two, so it is the safe claim.
+        assert!(
+            f.description.contains("no later than 2024-01-20"),
+            "{}",
+            f.description
+        );
+        assert_eq!(f.confidence, Confidence::Inferred);
+    }
+
+    /// Debian between its own security-team end and its LTS end is Medium, not High.
+    #[test]
+    fn test_check_os_eol_debian_lts_only_tier() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let bookworm = eol_db::cycle("debian", "12").expect("debian 12");
+        let f = check_os_eol(ip, 22, "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u5");
+        if eol_db::is_eol_on(bookworm, &today()) {
+            // Past the LTS date the High tier takes over; this test then only
+            // asserts that something still fires.
+            assert_eq!(f.expect("debian 12 finding").severity, Severity::High);
+            return;
+        }
+        let eoas = bookworm.eoas_from.expect("debian 12 eoas date");
+        if eoas <= today().as_str() {
+            let f = f.expect("debian 12 LTS-only finding");
+            assert_eq!(f.severity, Severity::Medium);
+            assert!(
+                f.title.contains("security-team support only"),
+                "{}",
+                f.title
+            );
+            assert!(f.description.contains(eoas), "{}", f.description);
+        } else {
+            assert!(f.is_none(), "still on full security support");
+        }
     }
 
     proptest! {
@@ -2786,32 +3201,6 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Strict `YYYY-MM-DD` oracle for `is_date_past`.
-    fn well_formed_date(s: &str) -> bool {
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() != 3 {
-            return false;
-        }
-        let (Ok(year), Ok(month), Ok(day)) = (
-            parts[0].parse::<i32>(),
-            parts[1].parse::<u32>(),
-            parts[2].parse::<u32>(),
-        ) else {
-            return false;
-        };
-        chrono::NaiveDate::from_ymd_opt(year, month, day).is_some()
-    }
-
-    /// Arbitrary strings plus near-miss dates.
-    fn date_like_strategy() -> impl Strategy<Value = String> {
-        prop_oneof![
-            ".*",
-            "[0-9]{1,4}-[0-9a-z]{1,2}-[0-9a-z]{1,2}",
-            "[+\\-]?[0-9]{4}-[0-9]{2}-[0-9]{2}",
-            "[0-9]{4}-[0-9]{2}-[0-9]{2}-?",
-        ]
-    }
-
     fn ymd_strategy() -> impl Strategy<Value = chrono::NaiveDate> {
         (1_i32..=9999, 1_u32..=12, 1_u32..=28)
             .prop_map(|(y, m, d)| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap())
@@ -2823,6 +3212,77 @@ mod prop_tests {
             ".*",
             "(nginx|Apache|lighttpd|Microsoft-IIS|openresty|mini_httpd|MiniServ|Jetty)/[0-9]{1,10}(\\.[0-9]{1,10}){0,3}( \\(.*\\))?",
             "Jetty\\([0-9]{1,10}(\\.[0-9]{1,10}){0,3}\\)",
+        ]
+    }
+
+    /// Banner spellings that `eol_product` maps, paired with the table product.
+    const MAPPED_TOKENS: &[(&str, &str)] = &[
+        ("nginx", "nginx"),
+        ("Apache", "apache-http-server"),
+        ("httpd", "apache-http-server"),
+        ("Jetty", "eclipse-jetty"),
+        ("OpenSSL", "openssl"),
+        ("Python", "python"),
+        ("PHP", "php"),
+    ];
+
+    /// `name/version` tokens built from real table cycles, so the join is
+    /// actually exercised: a bare `".*"` strategy reaches a finding in roughly
+    /// one run in a thousand, which makes any assertion inside the loop vacuous.
+    fn real_tokens() -> Vec<String> {
+        MAPPED_TOKENS
+            .iter()
+            .flat_map(|(token, product)| {
+                eol_db::product_cycles(product).iter().flat_map(move |row| {
+                    // Bare cycle and a patch release on it; both must resolve.
+                    [
+                        format!("{token}/{}", row.cycle),
+                        format!("{token}/{}.3", row.cycle),
+                    ]
+                })
+            })
+            .collect()
+    }
+
+    /// Guards `prop_check_header_components_no_panic` against going vacuous:
+    /// its assertions sit inside `for finding in ...`, so they only mean
+    /// something while the strategy still reaches findings. Measured ~55%.
+    #[test]
+    fn arb_server_header_reaches_findings() {
+        use proptest::test_runner::{Config, TestRunner};
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+        let hits = std::cell::Cell::new(0_u32);
+        runner
+            .run(&arb_server_header(), |server| {
+                if !check_header_components(ip, 443, &server).is_empty() {
+                    hits.set(hits.get() + 1);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(hits.get() > 20, "only {} of 256 samples fired", hits.get());
+    }
+
+    /// `Server`-shaped headers that reach the end-of-life join: a leading
+    /// product token (which the parser skips) followed by real product/version
+    /// pairs, mixed with junk and unmapped products.
+    fn arb_server_header() -> impl Strategy<Value = String> {
+        let token = prop_oneof![
+            6 => prop::sample::select(real_tokens()),
+            1 => (
+                prop::sample::select(vec!["mysql", "redis", "lighttpd", "cowboy"]),
+                "[0-9]{1,2}(\\.[0-9]{1,2}){0,3}",
+            )
+                .prop_map(|(name, version)| format!("{name}/{version}")),
+            1 => "[!-~]{0,12}".prop_map(String::from),
+        ];
+        prop_oneof![
+            1 => any::<String>(),
+            9 => prop::collection::vec(token, 1..5).prop_map(|parts| parts.join(" ")),
         ]
     }
 
@@ -2882,7 +3342,7 @@ mod prop_tests {
             prop_assert_eq!(extract_ssh_version(&banner), Some((major, minor)));
             prop_assert_eq!(
                 parse_ubuntu_version(&banner).is_some(),
-                ubuntu_from_openssh(major, minor).is_some()
+                !ubuntu_from_openssh(major, minor).is_empty()
             );
         }
 
@@ -2948,35 +3408,72 @@ mod prop_tests {
             let _ = check_server_version(&sv);
         }
 
-        /// `is_date_past` never panics and is true only for a well-formed valid date.
+        /// The EOL verdict is monotone in the clock: once EOL, always EOL.
         #[test]
-        fn prop_is_date_past_malformed_is_false(date in date_like_strategy()) {
-            if is_date_past(&date) {
-                prop_assert!(well_formed_date(&date), "{:?}", date);
+        fn prop_eol_verdict_is_monotone_in_time(
+            first in ymd_strategy(),
+            second in ymd_strategy(),
+        ) {
+            let (early, late) = if first <= second { (first, second) } else { (second, first) };
+            for entry in ["1.18", "1.30"].iter().filter_map(|c| eol_db::cycle("nginx", c)) {
+                let early_eol = eol_db::is_eol_on(entry, &early.format("%Y-%m-%d").to_string());
+                let late_eol = eol_db::is_eol_on(entry, &late.format("%Y-%m-%d").to_string());
+                prop_assert!(late_eol || !early_eol);
             }
         }
 
-        /// `is_date_past` is monotone: the earlier date is past whenever the later one is.
+        /// `check_header_components` never panics on arbitrary `Server` headers.
         #[test]
-        fn prop_is_date_past_monotone(first in ymd_strategy(), second in ymd_strategy()) {
-            let (early, late) = if first <= second { (first, second) } else { (second, first) };
-            let early_past = is_date_past(&early.format("%Y-%m-%d").to_string());
-            let late_past = is_date_past(&late.format("%Y-%m-%d").to_string());
-            prop_assert!(early_past || !late_past);
+        fn prop_check_header_components_no_panic(server in arb_server_header()) {
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            for finding in check_header_components(ip, 443, &server) {
+                prop_assert!(finding.title.starts_with("End-of-life "));
+                prop_assert_eq!(finding.severity, Severity::Medium);
+                prop_assert_eq!(finding.cwe_id.as_deref(), Some("CWE-1104"));
+            }
         }
 
-        /// Any date up to year 2000 is past; any date from year 3000 is not.
+        /// Findings only ever name a mapped product, and the first token is never judged.
         #[test]
-        fn prop_is_date_past_bounds(
-            past_year in 1_i32..=2000,
-            future_year in 3000_i32..=9999,
-            month in 1_u32..=12,
-            day in 1_u32..=28,
+        fn prop_check_header_components_only_maps_known_products(
+            server in arb_server_header(),
         ) {
-            let past = format!("{past_year:04}-{month:02}-{day:02}");
-            let future = format!("{future_year:04}-{month:02}-{day:02}");
-            prop_assert!(is_date_past(&past));
-            prop_assert!(!is_date_past(&future));
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            for finding in check_header_components(ip, 443, &server) {
+                let product = finding
+                    .title
+                    .strip_prefix("End-of-life ")
+                    .and_then(|rest| rest.split(' ').next())
+                    .unwrap_or("");
+                prop_assert!(
+                    !eol_db::product_cycles(product).is_empty(),
+                    "{}",
+                    finding.title
+                );
+            }
+        }
+
+        /// The first token names the server itself and is judged by
+        /// `check_server_version`, not here — so a one-token header is silent
+        /// however end-of-life that token is.
+        #[test]
+        fn prop_check_header_components_skips_the_first_token(
+            server in arb_server_header(),
+        ) {
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            let Some(leading) = server.split_whitespace().next() else {
+                return Ok(());
+            };
+            prop_assert!(check_header_components(ip, 443, leading).is_empty(), "{leading}");
+        }
+
+        /// `check_os_eol` never panics on arbitrary Debian/Ubuntu-flavoured banners.
+        #[test]
+        fn prop_check_os_eol_no_panic(banner in ".*") {
+            let ip: IpAddr = "192.168.1.1".parse().unwrap();
+            let _ = check_os_eol(ip, 22, &banner);
+            let _ = check_os_eol(ip, 22, &format!("SSH-2.0-OpenSSH_9.2p1 Debian-{banner}"));
+            let _ = check_os_eol(ip, 22, &format!("SSH-2.0-OpenSSH_{banner} Ubuntu"));
         }
     }
 }

@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-Roadmap wave 1 (see docs/ROADMAP.md).
+Roadmap waves 1 and 2 (see docs/ROADMAP.md).
+
+- mDNS discovery asks for the consumer service set (113 types, batched) and
+  interprets TXT records; Home Assistant's generated discovery tables
+  (Apache-2.0: 164 zeroconf, 89 SSDP, 103 MAC-only DHCP matchers, 71 HomeKit
+  models) feed device identification above the OUI tier; Matter devices and
+  Thread border routers are reported with their commissioning state.
+- endoflife.date (MIT) product cycles replace the hand-coded "current stable"
+  version claims in the services and HTTP audits.
+- nuclei detection templates (MIT, inert send payloads only) identify products
+  from banners and handshakes as a new read-only scanner.
 
 - Six new scanners: Google Cast, PaperCut NG/MF (CVE-2026-81578/82078), TP-Link
   Kasa (unauthenticated local control on 9999), Tuya local protocol, Hikvision

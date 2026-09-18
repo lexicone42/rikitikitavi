@@ -3,6 +3,7 @@ use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::config::ExclusionSet;
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, ScanContext};
 use rikitikitavi_network::MdnsService;
+use rikitikitavi_network::mdns::{MdnsTxt, ThreadStateBitmap};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -10,6 +11,9 @@ use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 use crate::Scanner;
+use crate::ha_discovery_db::{
+    SsdpFields, consensus_device_type, homekit_domain, ssdp_domains, ssdp_hits, zeroconf_domains,
+};
 use crate::http_util::unauthenticated_probe_client;
 
 // ── UPnP device description parsing ─────────────────────────────────
@@ -21,6 +25,7 @@ pub struct UpnpDeviceInfo {
     pub manufacturer: Option<String>,
     pub model_name: Option<String>,
     pub model_number: Option<String>,
+    pub model_description: Option<String>,
     pub serial_number: Option<String>,
     pub firmware_version: Option<String>,
     pub device_type: Option<String>,
@@ -47,9 +52,9 @@ pub fn parse_upnp_device_xml(xml: &str) -> UpnpDeviceInfo {
         manufacturer: extract_xml_tag(xml, "manufacturer"),
         model_name: extract_xml_tag(xml, "modelName"),
         model_number: extract_xml_tag(xml, "modelNumber"),
+        model_description: extract_xml_tag(xml, "modelDescription"),
         serial_number: extract_xml_tag(xml, "serialNumber"),
-        firmware_version: extract_xml_tag(xml, "firmwareVersion")
-            .or_else(|| extract_xml_tag(xml, "modelDescription")),
+        firmware_version: extract_xml_tag(xml, "firmwareVersion"),
         device_type: extract_xml_tag(xml, "deviceType"),
     }
 }
@@ -134,7 +139,30 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
         .device_type
         .as_deref()
         .map_or(DeviceType::Unknown, upnp_type_to_device_type);
-    let device_type = manufacturer_override_device_type(manufacturer, model, base_type);
+    let mut device_type = manufacturer_override_device_type(manufacturer, model, base_type);
+
+    // HA's SSDP table names a product family where the URN names only a role.
+    let hits = ssdp_hits(&SsdpFields {
+        device_type: info.device_type.as_deref(),
+        manufacturer: info.manufacturer.as_deref(),
+        model_name: info.model_name.as_deref(),
+        model_description: info.model_description.as_deref(),
+        ..SsdpFields::default()
+    });
+    if !hits.is_empty() {
+        let ha_domains: Vec<&str> = hits.iter().map(|h| h.domain).collect();
+        let ha_type = consensus_device_type(&ha_domains);
+        // A vendor-only matcher (`wemo` on Belkin, `axis` on AXIS) covers the
+        // whole catalogue, so it must not retype a device the URN already
+        // classed — a Belkin IGD is a router, not a smart plug.
+        let may_retype = device_type == DeviceType::Unknown || hits.iter().any(|h| h.specific);
+        if ha_type != DeviceType::Unknown && may_retype {
+            device_type = ha_type;
+        }
+        hint = hint.with_device_subtype(ha_domains.join("/"));
+        desc_parts.push(format!("Integration match: {}", ha_domains.join(", ")));
+    }
+
     if device_type != DeviceType::Unknown {
         hint = hint.with_device_type(device_type);
     }
@@ -264,13 +292,25 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
         |loc| format!("UPnP/SSDP service on {ip}: {svc_type} at {loc}"),
     );
 
+    // 21 of HA's 91 SSDP matchers are `st`-only, so they fire on the M-SEARCH
+    // response alone, without fetching the device description.
+    let ha_domains = ssdp_domains(&SsdpFields {
+        st: service.service_type.as_deref(),
+        ..SsdpFields::default()
+    });
+    let ha_note = if ha_domains.is_empty() {
+        String::new()
+    } else {
+        format!(" Integration match: {}.", ha_domains.join(", "))
+    };
+
     let mut finding = Finding::new(
         "mdns",
         &title,
         &format!(
             "UPnP/SSDP service discovered on {ip}. Server: {server_info}, \
              Type: {svc_type}. UPnP services can expose device control \
-             interfaces and automatically open ports on routers."
+             interfaces and automatically open ports on routers.{ha_note}"
         ),
         severity,
     )
@@ -278,7 +318,16 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     .with_service("SSDP")
     .with_cwe("CWE-284");
 
-    if svc_type.contains("InternetGatewayDevice") {
+    let ha_type = consensus_device_type(&ha_domains);
+    if !ha_domains.is_empty() {
+        let mut hint = DeviceHint::new().with_device_subtype(ha_domains.join("/"));
+        if ha_type == DeviceType::Unknown && svc_type.contains("InternetGatewayDevice") {
+            hint = hint.with_device_type(DeviceType::Router);
+        } else if ha_type != DeviceType::Unknown {
+            hint = hint.with_device_type(ha_type);
+        }
+        finding = finding.with_device_hint(hint);
+    } else if svc_type.contains("InternetGatewayDevice") {
         finding = finding.with_device_hint(DeviceHint::new().with_device_type(DeviceType::Router));
     }
 
@@ -287,6 +336,10 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
 
 /// SSDP receive window after the M-SEARCH is sent.
 const SSDP_DEADLINE: Duration = Duration::from_secs(3);
+
+/// mDNS receive budget. The query list is ~130 service types sent in batches, so
+/// this is spread across the batches rather than spent on one burst.
+const MDNS_DISCOVERY_SECS: u64 = 6;
 
 /// Maximum SSDP responses collected per scan.
 const SSDP_MAX_RESPONSES: usize = 256;
@@ -341,18 +394,322 @@ async fn collect_ssdp_responses(
 
 // ── mDNS service classification ─────────────────────────────────────
 
+/// Product identity for an mDNS service: HA's zeroconf table plus interpreted TXT.
+struct MdnsIdentity {
+    device_type: DeviceType,
+    /// HA integration domains, `/`-joined; `None` when nothing matched.
+    subtype: Option<String>,
+    /// Hostname, for the `DeviceHint`.
+    hostname: Option<String>,
+    /// Interpreted well-known TXT keys.
+    txt: MdnsTxt,
+}
+
+impl MdnsIdentity {
+    fn of(service: &MdnsService) -> Self {
+        let txt = MdnsTxt::parse(&service.txt_records);
+        // HA matches the full instance name, trailing dot included.
+        let full_name = format!("{}.{}.", service.name, service.service_type);
+        let mut domains = zeroconf_domains(&service.service_type, &full_name, &service.txt_records);
+
+        // A HomeKit accessory names its product in `md`.
+        if service.service_type.contains("_hap.")
+            && let Some(model) = &txt.model
+            && let Some(domain) = homekit_domain(model)
+            && !domains.contains(&domain)
+        {
+            domains.push(domain);
+        }
+
+        Self {
+            device_type: consensus_device_type(&domains),
+            subtype: (!domains.is_empty()).then(|| domains.join("/")),
+            hostname: (!service.hostname.is_empty()).then(|| service.hostname.clone()),
+            txt,
+        }
+    }
+
+    /// A hint carrying hostname, model and HA identity; `fallback` is used only
+    /// when the HA tables did not agree on a type.
+    fn hint(&self, fallback: DeviceType) -> DeviceHint {
+        let mut hint = DeviceHint::new();
+        if let Some(hostname) = &self.hostname {
+            hint = hint.with_hostname(hostname);
+        }
+        if let Some(model) = &self.txt.model {
+            hint = hint.with_model(model);
+        }
+        if let Some(subtype) = &self.subtype {
+            hint = hint.with_device_subtype(subtype);
+        }
+        let device_type = if self.device_type == DeviceType::Unknown {
+            fallback
+        } else {
+            self.device_type
+        };
+        if device_type == DeviceType::Unknown {
+            hint
+        } else {
+            hint.with_device_type(device_type)
+        }
+    }
+
+    /// Sentence naming the matching integrations, or empty.
+    fn note(&self) -> String {
+        self.subtype
+            .as_ref()
+            .map_or_else(String::new, |s| format!(" Integration match: {s}."))
+    }
+}
+
+/// The Matter identity TXT keys, as a sentence fragment.
+fn matter_advertised(txt: &MdnsTxt) -> String {
+    let mut details = Vec::new();
+    if let Some(vp) = &txt.vendor_product {
+        details.push(format!("vendor+product {vp}"));
+    }
+    if let Some(dt) = &txt.device_type_id {
+        details.push(format!("device type {dt}"));
+    }
+    if let Some(dn) = &txt.device_name {
+        details.push(format!("name {dn}"));
+    }
+    if let Some(d) = &txt.discriminator {
+        details.push(format!("discriminator {d}"));
+    }
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" Advertised: {}.", details.join(", "))
+    }
+}
+
+/// Matter commissioner advertisement (`_matterd._udp`).
+///
+/// Commissioner discovery, not commissionable-node discovery: the record carries
+/// no `CM` key, so it says nothing about any commissioning window.
+fn classify_matter_commissioner(
+    service: &MdnsService,
+    identity: &MdnsIdentity,
+    base_desc: &str,
+) -> Finding {
+    let (ip, port) = (service.ip, service.port);
+    let display_name = display_name(service);
+    let details = matter_advertised(&identity.txt);
+
+    Finding::new(
+        "mdns",
+        &format!("Matter commissioner: {display_name} on {ip}:{port}"),
+        &format!(
+            "{base_desc} This host advertises itself as a Matter commissioner: it \
+             offers to put new devices onto a fabric, so it holds that fabric's \
+             credentials. Commissioner discovery carries no commissioning-mode key; \
+             an open window is advertised by the joining device on \
+             _matterc._udp.{details}"
+        ),
+        Severity::Info,
+    )
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("Matter")
+    .with_device_hint(identity.hint(DeviceType::Hub))
+}
+
+/// Matter commissionable-node advertisement (`_matterc._udp`).
+///
+/// Reports posture only: no commissioning is attempted, and an open window is an
+/// exposed authentication surface (PASE still requires the setup passcode), not
+/// an open join.
+fn classify_matter_commissionable(
+    service: &MdnsService,
+    identity: &MdnsIdentity,
+    base_desc: &str,
+) -> Finding {
+    let (ip, port) = (service.ip, service.port);
+    let display_name = display_name(service);
+    let txt = &identity.txt;
+    let details = matter_advertised(txt);
+
+    // `CM` is an enum, not a flag set: 1 = Basic (static factory passcode),
+    // 2 = Enhanced (dynamic, time-boxed), 3 = joint fabric. Any non-zero value
+    // means a window is open. Absent is not the same as zero.
+    let Some(mode) = txt.commissioning_mode.filter(|&m| m != 0) else {
+        let window = if txt.commissioning_mode.is_some() {
+            "its commissioning window closed (CM=0)"
+        } else {
+            "no commissioning mode advertised (no CM key), so no window is asserted \
+             either way"
+        };
+        return Finding::new(
+            "mdns",
+            &format!("Matter commissionable device: {display_name} on {ip}:{port}"),
+            &format!(
+                "{base_desc} Matter node advertising commissionable discovery with \
+                 {window}.{details}"
+            ),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("Matter")
+        .with_device_hint(identity.hint(DeviceType::IoT));
+    };
+
+    let mode_note = match mode {
+        1 => {
+            "CM=1 is Basic mode: the window opens against the static factory \
+             passcode printed on the device, which never changes"
+        }
+        2 => {
+            "CM=2 is Enhanced mode: the passcode is generated per window and the \
+             window is time-boxed"
+        }
+        _ => "the commissioning mode is a value this build does not recognise",
+    };
+
+    Finding::new(
+        "mdns",
+        &format!("Matter commissioning window open on {ip}:{port}"),
+        &format!(
+            "{base_desc} {display_name} is advertising an open Matter commissioning \
+             window (CM={mode}). {mode_note}. Joining still requires the setup \
+             passcode via PASE/SPAKE2+, so this is an exposed authentication \
+             surface rather than an open join, but the window should be closed \
+             once commissioning is finished.{details}"
+        ),
+        Severity::Low,
+    )
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("Matter")
+    .with_cwe("CWE-287")
+    .with_device_hint(identity.hint(DeviceType::IoT))
+}
+
+/// Thread border-agent advertisement (`_meshcop._udp`, `_meshcop-e._udp`).
+fn classify_thread_border_agent(
+    service: &MdnsService,
+    identity: &MdnsIdentity,
+    base_desc: &str,
+) -> Finding {
+    let (ip, port) = (service.ip, service.port);
+    let display_name = display_name(service);
+    let txt = &identity.txt;
+
+    // `_meshcop-e` is published with an empty TXT record, so identity fields
+    // have to come from the sibling `_meshcop` service.
+    if service.service_type.contains("_meshcop-e._udp") {
+        return Finding::new(
+            "mdns",
+            &format!("Thread ephemeral-key commissioning session on {ip}:{port}"),
+            &format!(
+                "{base_desc} A Thread border agent at {ip} is advertising an \
+                 ephemeral-key commissioning session. The window defaults to two \
+                 minutes (ten at most) and stops on the first failed connection, so \
+                 a scheduled scan catching one usually means commissioning is \
+                 happening right now. This record carries no TXT data; vendor and \
+                 network fields come from the sibling _meshcop service."
+            ),
+            Severity::Info,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("Thread")
+        .with_cwe("CWE-287")
+        .with_device_hint(identity.hint(DeviceType::Hub));
+    }
+
+    let mut details = Vec::new();
+    if let Some(vendor) = &txt.manufacturer {
+        details.push(format!("vendor {vendor}"));
+    }
+    if let Some(model) = &txt.model {
+        details.push(format!("model {model}"));
+    }
+    if let Some(nn) = &txt.thread_network_name {
+        details.push(format!("network name {nn}"));
+    }
+    if let Some(xp) = &txt.thread_extended_pan_id {
+        details.push(format!("extended PAN id {xp}"));
+    }
+    if let Some(omr) = &txt.thread_omr_prefix {
+        details.push(format!("off-mesh-routable prefix {omr}"));
+    }
+    let state = txt
+        .thread_state_bitmap
+        .as_deref()
+        .and_then(ThreadStateBitmap::parse);
+    if let Some(sb) = &txt.thread_state_bitmap {
+        details.push(format!("state bitmap {sb}"));
+    }
+    if let Some(tv) = &txt.thread_version {
+        details.push(format!("Thread version {tv}"));
+    }
+    let details = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" Advertised in the clear: {}.", details.join(", "))
+    };
+
+    // The `sb` bits carry the commissioning posture; without them the severity
+    // would rest on the network-identity disclosure alone.
+    let posture = state.map_or_else(String::new, |s| {
+        let epskc = if s.epskc_supported {
+            " It also accepts ephemeral-key commissioning."
+        } else {
+            ""
+        };
+        let path = if s.commissioning_path_open() {
+            " Interface and connection mode together mean a commissioner could \
+             open a session against it now."
+        } else {
+            ""
+        };
+        format!(
+            " Its state bitmap decodes to: Thread interface {}, commissioner \
+             connection via {}.{path}{epskc}",
+            s.interface_status_name(),
+            s.connection_mode_name(),
+        )
+    });
+
+    Finding::new(
+        "mdns",
+        &format!("Thread border router: {display_name} on {ip}:{port}"),
+        &format!(
+            "{base_desc} This host is a Thread border router: it bridges a Thread \
+             mesh of low-power devices onto this network. Its border-agent record \
+             discloses the Thread network's identity and its routable IPv6 prefix \
+             to anyone on the LAN, which is enough to enumerate and address the \
+             mesh behind it.{posture}{details}"
+        ),
+        Severity::Low,
+    )
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("Thread")
+    .with_cwe("CWE-200")
+    .with_device_hint(identity.hint(DeviceType::Hub))
+}
+
+/// Instance name, falling back to the hostname.
+fn display_name(service: &MdnsService) -> String {
+    if service.name.is_empty() {
+        service.hostname.clone()
+    } else {
+        service.name.clone()
+    }
+}
+
 /// Classify a discovered mDNS service into security findings.
 #[allow(clippy::too_many_lines)]
 fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
     let mut findings = Vec::new();
     let ip = service.ip;
     let svc_type = &service.service_type;
+    let identity = MdnsIdentity::of(service);
 
-    let display_name = if service.name.is_empty() {
-        service.hostname.clone()
-    } else {
-        service.name.clone()
-    };
+    let display_name = display_name(service);
 
     let txt_summary = if service.txt_records.is_empty() {
         String::new()
@@ -364,19 +721,14 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         "mDNS service '{display_name}' of type {svc_type} on {ip}:{port} \
          (hostname: {hostname}).{txt_summary} \
          mDNS service advertisement reveals device capabilities \
-         and can help attackers map the network.",
+         and can help attackers map the network.{note}",
         port = service.port,
         hostname = service.hostname,
+        note = identity.note(),
     );
 
-    let hint_hostname: Option<&str> = if service.hostname.is_empty() {
-        None
-    } else {
-        Some(&service.hostname)
-    };
-
     if svc_type.contains("_ssh._tcp") {
-        let mut finding = Finding::new(
+        let finding = Finding::new(
             "mdns",
             &format!(
                 "SSH service advertised: {display_name} on {ip}:{}",
@@ -392,10 +744,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_ip(ip)
         .with_port(service.port)
         .with_service("SSH")
-        .with_cwe("CWE-200");
-        if let Some(h) = hint_hostname {
-            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
-        }
+        .with_cwe("CWE-200")
+        .with_device_hint(identity.hint(DeviceType::Unknown));
         findings.push(finding);
     } else if svc_type.contains("_http._tcp") {
         let severity = if service
@@ -408,7 +758,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             Severity::Info
         };
 
-        let mut finding = Finding::new(
+        let finding = Finding::new(
             "mdns",
             &format!(
                 "HTTP service advertised: {display_name} on {ip}:{}",
@@ -424,15 +774,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_port(service.port)
         .with_service("HTTP")
         .with_cwe("CWE-200")
-        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]);
-        if let Some(h) = hint_hostname {
-            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
-        }
+        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
+        .with_device_hint(identity.hint(DeviceType::Unknown));
         findings.push(finding);
     } else if svc_type.contains("_ipp._tcp") || svc_type.contains("_printer._tcp") {
-        let hint = hint_hostname
-            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
-            .with_device_type(DeviceType::Printer);
+        let hint = identity.hint(DeviceType::Printer);
         findings.push(
             Finding::new(
                 "mdns",
@@ -455,7 +801,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {
-        let mut finding = Finding::new(
+        let finding = Finding::new(
             "mdns",
             &format!(
                 "File sharing service: {display_name} on {ip}:{}",
@@ -471,10 +817,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_ip(ip)
         .with_port(service.port)
         .with_service("SMB")
-        .with_cwe("CWE-732");
-        if let Some(h) = hint_hostname {
-            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
-        }
+        .with_cwe("CWE-732")
+        .with_device_hint(identity.hint(DeviceType::Unknown));
         findings.push(finding);
     } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
         let airplay_type = if display_name.contains("MacBook") || display_name.contains("macbook") {
@@ -488,9 +832,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         } else {
             DeviceType::MediaPlayer
         };
-        let hint = hint_hostname
-            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
-            .with_device_type(airplay_type);
+        let hint = identity.hint(airplay_type);
         findings.push(
             Finding::new(
                 "mdns",
@@ -508,9 +850,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_googlecast._tcp") {
-        let hint = hint_hostname
-            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
-            .with_device_type(DeviceType::MediaPlayer);
+        let hint = identity.hint(DeviceType::MediaPlayer);
         findings.push(
             Finding::new(
                 "mdns",
@@ -530,9 +870,7 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_device_hint(hint),
         );
     } else if svc_type.contains("_hap._tcp") {
-        let hint = hint_hostname
-            .map_or_else(DeviceHint::default, |h| DeviceHint::new().with_hostname(h))
-            .with_device_type(DeviceType::IoT);
+        let hint = identity.hint(DeviceType::IoT);
         findings.push(
             Finding::new(
                 "mdns",
@@ -550,8 +888,33 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_cwe("CWE-287")
             .with_device_hint(hint),
         );
+    } else if svc_type.contains("_matterd._udp") {
+        findings.push(classify_matter_commissioner(service, &identity, &base_desc));
+    } else if svc_type.contains("_matterc._udp") {
+        findings.push(classify_matter_commissionable(
+            service, &identity, &base_desc,
+        ));
+    } else if svc_type.contains("_matter._tcp") {
+        findings.push(
+            Finding::new(
+                "mdns",
+                &format!("Matter device: {display_name} on {ip}:{}", service.port),
+                &format!(
+                    "{base_desc} Operational Matter node. It is already commissioned \
+                     onto a fabric; its advertisement discloses fabric and node \
+                     identifiers but not credentials."
+                ),
+                Severity::Info,
+            )
+            .with_ip(ip)
+            .with_port(service.port)
+            .with_service("Matter")
+            .with_device_hint(identity.hint(DeviceType::IoT)),
+        );
+    } else if svc_type.contains("_meshcop._udp") || svc_type.contains("_meshcop-e._udp") {
+        findings.push(classify_thread_border_agent(service, &identity, &base_desc));
     } else {
-        let mut finding = Finding::new(
+        let finding = Finding::new(
             "mdns",
             &format!(
                 "mDNS service: {display_name} ({svc_type}) on {ip}:{}",
@@ -562,10 +925,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         )
         .with_ip(ip)
         .with_port(service.port)
-        .with_service("mDNS");
-        if let Some(h) = hint_hostname {
-            finding = finding.with_device_hint(DeviceHint::new().with_hostname(h));
-        }
+        .with_service("mDNS")
+        .with_device_hint(identity.hint(DeviceType::Unknown));
         findings.push(finding);
     }
 
@@ -649,7 +1010,7 @@ impl Scanner for MdnsScanner {
             }
         }
 
-        match rikitikitavi_network::discover_services(3).await {
+        match rikitikitavi_network::discover_services(MDNS_DISCOVERY_SECS).await {
             Ok(mdns_services) => {
                 tracing::info!(mdns_count = mdns_services.len(), "mDNS discovery complete");
                 for service in &mdns_services {
@@ -666,7 +1027,8 @@ impl Scanner for MdnsScanner {
     }
 
     fn estimated_duration_secs(&self) -> u64 {
-        10
+        // SSDP window + mDNS budget + UPnP description fetches in Active mode.
+        SSDP_DEADLINE.as_secs() + MDNS_DISCOVERY_SECS + 6
     }
 }
 
@@ -1088,6 +1450,78 @@ mod tests {
         assert_eq!(hint.device_type, Some(DeviceType::Nas));
     }
 
+    /// `modelDescription` is prose, not a version — it must not become firmware.
+    #[test]
+    fn test_model_description_is_not_read_as_firmware() {
+        let xml = "<root><device><friendlyName>rudiger</friendlyName>\
+                   <modelDescription>Synology DiskStation</modelDescription></device></root>";
+        let info = parse_upnp_device_xml(xml);
+        assert_eq!(
+            info.model_description.as_deref(),
+            Some("Synology DiskStation")
+        );
+        assert!(info.firmware_version.is_none());
+        let findings = classify_upnp_device(
+            "192.168.1.220".parse().unwrap(),
+            "http://192.168.1.220:5000/desc.xml",
+            &info,
+        );
+        assert!(!findings[0].description.contains("Firmware:"));
+    }
+
+    /// HA's `wemo` matcher is keyed on the Belkin manufacturer alone, so it must
+    /// not retype a device whose URN already said `InternetGatewayDevice`.
+    #[test]
+    fn test_vendor_only_ssdp_match_does_not_retype_a_gateway() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("Belkin Router".to_owned()),
+            manufacturer: Some("Belkin International Inc.".to_owned()),
+            model_name: Some("F9K1102".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:InternetGatewayDevice:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.1/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Router));
+        // The integration is still reported, just not as a device class.
+        assert_eq!(hint.device_subtype.as_deref(), Some("wemo"));
+    }
+
+    /// With no URN to contradict, the vendor-only matcher still types the device.
+    #[test]
+    fn test_vendor_only_ssdp_match_types_an_otherwise_unknown_device() {
+        let ip: IpAddr = "192.168.1.60".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("WeMo Switch".to_owned()),
+            manufacturer: Some("Belkin International Inc.".to_owned()),
+            model_name: Some("Socket".to_owned()),
+            device_type: Some("urn:Belkin:device:controllee:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.60:49153/setup.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::SmartPlug));
+    }
+
+    /// A `modelDescription` matcher is specific, so it may retype.
+    #[test]
+    fn test_model_description_ssdp_match_may_retype() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let info = UpnpDeviceInfo {
+            friendly_name: Some("UDM Pro".to_owned()),
+            manufacturer: Some("Ubiquiti Networks".to_owned()),
+            model_description: Some("UniFi Dream Machine Pro".to_owned()),
+            device_type: Some("urn:schemas-upnp-org:device:InternetGatewayDevice:1".to_owned()),
+            ..Default::default()
+        };
+        let findings = classify_upnp_device(ip, "http://192.168.1.1/desc.xml", &info);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_subtype.as_deref(), Some("unifi_discovery"));
+        // `unifi_discovery` carries no `DeviceType`, so the URN's Router stands.
+        assert_eq!(hint.device_type, Some(DeviceType::Router));
+    }
+
     #[test]
     fn test_upnp_lg_tv_classified_as_smart_tv() {
         let ip: IpAddr = "192.168.2.11".parse().unwrap();
@@ -1220,7 +1654,279 @@ mod tests {
         assert!(finding.device_hint.is_none());
     }
 
+    // ── HA discovery tables and Matter/Thread ──────────────────────
+
+    /// Build an `MdnsService` for classification tests.
+    fn svc(name: &str, service_type: &str, port: u16, txt: &[&str]) -> MdnsService {
+        MdnsService {
+            name: name.to_owned(),
+            service_type: service_type.to_owned(),
+            hostname: "node.local".to_owned(),
+            ip: "192.168.1.77".parse().unwrap(),
+            port,
+            txt_records: txt.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// Fixture: a Shelly Plus 1PM `_http._tcp` announcement.
+    #[test]
+    fn shelly_http_announcement_is_typed_by_the_ha_table() {
+        let service = svc(
+            "shellyplus1pm-a8032abd1234",
+            "_http._tcp.local",
+            80,
+            &["gen=2", "app=Plus1PM", "ver=1.4.4"],
+        );
+        let findings = classify_mdns_service(&service);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::SmartPlug));
+        assert_eq!(hint.device_subtype.as_deref(), Some("shelly"));
+    }
+
+    /// A plain HTTP responder must not inherit Shelly's `_http._tcp` matcher.
+    #[test]
+    fn generic_http_announcement_gets_no_device_type() {
+        let service = svc("officeprinter", "_http._tcp.local", 80, &[]);
+        let findings = classify_mdns_service(&service);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, None);
+        assert_eq!(hint.device_subtype, None);
+    }
+
+    /// `md` on a `_hap._tcp` accessory names the product; BSB002 is a Hue bridge.
+    #[test]
+    fn homekit_md_key_identifies_the_product() {
+        let service = svc(
+            "Hue Bridge",
+            "_hap._tcp.local",
+            8080,
+            &["md=BSB002", "ci=2"],
+        );
+        let findings = classify_mdns_service(&service);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Hub));
+        assert_eq!(
+            hint.device_subtype.as_deref(),
+            Some("homekit_controller/hue")
+        );
+        assert_eq!(hint.model.as_deref(), Some("BSB002"));
+    }
+
+    #[test]
+    fn matter_closed_window_is_informational() {
+        let service = svc(
+            "ABCD1234",
+            "_matterc._udp.local",
+            5540,
+            &["CM=0", "VP=65521+32769", "DT=266"],
+        );
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("Matter commissionable device"));
+    }
+
+    /// `CM != 0` is the test, not `CM in {1, 2}` — 3 (joint fabric) exists.
+    #[test]
+    fn matter_open_window_is_reported_for_every_non_zero_mode() {
+        for mode in ["1", "2", "3"] {
+            let service = svc(
+                "ABCD1234",
+                "_matterc._udp.local",
+                5540,
+                &[&format!("CM={mode}"), "D=3840"],
+            );
+            let findings = classify_mdns_service(&service);
+            assert_eq!(findings[0].severity, Severity::Low, "CM={mode}");
+            assert!(
+                findings[0]
+                    .title
+                    .contains("Matter commissioning window open"),
+                "CM={mode}"
+            );
+            assert_eq!(findings[0].cwe_id.as_deref(), Some("CWE-287"));
+        }
+    }
+
+    /// Wording must not claim an open window is an unauthenticated join.
+    #[test]
+    fn matter_open_window_wording_names_the_passcode_requirement() {
+        let service = svc("ABCD1234", "_matterc._udp.local", 5540, &["CM=1"]);
+        let findings = classify_mdns_service(&service);
+        let desc = &findings[0].description;
+        assert!(desc.contains("PASE"), "{desc}");
+        assert!(desc.contains("setup passcode"), "{desc}");
+    }
+
+    /// `_matterd._udp` is commissioner discovery: it carries no `CM` key, so the
+    /// finding must not report a commissioning window either way.
+    #[test]
+    fn matter_commissioner_is_not_described_as_commissionable() {
+        let service = svc(
+            "ABCD1234",
+            "_matterd._udp.local",
+            5540,
+            &["VP=65521+32769", "DT=22", "DN=Home Hub"],
+        );
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("Matter commissioner"));
+        let desc = &findings[0].description;
+        assert!(!desc.contains("CM=0"), "{desc}");
+        assert!(desc.contains("Home Hub"), "{desc}");
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Hub));
+    }
+
+    /// An absent `CM` is not `CM=0`; the wording must not invent the key.
+    #[test]
+    fn matter_commissionable_without_cm_does_not_claim_a_value() {
+        let service = svc("ABCD1234", "_matterc._udp.local", 5540, &["D=3840"]);
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings[0].severity, Severity::Info);
+        let desc = &findings[0].description;
+        assert!(!desc.contains("CM=0"), "{desc}");
+        assert!(desc.contains("no CM key"), "{desc}");
+    }
+
+    /// Fixture: an `ot-br-posix` border agent, binary TXT values hex-rendered.
+    #[test]
+    fn thread_border_agent_reports_network_identity() {
+        let service = svc(
+            "OpenThread BorderRouter",
+            "_meshcop._udp.local",
+            49191,
+            &[
+                "rv=1",
+                "tv=1.3.0",
+                "nn=HomeThread",
+                "xp=0xdead00beef00cafe",
+                "sb=0x00000131",
+                "omr=0xfd11223300000000",
+            ],
+        );
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].title.contains("Thread border router"));
+        let desc = &findings[0].description;
+        assert!(desc.contains("HomeThread"), "{desc}");
+        assert!(desc.contains("0xdead00beef00cafe"), "{desc}");
+        assert!(desc.contains("0x00000131"), "{desc}");
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Hub));
+    }
+
+    /// The `sb` bits carry the commissioning posture; reporting the hex alone
+    /// leaves the reader an opaque number.
+    #[test]
+    fn thread_state_bitmap_is_decoded_into_the_finding() {
+        // Live value: PSKc connection mode, interface active, ePSKc supported.
+        let open = svc(
+            "OpenThread BorderRouter",
+            "_meshcop._udp.local",
+            49191,
+            &["nn=HomeThread", "sb=0x00000fb1"],
+        );
+        let desc = classify_mdns_service(&open)[0].description.clone();
+        assert!(desc.contains("active on a mesh"), "{desc}");
+        assert!(desc.contains("PSKc"), "{desc}");
+        assert!(desc.contains("could open a session"), "{desc}");
+        assert!(desc.contains("ephemeral-key commissioning"), "{desc}");
+
+        // Connection mode 0: nothing may connect, so no open-path sentence.
+        let closed = svc(
+            "OpenThread BorderRouter",
+            "_meshcop._udp.local",
+            49191,
+            &["nn=HomeThread", "sb=0x00000010"],
+        );
+        let desc = classify_mdns_service(&closed)[0].description.clone();
+        assert!(
+            desc.contains("no commissioner connection allowed"),
+            "{desc}"
+        );
+        assert!(!desc.contains("could open a session"), "{desc}");
+    }
+
+    /// An unparseable `sb` is still printed raw, with no decoded claims.
+    #[test]
+    fn thread_undecodable_state_bitmap_makes_no_claims() {
+        let service = svc(
+            "OpenThread BorderRouter",
+            "_meshcop._udp.local",
+            49191,
+            &["nn=HomeThread", "sb=notahexvalue"],
+        );
+        let desc = classify_mdns_service(&service)[0].description.clone();
+        assert!(desc.contains("notahexvalue"), "{desc}");
+        assert!(!desc.contains("state bitmap decodes"), "{desc}");
+    }
+
+    /// `_meshcop-e` is published with an empty TXT record.
+    #[test]
+    fn thread_ephemeral_key_service_needs_no_txt() {
+        let service = svc(
+            "OpenThread BorderRouter",
+            "_meshcop-e._udp.local",
+            49192,
+            &[],
+        );
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("ephemeral-key"));
+    }
+
+    #[test]
+    fn operational_matter_node_is_informational() {
+        let service = svc("1234ABCD-0000000000000001", "_matter._tcp.local", 5540, &[]);
+        let findings = classify_mdns_service(&service);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("Matter device"));
+    }
+
+    /// `_axis-video` announcements are separated by the `macaddress` TXT key.
+    #[test]
+    fn axis_video_service_is_typed_from_txt() {
+        let service = svc(
+            "cam",
+            "_axis-video._tcp.local",
+            80,
+            &["macaddress=1CCAE3AABBCC"],
+        );
+        let findings = classify_mdns_service(&service);
+        let hint = findings[0].device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Doorbell));
+        assert_eq!(hint.device_subtype.as_deref(), Some("doorbird"));
+    }
+
+    /// The `st`-only half of HA's SSDP table fires without a description fetch.
+    #[test]
+    fn ssdp_zoneplayer_st_types_a_speaker() {
+        let service = SsdpService {
+            location: Some("http://192.168.1.31:1400/xml/device_description.xml".to_owned()),
+            server: Some("Linux UPnP/1.0 Sonos/84.1-59230".to_owned()),
+            service_type: Some("urn:schemas-upnp-org:device:ZonePlayer:1".to_owned()),
+        };
+        let finding = classify_ssdp_service("192.168.1.31".parse().unwrap(), &service);
+        let hint = finding.device_hint.as_ref().unwrap();
+        assert_eq!(hint.device_type, Some(DeviceType::Speaker));
+        assert_eq!(hint.device_subtype.as_deref(), Some("sonos"));
+    }
+
     proptest! {
+        #[test]
+        fn prop_classify_mdns_service_no_panic(
+            name in ".*",
+            service_type in ".*",
+            port in any::<u16>(),
+            txt in proptest::collection::vec(".*", 0..6),
+        ) {
+            let refs: Vec<&str> = txt.iter().map(String::as_str).collect();
+            let _ = classify_mdns_service(&svc(&name, &service_type, port, &refs));
+        }
+
         /// `parse_ssdp_response` never panics on arbitrary strings
         #[test]
         fn prop_parse_ssdp_no_panic(response in ".*") {
