@@ -18,8 +18,9 @@ Baseline at time of writing: 26 `Scanner` impls (25 in `rikitikitavi-scanners`,
 > ASUS 53282, DeviceType widening, Vulnrichment; mDNS/HA tables/Matter,
 > endoflife.date, nuclei detection; Recog, per-device report cards, Prometheus
 > export, and five further scanners (KNXnet/IP, media servers, 3D printers,
-> DD-WRT UPnP, client-side LAN exposure). Open: routersploit corpora (CP-07),
-> declarative user checks (CP-11), OWASP ISTG tagging (CP-13).
+> DD-WRT UPnP, client-side LAN exposure). CP-07 (default-credential corpus,
+> gated), CP-11 (`scan --rules` declarative engine) and CP-13 (OWASP IoT Top 10
+> tagging) also shipped. Nothing on this roadmap remains open.
 
 ## Executive summary
 
