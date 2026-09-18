@@ -4,6 +4,13 @@
 
 Roadmap waves 1 and 2 (see docs/ROADMAP.md).
 
+- OWASP IoT Top 10 (2018) taxonomy tags: a post-scan enrichment pass maps each
+  finding to zero or one category (`I1`–`I10`), primarily by CWE id and, for
+  findings with no CWE, by scanner id. Findings carry a new `standards` field
+  (additive; old scan history loads unchanged). Tags appear in the JSON report,
+  in the HTML report per finding, and in OCSF export under `unmapped.standards`.
+  Only the bare category identifiers are used; the labels are this project's own
+  factual restatements, not OWASP's descriptive prose. (CP-13)
 - mDNS discovery asks for the consumer service set (113 types, batched) and
   interprets TXT records; Home Assistant's generated discovery tables
   (Apache-2.0: 164 zeroconf, 89 SSDP, 103 MAC-only DHCP matchers, 71 HomeKit

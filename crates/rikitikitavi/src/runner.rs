@@ -619,6 +619,9 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         );
     }
 
+    // OWASP IoT Top 10 (2018) taxonomy tags.
+    rikitikitavi_analysis::enrich_standards(&mut all_findings);
+
     // EPSS lookup is best-effort; on failure findings keep `epss = None`.
     let all_cves: Vec<String> = all_findings
         .iter()

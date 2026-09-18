@@ -45,6 +45,9 @@ pub struct OcsfFinding {
     /// Scan-level risk score (0.0 – 100.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_score: Option<f64>,
+    /// Data with no native OCSF field. Carries the OWASP `IoT` Top 10 (2018) tags losslessly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmapped: Option<OcsfUnmapped>,
     /// Finding timestamp as epoch milliseconds.
     #[serde(
         serialize_with = "serialize_epoch_ms",
@@ -128,6 +131,14 @@ pub struct OcsfResource {
     pub name: Option<String>,
 }
 
+/// OCSF `unmapped` object: non-schema data preserved for lossless export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcsfUnmapped {
+    /// OWASP `IoT` Top 10 (2018) category tags, e.g. `"I2 Insecure network services"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standards: Vec<String>,
+}
+
 impl From<&Finding> for OcsfFinding {
     #[allow(clippy::too_many_lines)]
     fn from(f: &Finding) -> Self {
@@ -198,6 +209,9 @@ impl From<&Finding> for OcsfFinding {
             resources,
             vulnerabilities,
             risk_score: None,
+            unmapped: (!f.standards.is_empty()).then(|| OcsfUnmapped {
+                standards: f.standards.clone(),
+            }),
             time: f.discovered_at,
         }
     }
@@ -295,6 +309,24 @@ mod tests {
         assert_eq!(analytic.uid, "CWE-327");
         assert_eq!(analytic.name, "CWE-327");
         assert_eq!(analytic.r#type, "Rule");
+    }
+
+    #[test]
+    fn test_ocsf_standards_carried_in_unmapped() {
+        let finding = Finding::new("ssl", "Cleartext", "d", Severity::High)
+            .with_standards(vec!["I7 Insecure data transfer or storage".to_owned()]);
+        let ocsf = OcsfFinding::from(&finding);
+        let tags = ocsf.unmapped.expect("standards present").standards;
+        assert_eq!(tags, vec!["I7 Insecure data transfer or storage"]);
+    }
+
+    #[test]
+    fn test_ocsf_no_standards_no_unmapped() {
+        let finding = Finding::new("test", "T", "D", Severity::Low);
+        let ocsf = OcsfFinding::from(&finding);
+        assert!(ocsf.unmapped.is_none());
+        let json = serde_json::to_string(&ocsf).unwrap();
+        assert!(!json.contains("unmapped"));
     }
 
     #[test]

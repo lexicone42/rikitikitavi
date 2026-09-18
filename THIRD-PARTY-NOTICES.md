@@ -9,6 +9,16 @@ Embedded in `crates/rikitikitavi-analysis/src/kev_db.rs` (regenerate with `scrip
 - Source: https://www.cisa.gov/known-exploited-vulnerabilities-catalog
 - Licence: CC0 1.0 Universal
 
+## OWASP IoT Top 10 (2018) taxonomy
+
+Referenced in `crates/rikitikitavi-analysis/src/standards.rs` for finding tags.
+
+- Source: OWASP IoT Top 10, 2018 edition, https://owasp.org/www-project-internet-of-things/
+- Licence of the OWASP material: CC-BY-SA 4.0 (share-alike, not Apache-2.0 compatible).
+- What is used: only the ten bare category identifiers `I1`–`I10`, which are facts, not
+  copyrightable expression. The one-line category labels in `standards.rs` are this project's
+  own factual restatements; no OWASP descriptive prose, table, wording or arrangement was copied.
+
 ## IEEE MA-L (OUI) registry
 
 Embedded in `crates/rikitikitavi-scanners/src/oui_db.rs` (regenerate with `scripts/gen_oui_db.py`).

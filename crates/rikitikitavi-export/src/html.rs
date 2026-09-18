@@ -359,6 +359,10 @@ pub fn render_html_report(results: &ScanResults) -> String {
                 let cves: Vec<String> = f.cve_ids.iter().map(|c| html_escape(c)).collect();
                 let _ = write!(html, "CVEs: {} ", cves.join(", "));
             }
+            if !f.standards.is_empty() {
+                let tags: Vec<String> = f.standards.iter().map(|s| html_escape(s)).collect();
+                let _ = write!(html, "OWASP IoT: {} ", tags.join(", "));
+            }
             html.push_str("</div>\n");
 
             if let Some(remediation) = &f.remediation {
@@ -511,6 +515,15 @@ mod tests {
             risk_score,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn standards_tags_are_rendered() {
+        use rikitikitavi_core::Severity;
+        let f = Finding::new("ssl", "Cleartext", "d", Severity::High)
+            .with_standards(vec!["I7 Insecure data transfer or storage".to_owned()]);
+        let html = render_html_report(&make_results(vec![f], 10.0));
+        assert!(html.contains("OWASP IoT: I7 Insecure data transfer or storage"));
     }
 
     /// One device with a report card carrying `rationale`.

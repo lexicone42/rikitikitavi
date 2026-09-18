@@ -183,6 +183,9 @@ pub struct Finding {
     /// Highest EPSS 30-day exploitation probability (0.0–1.0) among the CVEs. Set during enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epss: Option<f64>,
+    /// OWASP `IoT` Top 10 (2018) category tags (e.g. `"I2 Insecure network services"`). Set during enrichment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standards: Vec<String>,
     /// External references.
     pub references: Vec<String>,
     /// Proof-of-concept evidence (banner, login prompt, directory listing, etc.).
@@ -220,6 +223,7 @@ impl Finding {
             cve_ids: Vec::new(),
             is_kev: false,
             epss: None,
+            standards: Vec::new(),
             references: Vec::new(),
             evidence: None,
             device_hint: None,
@@ -280,6 +284,13 @@ impl Finding {
     #[must_use]
     pub fn with_cve_ids(mut self, ids: Vec<String>) -> Self {
         self.cve_ids = ids;
+        self
+    }
+
+    /// Builder-style setter for OWASP `IoT` Top 10 (2018) category tags.
+    #[must_use]
+    pub fn with_standards(mut self, standards: Vec<String>) -> Self {
+        self.standards = standards;
         self
     }
 
