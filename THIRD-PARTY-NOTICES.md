@@ -284,6 +284,54 @@ License: BSD-2-clause
   (`GET_SYSINFO_CIPHERTEXT` in that file's test module). No source code was
   copied; the encoder, decoder and scanner are ours.
 
+## RouterSploit default-credential and SNMP community wordlists
+
+Embedded in `crates/rikitikitavi-scanners/src/default_creds_db.rs` (regenerate with
+`uv run python scripts/gen_default_creds_db.py`).
+
+- Source: https://github.com/threat9/routersploit — `routersploit/resources/wordlists/defaults.txt`
+  (653 lines, 9596 bytes) and `routersploit/resources/wordlists/snmp.txt`
+  (120 lines, 839 bytes), both read at commit
+  `723b574c36ae202857e3f93e4f3c2ab9a1638ed4` (2026-05-05, branch `master`).
+- Snapshot taken: 2026-09-18
+- Licence: BSD 3-Clause. The upstream `LICENSE` names it "the BSD licensing";
+  its three conditions and disclaimer are the BSD-3-Clause text, reproduced below.
+- Extracted fields: from `defaults.txt`, the `user:pass` pairs relevant to home /
+  SOHO devices (routers, access points, cameras, NVRs, printers, NAS) — 79 pairs,
+  each tagged generic or with a curated lowercase vendor token for prioritisation
+  (the tag is this project's curation, not upstream metadata; every pair is present
+  verbatim upstream); from `snmp.txt`, all 119 community strings, verbatim. No
+  exploit modules, framework code, or the `exploits/` tree were copied.
+- Modification: pairs were selected for home-relevance and grouped by vendor; the
+  Rust table, accessors and the scanner wiring are ours. The corpus only informs
+  findings — a login is attempted solely at `ScanIntensity::Aggressive`, capped and
+  stopping at the first success (see SECURITY.md).
+- The BSD-3 non-endorsement clause is observed: the `RouterSploit` name is used
+  here only to attribute the data, not to endorse or promote this project.
+
+> Copyright 2018, The RouterSploit Framework (RSF) by Threat9. All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without
+> modification, are permitted provided that the following conditions are met:
+> (1) Redistributions of source code must retain the above copyright notice, this
+> list of conditions and the following disclaimer. (2) Redistributions in binary
+> form must reproduce the above copyright notice, this list of conditions and the
+> following disclaimer in the documentation and/or other materials provided with
+> the distribution. (3) Neither the name of RouterSploit Framework nor the names
+> of its contributors may be used to endorse or promote products derived from this
+> software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+> ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+> WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+> DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+> ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+> (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+> LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+> ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+> (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+> SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ## Concepts referenced, with no code or data copied
 
 These projects and specifications informed features in this repository. Nothing

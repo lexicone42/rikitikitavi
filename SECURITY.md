@@ -100,6 +100,45 @@ fingerprint round-trips).
 - **Rate limiting**: Scanners use connection timeouts and semaphore-based
   concurrency to avoid flooding the network.
 
+### Default-credential corpus and login testing
+
+The credential scanner draws on an embedded default-credential corpus curated
+from the RouterSploit wordlists (BSD-3-Clause; see THIRD-PARTY-NOTICES.md):
+79 home/SOHO `user:pass` pairs from `defaults.txt` (generic or vendor-tagged) and
+all 119 SNMP community strings from `snmp.txt`. It is a static table
+(`crates/rikitikitavi-scanners/src/default_creds_db.rs`) containing no exploit
+code. How it is used depends strictly on scan intensity:
+
+- **SNMP communities (Active-ok)**: an SNMP `GET` is a read, not a login, so the
+  community wordlist runs at Active. It is capped at 12 communities per host,
+  ordered by prevalence, time-budgeted so a silent host is not probed for long,
+  and it stops at the first community that answers. No SET is ever sent.
+- **Active and below — no login**: for a device whose class is known to ship
+  default credentials (router, access point, camera, NVR, doorbell, printer,
+  NAS), the scanner emits a Low/Inferred advisory keyed on the class ("this
+  device class ships default credentials — verify"). No authentication is
+  attempted; the corpus only informs the wording.
+- **Aggressive only — capped login testing**: default-credential logins against
+  telnet, FTP and HTTP Basic-auth admin panels run **only** with `--aggressive`.
+  A configuration file cannot raise intensity to Aggressive — the flag is the
+  sole path — so an untrusted config never enables login attempts. Safeguards
+  that make this safe on the owner's own LAN:
+  - **Capped**: at most 8 attempts per service per host (`MAX_LOGIN_ATTEMPTS`),
+    never the whole corpus. Vendor-matching pairs are tried first so few attempts
+    are needed.
+  - **Rate-limited**: a delay between successive attempts against one host.
+  - **Stops at first success**: testing halts on the first accepted login per
+    service, so a compromised default is confirmed with the fewest attempts.
+  - **Lockout awareness**: the small cap is chosen specifically so the tool never
+    trips account lockout or an IDS threshold; "low-noise" is relative — a login
+    is still a login, so it is gated and bounded rather than exhaustive.
+  - **Honest confidence**: a finding is `Confirmed` only on a real protocol
+    answer (a shell/login indicator for telnet, FTP `230`, a non-`401`/`403`
+    response to HTTP Basic); otherwise it stays Inferred/inconclusive.
+- **Exclusions honoured**: hosts and networks listed in `scan.excluded_devices` /
+  `scan.excluded_networks` are never probed by the credential or SNMP scanner, at
+  any intensity.
+
 ### Passive WiFi Monitoring
 
 The `monitor` feature (opt-in, not default) captures WiFi management frames

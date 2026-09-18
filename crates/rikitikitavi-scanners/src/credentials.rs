@@ -7,13 +7,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::Scanner;
+use crate::default_creds_db::{self, CredService};
 
-/// Credential hygiene scanner — anonymous FTP check, SMB exposure advisory,
-/// HTTP admin no-auth detection.
+/// Credential hygiene scanner.
+///
+/// Anonymous FTP check, SMB exposure advisory, HTTP admin no-auth detection, and
+/// (only at `Aggressive`) capped default-login testing for telnet, FTP and HTTP
+/// Basic-auth panels.
 pub struct CredentialScanner;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard cap on default-credential login attempts per service per host. Kept
+/// deliberately small: this audits the owner's own LAN, and a login is the one
+/// probe that can trip account lockout or an IDS. Never raise it to "try the
+/// whole corpus".
+const MAX_LOGIN_ATTEMPTS: usize = 8;
+
+/// Delay between successive login attempts against one host (rate limiting).
+const LOGIN_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 
 /// Result of an anonymous FTP check.
 struct FtpCheckResult {
@@ -759,18 +772,75 @@ fn truncate_evidence(text: &str, max_len: usize) -> String {
     format!("{}...", &text[..end])
 }
 
+/// Append `pair` to `list` unless already present.
+fn push_unique(list: &mut Vec<(&'static str, &'static str)>, pair: (&'static str, &'static str)) {
+    if !list.contains(&pair) {
+        list.push(pair);
+    }
+}
+
+/// Vendor-scoped default-credential pairs from the corpus for `service`, in
+/// corpus order. A device vendor matches a corpus token by case-insensitive
+/// substring (the tokens are distinctive manufacturer names).
+fn corpus_vendor_candidates(
+    vendor: Option<&str>,
+    service: CredService,
+) -> Vec<(&'static str, &'static str)> {
+    let Some(vendor_lower) = vendor.map(str::to_ascii_lowercase) else {
+        return Vec::new();
+    };
+    default_creds_db::DEFAULT_CREDS
+        .iter()
+        .filter(|c| c.service.covers(service))
+        .filter(|c| c.vendor.is_some_and(|token| vendor_lower.contains(token)))
+        .map(|c| (c.username, c.password))
+        .collect()
+}
+
+/// Generic (vendorless) corpus pairs for `service`, in corpus order.
+fn corpus_generic_candidates(service: CredService) -> Vec<(&'static str, &'static str)> {
+    default_creds_db::DEFAULT_CREDS
+        .iter()
+        .filter(|c| c.vendor.is_none() && c.service.covers(service))
+        .map(|c| (c.username, c.password))
+        .collect()
+}
+
+/// The capped, de-duplicated default-login list for `service`: device-vendor
+/// pairs first, then banner-derived priority pairs, then generic corpus fill,
+/// truncated to [`MAX_LOGIN_ATTEMPTS`].
+fn login_list(
+    vendor: Option<&str>,
+    banner: &str,
+    service: CredService,
+) -> Vec<(&'static str, &'static str)> {
+    let mut list: Vec<(&'static str, &'static str)> = Vec::new();
+    for pair in corpus_vendor_candidates(vendor, service) {
+        push_unique(&mut list, pair);
+    }
+    for pair in build_credential_list(banner) {
+        push_unique(&mut list, pair);
+    }
+    for pair in corpus_generic_candidates(service) {
+        push_unique(&mut list, pair);
+    }
+    list.truncate(MAX_LOGIN_ATTEMPTS);
+    list
+}
+
 /// Check a telnet service for default credentials.
 ///
-/// Captures the banner first for fingerprinting, builds a prioritised
-/// credential list, and tries each pair with a short delay between attempts.
-async fn check_telnet_default_creds(ip: IpAddr) -> Option<TelnetLoginResult> {
+/// Captures the banner first for fingerprinting, builds a capped, vendor-first
+/// credential list, and tries each pair with a rate-limiting delay. Stops at the
+/// first confirmed success.
+async fn check_telnet_default_creds(ip: IpAddr, vendor: Option<&str>) -> Option<TelnetLoginResult> {
     let banner = capture_telnet_prompt(ip).await.unwrap_or_default();
-    let creds = build_credential_list(&banner);
+    let creds = login_list(vendor, &banner, CredService::Telnet);
 
     let mut inconclusive: Option<TelnetLoginResult> = None;
-    for (i, &(user, pass)) in creds.iter().enumerate() {
+    for (i, (user, pass)) in creds.into_iter().enumerate() {
         if i > 0 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(LOGIN_ATTEMPT_DELAY).await;
         }
         match try_telnet_login(ip, user, pass).await {
             Some(result) if result.outcome == TelnetOutcome::Success => return Some(result),
@@ -779,6 +849,166 @@ async fn check_telnet_default_creds(ip: IpAddr) -> Option<TelnetLoginResult> {
         }
     }
     inconclusive
+}
+
+/// Attempt one FTP login with explicit credentials. Returns the final response
+/// code (230 = success). Read-only: sends `USER`/`PASS` then `QUIT`.
+async fn try_ftp_login(ip: IpAddr, user: &str, pass: &str) -> Option<u16> {
+    let addr = SocketAddr::new(ip, 21);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    // Read and discard the greeting.
+    let mut banner_buf = vec![0u8; 1024];
+    tokio::time::timeout(READ_TIMEOUT, stream.read(&mut banner_buf))
+        .await
+        .ok()?
+        .ok()?;
+
+    let user_cmd = format!("USER {user}\r\n");
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(user_cmd.as_bytes()))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 1024];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    let user_resp = String::from_utf8_lossy(&buf[..n]);
+
+    let code = if user_resp.starts_with("331") {
+        let pass_cmd = format!("PASS {pass}\r\n");
+        tokio::time::timeout(READ_TIMEOUT, stream.write_all(pass_cmd.as_bytes()))
+            .await
+            .ok()?
+            .ok()?;
+        let mut buf2 = vec![0u8; 1024];
+        let n2 = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf2))
+            .await
+            .ok()?
+            .ok()?;
+        extract_ftp_code(&String::from_utf8_lossy(&buf2[..n2]))?
+    } else {
+        extract_ftp_code(&user_resp)?
+    };
+
+    let _ = tokio::time::timeout(READ_TIMEOUT, stream.write_all(b"QUIT\r\n")).await;
+    Some(code)
+}
+
+/// Try capped default FTP credentials, stopping at the first accepted (230).
+/// Returns the accepted username and a password hint (never the password).
+async fn check_ftp_default_creds(ip: IpAddr, vendor: Option<&str>) -> Option<(String, String)> {
+    let creds = login_list(vendor, "", CredService::Ftp);
+    for (i, (user, pass)) in creds.into_iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(LOGIN_ATTEMPT_DELAY).await;
+        }
+        if try_ftp_login(ip, user, pass).await == Some(230) {
+            return Some((user.to_owned(), password_hint(pass)));
+        }
+    }
+    None
+}
+
+/// Standard RFC 4648 base64 with padding.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map_or(0, u32::from);
+        let b2 = chunk.get(2).copied().map_or(0, u32::from);
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(triple >> 18 & 0x3f) as usize] as char);
+        out.push(ALPHABET[(triple >> 12 & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(triple >> 6 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Whether an HTTP endpoint answers `GET /` with `401` + a `Basic` challenge.
+async fn http_requires_basic_auth(ip: IpAddr, port: u16) -> bool {
+    let Some(resp) = http_get_raw(ip, port, None).await else {
+        return false;
+    };
+    let lower = resp.to_lowercase();
+    let first = lower.lines().next().unwrap_or("");
+    first.contains("401") && lower.contains("www-authenticate:") && lower.contains("basic")
+}
+
+/// Issue `GET /`, optionally with an `Authorization: Basic` header, and return
+/// the raw response text (headers + partial body). Read-only.
+async fn http_get_raw(ip: IpAddr, port: u16, authorization: Option<&str>) -> Option<String> {
+    let addr = SocketAddr::new(ip, port);
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+
+    let auth_line = authorization.map_or_else(String::new, |a| format!("Authorization: {a}\r\n"));
+    let request = format!("GET / HTTP/1.0\r\nHost: {ip}\r\n{auth_line}\r\n");
+    tokio::time::timeout(READ_TIMEOUT, stream.write_all(request.as_bytes()))
+        .await
+        .ok()?
+        .ok()?;
+
+    let mut buf = vec![0u8; 2048];
+    let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+}
+
+/// Attempt one HTTP Basic login. `Some(true)` when the panel that demanded auth
+/// answers the credentialed request without a `401` (login accepted).
+async fn try_http_basic_login(ip: IpAddr, port: u16, user: &str, pass: &str) -> Option<bool> {
+    let token = base64_encode(format!("{user}:{pass}").as_bytes());
+    let header = format!("Basic {token}");
+    let resp = http_get_raw(ip, port, Some(&header)).await?;
+    let first = resp.lines().next().unwrap_or("");
+    // A still-401 (or 403) means the credentials were rejected.
+    Some(!first.contains("401") && !first.contains("403"))
+}
+
+/// If an admin panel requires HTTP Basic auth, try capped default pairs and
+/// return the first accepted username with a password hint. Stops at the first
+/// success. Only meaningful at `Aggressive` (the caller gates it).
+async fn check_http_basic_default_creds(
+    ip: IpAddr,
+    port: u16,
+    vendor: Option<&str>,
+) -> Option<(String, String)> {
+    if !http_requires_basic_auth(ip, port).await {
+        return None;
+    }
+    let creds = login_list(vendor, "", CredService::HttpAdmin);
+    for (i, (user, pass)) in creds.into_iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(LOGIN_ATTEMPT_DELAY).await;
+        }
+        if try_http_basic_login(ip, port, user, pass).await == Some(true) {
+            return Some((user.to_owned(), password_hint(pass)));
+        }
+    }
+    None
 }
 
 /// Check if any `set-cookie:` header line contains a session-like cookie name.
@@ -979,19 +1209,38 @@ impl Scanner for CredentialScanner {
         tracing::info!("running credential hygiene scan");
         let mut findings = Vec::new();
 
+        // Non-destructive banner/prompt capture is allowed at Active. Default-login
+        // guessing can lock accounts / trip an IDS, so it is gated behind Aggressive.
+        let is_active = ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Active);
+        let attempt_login = ctx
+            .config
+            .intensity
+            .at_least(rikitikitavi_models::config::ScanIntensity::Aggressive);
+
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "credentials".to_owned(),
+                message: format!("invalid exclusions: {e}"),
+            })?;
+
         // ── Adaptive mode: use Phase 1 discovered devices ───────────
         if !ctx.discovered_devices.is_empty() {
-            // In Passive mode, only check the gateway/router
-            let target_devices: Vec<_> = if ctx
-                .config
-                .intensity
-                .at_least(rikitikitavi_models::config::ScanIntensity::Active)
-            {
-                ctx.discovered_devices.iter().collect()
+            // In Passive mode, only check the gateway/router. Excluded hosts are
+            // never probed at any intensity.
+            let target_devices: Vec<_> = if is_active {
+                ctx.discovered_devices
+                    .iter()
+                    .filter(|d| !exclusions.excludes_device(d))
+                    .collect()
             } else {
                 ctx.discovered_devices
                     .iter()
-                    .filter(|d| ctx.gateway == Some(d.ip))
+                    .filter(|d| ctx.gateway == Some(d.ip) && !exclusions.excludes_device(d))
                     .collect()
             };
 
@@ -1004,22 +1253,68 @@ impl Scanner for CredentialScanner {
                 let ip = device.ip;
                 let has_port = |p: u16| device.open_ports.iter().any(|op| op.port == p);
 
+                // At Active and below no login is attempted, so a device whose
+                // class is known to ship default credentials gets an Inferred
+                // advisory keyed on the class — verify with --aggressive.
+                if !attempt_login
+                    && let Some(note) = default_creds_db::class_default_note(device.device_type)
+                {
+                    findings.push(
+                        Finding::new(
+                            "credentials",
+                            &format!(
+                                "{} may ship default credentials on {ip}",
+                                device.device_type.label()
+                            ),
+                            &format!(
+                                "This host is classified {}: {note}. A default login cannot be \
+                                 confirmed without an authentication attempt, which this scan does \
+                                 not make below --aggressive. Verify the admin password was changed \
+                                 from the factory default; re-run with --aggressive to test this \
+                                 host directly.",
+                                device.device_type.label()
+                            ),
+                            Severity::Low,
+                        )
+                        .with_confidence(rikitikitavi_core::Confidence::Inferred)
+                        .with_ip(ip)
+                        .with_cwe("CWE-1393"),
+                    );
+                }
+
                 // FTP: only check if port 21 is actually open
                 if has_port(21) {
                     check_ftp_credentials(ip, &mut findings).await;
+
+                    // Default-credential FTP login (Aggressive only, capped).
+                    if attempt_login
+                        && let Some((user, hint)) =
+                            check_ftp_default_creds(ip, device.vendor.as_deref()).await
+                    {
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!("Default FTP credentials confirmed on {ip}"),
+                                &format!(
+                                    "Default credentials confirmed: FTP login as '{user}' with \
+                                     {hint} on {ip}:21. Change this account's password \
+                                     immediately."
+                                ),
+                                Severity::Critical,
+                            )
+                            .with_confidence(rikitikitavi_core::Confidence::Confirmed)
+                            .with_ip(ip)
+                            .with_port(21)
+                            .with_service("FTP")
+                            .with_cwe("CWE-1393"),
+                        );
+                    }
                 }
 
                 // Telnet: flag cleartext protocol + test default credentials
                 if has_port(23) {
-                    use rikitikitavi_models::config::ScanIntensity;
-                    // Non-destructive banner/prompt capture is allowed at Active.
-                    let is_active = ctx.config.intensity.at_least(ScanIntensity::Active);
-                    // Default-password guessing can lock accounts / trip an IDS, so it
-                    // is gated behind Aggressive; detection/flagging below still runs.
-                    let attempt_login = ctx.config.intensity.at_least(ScanIntensity::Aggressive);
-
                     let login_result = if attempt_login {
-                        check_telnet_default_creds(ip).await
+                        check_telnet_default_creds(ip, device.vendor.as_deref()).await
                     } else {
                         None
                     };
@@ -1186,6 +1481,35 @@ impl Scanner for CredentialScanner {
                     .collect();
 
                 for port in http_ports {
+                    // Default-credential HTTP Basic login (Aggressive only, capped).
+                    if attempt_login
+                        && let Some((user, hint)) =
+                            check_http_basic_default_creds(ip, port, device.vendor.as_deref()).await
+                    {
+                        let label = if ctx.gateway == Some(ip) {
+                            "router admin panel"
+                        } else {
+                            "web admin panel"
+                        };
+                        findings.push(
+                            Finding::new(
+                                "credentials",
+                                &format!("Default HTTP credentials confirmed on {ip}:{port}"),
+                                &format!(
+                                    "Default credentials confirmed: the {label} at {ip}:{port} \
+                                     accepted HTTP Basic login as '{user}' with {hint}. Change \
+                                     this account's password immediately."
+                                ),
+                                Severity::Critical,
+                            )
+                            .with_confidence(rikitikitavi_core::Confidence::Confirmed)
+                            .with_ip(ip)
+                            .with_port(port)
+                            .with_service("HTTP")
+                            .with_cwe("CWE-1393"),
+                        );
+                    }
+
                     if let Some(result) = check_http_no_auth(ip, port).await
                         && result.no_auth
                     {
@@ -1238,16 +1562,22 @@ impl Scanner for CredentialScanner {
                 message: format!("failed to read ARP cache: {e}"),
             })?;
 
-        let targets: Vec<IpAddr> = ctx.target_network.as_ref().map_or_else(
-            || arp_entries.iter().map(|e| e.ip).collect(),
-            |network| {
-                arp_entries
-                    .iter()
-                    .filter(|e| network.contains(e.ip))
-                    .map(|e| e.ip)
-                    .collect()
-            },
-        );
+        let targets: Vec<IpAddr> = ctx
+            .target_network
+            .as_ref()
+            .map_or_else(
+                || arp_entries.iter().map(|e| e.ip).collect::<Vec<_>>(),
+                |network| {
+                    arp_entries
+                        .iter()
+                        .filter(|e| network.contains(e.ip))
+                        .map(|e| e.ip)
+                        .collect()
+                },
+            )
+            .into_iter()
+            .filter(|ip| !exclusions.excludes_ip(*ip))
+            .collect();
 
         for &ip in &targets {
             check_ftp_credentials(ip, &mut findings).await;
@@ -1669,6 +1999,64 @@ mod tests {
         }
     }
 
+    // ── corpus login-list tests ──────────────────────────────────────
+
+    #[test]
+    fn login_list_is_capped() {
+        let list = login_list(Some("D-Link"), "generic login: ", CredService::Telnet);
+        assert!(list.len() <= MAX_LOGIN_ATTEMPTS);
+    }
+
+    #[test]
+    fn login_list_prioritises_vendor_pairs_first() {
+        // A D-Link device: the corpus D-Link pairs must lead the list.
+        let list = login_list(Some("D-Link Systems"), "", CredService::Telnet);
+        let vendor = corpus_vendor_candidates(Some("d-link"), CredService::Telnet);
+        assert!(!vendor.is_empty());
+        for (i, pair) in vendor.iter().take(list.len()).enumerate() {
+            assert_eq!(&list[i], pair, "vendor pair {i} not at the front");
+        }
+    }
+
+    #[test]
+    fn login_list_has_no_duplicates() {
+        for vendor in [None, Some("cisco"), Some("zyxel"), Some("netgear")] {
+            let list = login_list(vendor, "BusyBox\nlogin: ", CredService::Telnet);
+            let mut seen = Vec::new();
+            for pair in &list {
+                assert!(!seen.contains(pair), "duplicate {pair:?}");
+                seen.push(*pair);
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_vendor_candidates_match_case_insensitively() {
+        assert!(!corpus_vendor_candidates(Some("HIKVISION"), CredService::HttpAdmin).is_empty());
+        assert!(!corpus_vendor_candidates(Some("hikvision"), CredService::Any).is_empty());
+        // An unknown vendor yields nothing (generics come from a separate path).
+        assert!(corpus_vendor_candidates(Some("zzunknown"), CredService::Telnet).is_empty());
+        assert!(corpus_vendor_candidates(None, CredService::Telnet).is_empty());
+    }
+
+    #[test]
+    fn generic_candidates_are_vendorless_and_non_empty() {
+        let generic = corpus_generic_candidates(CredService::Ftp);
+        assert!(!generic.is_empty());
+    }
+
+    // ── base64 tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn base64_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"admin:admin"), "YWRtaW46YWRtaW4=");
+    }
+
     // ── truncate_evidence tests ──────────────────────────────────────
 
     #[test]
@@ -1876,6 +2264,29 @@ mod tests {
         #[test]
         fn prop_parse_pasv_no_panic(text in ".*") {
             let _ = parse_pasv_response(&text);
+        }
+
+        /// base64 never panics and always emits a padded, 4-aligned string.
+        #[test]
+        fn prop_base64_shape(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let out = base64_encode(&bytes);
+            prop_assert_eq!(out.len(), bytes.len().div_ceil(3) * 4);
+            prop_assert!(out.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        }
+
+        /// The login list is always capped and free of duplicate pairs, for any
+        /// vendor string and banner.
+        #[test]
+        fn prop_login_list_capped_and_unique(
+            vendor in "[ -~]{0,20}",
+            banner in ".*",
+        ) {
+            let list = login_list(Some(&vendor), &banner, CredService::Telnet);
+            prop_assert!(list.len() <= MAX_LOGIN_ATTEMPTS);
+            let mut seen = std::collections::BTreeSet::new();
+            for pair in &list {
+                prop_assert!(seen.insert(*pair));
+            }
         }
 
         #[test]

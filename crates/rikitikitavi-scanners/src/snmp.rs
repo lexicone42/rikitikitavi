@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::stream::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{DeviceHint, Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
@@ -11,8 +12,11 @@ use crate::recog_db::RecogKey;
 
 /// SNMP default community-string scanner.
 ///
-/// Sends a read-only v2c `GET` of `sysDescr.0` on UDP/161 with the two canonical
-/// default communities (`public`, `private`). SNMP is UDP-only, so this probes
+/// Sends a read-only v2c `GET` of `sysDescr.0` on UDP/161. `public` and `private`
+/// lead; a capped, prevalence-ordered slice of the `RouterSploit` community-string
+/// wordlist (see [`crate::default_creds_db`]) follows. A GET is a read, not a
+/// login, so this runs at `Active`; per host it is capped and time-budgeted, and
+/// stops at the first community that answers. SNMP is UDP-only, so this probes
 /// every discovered device directly rather than gating on an open TCP port.
 pub struct SnmpScanner;
 
@@ -22,9 +26,54 @@ const SNMP_PORT: u16 = 161;
 /// Per-datagram timeout.
 const SNMP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Community strings tried, in order; probing stops at the first that answers.
-/// `public` (read-only) precedes `private` (read-write).
-const DEFAULT_COMMUNITIES: &[&str] = &["public", "private"];
+/// Hard cap on community strings tried per host.
+const MAX_COMMUNITIES_PER_HOST: usize = 8;
+
+/// Per-host wall-clock budget: once exceeded, no further community is tried.
+/// Bounds cost on silent hosts (a wrong community draws no reply, so each try
+/// costs a full timeout).
+const PER_HOST_BUDGET: Duration = Duration::from_secs(6);
+
+/// Hosts probed concurrently.
+const SNMP_CONCURRENCY: usize = 16;
+
+/// Community strings tried, in prevalence order; `public` (read-only) precedes
+/// `private` (read-write). Only entries also present in the `RouterSploit` corpus
+/// are tried (attribution), then the list is capped per host.
+const COMMUNITY_PRIORITY: &[&str] = &[
+    "public",
+    "private",
+    "cisco",
+    "community",
+    "admin",
+    "snmp",
+    "default",
+    "manager",
+    "security",
+    "read",
+    "write",
+    "monitor",
+    "netman",
+    "router",
+    "secret",
+    "access",
+    "ILMI",
+    "all",
+];
+
+/// The ordered, corpus-attributed, capped list of communities to try per host.
+fn community_try_list() -> Vec<&'static str> {
+    let mut list: Vec<&'static str> = Vec::with_capacity(MAX_COMMUNITIES_PER_HOST);
+    for &c in COMMUNITY_PRIORITY {
+        if list.len() >= MAX_COMMUNITIES_PER_HOST {
+            break;
+        }
+        if crate::default_creds_db::SNMP_COMMUNITIES.contains(&c) && !list.contains(&c) {
+            list.push(c);
+        }
+    }
+    list
+}
 
 /// BER object identifier for `sysDescr.0` (`1.3.6.1.2.1.1.1.0`).
 ///
@@ -305,7 +354,12 @@ struct SnmpHit {
 /// of safety.
 async fn probe_snmp(ip: IpAddr) -> Option<SnmpHit> {
     let addr = SocketAddr::new(ip, SNMP_PORT);
-    for (idx, &community) in DEFAULT_COMMUNITIES.iter().enumerate() {
+    let start = tokio::time::Instant::now();
+    for (idx, community) in community_try_list().into_iter().enumerate() {
+        // Keep silent hosts cheap: stop once the per-host budget is spent.
+        if idx > 0 && start.elapsed() >= PER_HOST_BUDGET {
+            break;
+        }
         let request_id = 0x7269_0000 | u32::try_from(idx).unwrap_or(0);
         let packet = build_get_request(community, request_id);
         let Some(reply) = udp_probe(addr, &packet, SNMP_TIMEOUT).await else {
@@ -351,12 +405,17 @@ fn finding_for_hit(ip: IpAddr, hit: &SnmpHit) -> Finding {
         format!(" The agent reported sysDescr: \"{d}\".")
     });
 
-    let (severity, cwe, access, title, remediation) = if community == "private" {
+    // "private" conventionally names the read-write community; treat it as
+    // read-write. Every other accepted community demonstrated read access via
+    // our GET (we never send a SET), so it is classified read-only.
+    let (severity, cwe, access, title, remediation) = if community.eq_ignore_ascii_case("private") {
         (
             Severity::High,
             "CWE-284",
             "read-write",
-            format!("SNMP read-write default community \"private\" accepted on {ip}:{SNMP_PORT}"),
+            format!(
+                "SNMP read-write default community \"{community}\" accepted on {ip}:{SNMP_PORT}"
+            ),
             "This grants write access: an attacker can reconfigure interfaces, \
              alter routing, or reboot the device. Remove the default community, \
              disable SNMPv1/v2c entirely, and switch to SNMPv3 with authentication \
@@ -367,7 +426,7 @@ fn finding_for_hit(ip: IpAddr, hit: &SnmpHit) -> Finding {
             Severity::Medium,
             "CWE-306",
             "read-only",
-            format!("SNMP default community \"public\" accepted on {ip}:{SNMP_PORT}"),
+            format!("SNMP default community \"{community}\" accepted on {ip}:{SNMP_PORT}"),
             "This exposes the device's full inventory MIB (hostname, OS, interfaces, \
              ARP and routing tables, sometimes running processes) to any host on the \
              LAN. Set a strong, non-default community and restrict SNMP to trusted \
@@ -440,17 +499,34 @@ impl Scanner for SnmpScanner {
             return Ok(findings);
         }
 
+        let exclusions = ctx
+            .config
+            .exclusions()
+            .map_err(|e| ScanError::ScannerFailed {
+                scanner: "snmp".to_owned(),
+                message: format!("invalid exclusions: {e}"),
+            })?;
+
         // UDP/161 is invisible to the TCP port scan: probe every discovered
         // device directly, falling back to the ARP cache when discovery is empty.
+        // Excluded hosts are never probed.
         let targets: Vec<IpAddr> = if ctx.discovered_devices.is_empty() {
             let arp_entries =
                 rikitikitavi_network::read_arp_cache().map_err(|e| ScanError::ScannerFailed {
                     scanner: "snmp".to_owned(),
                     message: format!("failed to read ARP cache: {e}"),
                 })?;
-            arp_entries.iter().map(|e| e.ip).collect()
+            arp_entries
+                .iter()
+                .map(|e| e.ip)
+                .filter(|ip| !exclusions.excludes_ip(*ip))
+                .collect()
         } else {
-            ctx.discovered_devices.iter().map(|d| d.ip).collect()
+            ctx.discovered_devices
+                .iter()
+                .filter(|d| !exclusions.excludes_device(d))
+                .map(|d| d.ip)
+                .collect()
         };
 
         if targets.is_empty() {
@@ -460,21 +536,31 @@ impl Scanner for SnmpScanner {
 
         tracing::info!(target_count = targets.len(), "probing SNMP agents");
 
-        for ip in targets {
-            if let Some(hit) = probe_snmp(ip).await {
-                tracing::debug!(ip = %ip, community = hit.community, "SNMP community accepted");
-                findings.push(finding_for_hit(ip, &hit));
-                findings.extend(hit.response.sys_descr.as_deref().and_then(|descr| {
-                    recog::identify_finding(
-                        "snmp",
-                        ip,
-                        Some(SNMP_PORT),
-                        RecogKey::SnmpSysDescr,
-                        descr,
-                    )
-                }));
-            }
-        }
+        // Probe hosts concurrently: a wrong community draws no reply, so each
+        // host can cost up to its per-host budget; bounded parallelism keeps the
+        // whole pass inside the phase deadline on a full subnet.
+        let probed: Vec<Finding> = futures::stream::iter(targets)
+            .map(|ip| async move {
+                let mut out = Vec::new();
+                if let Some(hit) = probe_snmp(ip).await {
+                    tracing::debug!(ip = %ip, community = hit.community, "SNMP community accepted");
+                    out.push(finding_for_hit(ip, &hit));
+                    if let Some(descr) = hit.response.sys_descr.as_deref() {
+                        out.extend(recog::identify_finding(
+                            "snmp",
+                            ip,
+                            Some(SNMP_PORT),
+                            RecogKey::SnmpSysDescr,
+                            descr,
+                        ));
+                    }
+                }
+                out
+            })
+            .buffer_unordered(SNMP_CONCURRENCY)
+            .concat()
+            .await;
+        findings.extend(probed);
 
         tracing::info!(
             findings_count = findings.len(),
@@ -763,6 +849,46 @@ mod tests {
     fn test_guess_vendor_unknown() {
         assert_eq!(guess_vendor("some unlabeled device"), None);
         assert_eq!(guess_vendor(""), None);
+    }
+
+    // ── community try-list ──────────────────────────────────────────────────
+
+    #[test]
+    fn community_try_list_leads_with_public_private_and_is_capped() {
+        let list = community_try_list();
+        assert_eq!(list[0], "public");
+        assert_eq!(list[1], "private");
+        assert!(list.len() <= MAX_COMMUNITIES_PER_HOST);
+        // No duplicates.
+        let mut seen = std::collections::BTreeSet::new();
+        for c in &list {
+            assert!(seen.insert(*c), "duplicate community {c}");
+        }
+    }
+
+    #[test]
+    fn community_try_list_only_contains_corpus_entries() {
+        for c in community_try_list() {
+            assert!(
+                crate::default_creds_db::SNMP_COMMUNITIES.contains(&c),
+                "{c} is not attributed to the corpus"
+            );
+        }
+    }
+
+    #[test]
+    fn finding_for_weak_named_community_is_read_only_medium() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let hit = SnmpHit {
+            community: "cisco",
+            response: SnmpResponse {
+                is_get_response: true,
+                sys_descr: None,
+            },
+        };
+        let f = finding_for_hit(ip, &hit);
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.title.contains("\"cisco\""));
     }
 
     // ── finding construction ────────────────────────────────────────────────

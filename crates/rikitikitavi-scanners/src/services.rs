@@ -964,8 +964,8 @@ pub struct HostRole {
     pub is_gateway: bool,
     /// Device type or OUI vendor says router or access point.
     pub router_like: bool,
-    /// Vendor names ASUS as a token. CVE-2023-39780 is ASUS-only, so only this
-    /// tier carries it.
+    /// The OUI-derived hardware vendor names ASUS as a token. CVE-2023-39780 is
+    /// ASUS-only, so only this tier carries it.
     pub is_asus: bool,
 }
 
@@ -984,10 +984,17 @@ impl HostRole {
         is_asus: false,
     };
 
-    /// Role of a discovered device. `is_asus` reads the vendor only: hostname
-    /// and OS guess are strings the scanned host chooses.
+    /// Role of a discovered device. `is_asus` reads the OUI of the MAC — the
+    /// hardware vendor — never `device.vendor`, which a UPnP/SSDP `manufacturer`
+    /// string can overwrite; hostname and OS guess are likewise host claims. The
+    /// `AyySSHush` attribution and its factory-reset order must rest on hardware.
     fn of_device(device: &Device, is_gateway: bool) -> Self {
-        let is_asus = device.vendor.as_deref().is_some_and(names_asus);
+        let is_asus = device
+            .mac
+            .map(|m| m.to_string())
+            .as_deref()
+            .and_then(crate::oui_db::ieee_oui_lookup)
+            .is_some_and(names_asus);
         let router_like = is_gateway
             || is_asus
             || matches!(
@@ -3904,41 +3911,63 @@ mod backdoor_ssh_tests {
         );
     }
 
-    /// ASUS is read from the vendor alone; hostname and OS guess are the
-    /// scanned host's own claims.
+    /// ASUS is read from the OUI of the MAC — the hardware vendor. The advertised
+    /// `vendor` field, hostname and OS guess are the scanned host's own claims.
     #[test]
     fn host_role_identifies_asus_hardware() {
-        let mut d = Device::new(ip(HOST));
+        let d = Device::new(ip(HOST));
         assert!(!HostRole::of_device(&d, true).is_asus, "gateway alone");
 
-        d.vendor = Some("ASUSTek COMPUTER INC.".to_owned());
+        // 00:04:0F is an ASUS OUI.
+        let d = Device::new(ip(HOST)).with_mac("00:04:0f:11:22:33");
         assert!(HostRole::of_device(&d, false).is_asus);
 
-        d.vendor = None;
-        d.hostname = Some("RT-AX55-asus.lan".to_owned());
-        d.os_guess = Some("ASUSWRT 3.0.0.4".to_owned());
+        // Non-ASUS silicon (Raspberry Pi OUI) advertising ASUS over UPnP/mDNS
+        // must not reach the attribution — the vendor/hostname/OS fields are claims.
+        let mut spoofed = Device::new(ip(HOST)).with_mac("28:cd:c1:11:22:33");
+        spoofed.vendor = Some("ASUSTeK Computer Inc.".to_owned());
+        spoofed.hostname = Some("RT-AX55-asus.lan".to_owned());
+        spoofed.os_guess = Some("ASUSWRT 3.0.0.4".to_owned());
         assert!(
-            !HostRole::of_device(&d, false).is_asus,
-            "mDNS name and banner hint are claims, not hardware"
+            !HostRole::of_device(&spoofed, false).is_asus,
+            "advertised vendor, mDNS name and banner hint are claims, not hardware"
         );
     }
 
-    /// Token match, not substring: `Pegasus` is a real OUI vendor.
+    /// The regression this guards: a UPnP/SSDP `manufacturer` string cannot lift a
+    /// non-ASUS host into the Confirmed/Critical CVE tier; real ASUS silicon still
+    /// attributes even with no advertised vendor.
     #[test]
-    fn a_pegasus_host_is_not_asus_hardware() {
-        let mut d = Device::new(ip(HOST));
-        d.vendor = Some("Pegasus Technologies".to_owned());
-        d.hostname = Some("pegasus.lan".to_owned());
-        let role = HostRole::of_device(&d, false);
+    fn advertised_asus_manufacturer_does_not_reach_the_cve() {
+        let mut spoofed = Device::new(ip(HOST)).with_mac("28:cd:c1:11:22:33"); // Raspberry Pi OUI
+        spoofed.vendor = Some("ASUSTeK Computer Inc.".to_owned());
+        let role = HostRole::of_device(&spoofed, false);
         assert!(!role.is_asus);
-        assert!(!role.router_like, "and it is not probed as a router");
-
         let f = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-OpenSSH_9.6", role).unwrap();
         assert_eq!(
             f.title,
             "SSH server on TCP/53282, the AyySSHush backdoor port"
         );
+        assert_eq!(f.confidence, Confidence::Probable);
         assert!(f.cve_ids.is_empty());
+
+        let asus = Device::new(ip(HOST)).with_mac("00:04:0f:11:22:33");
+        let role = HostRole::of_device(&asus, false);
+        assert!(role.is_asus);
+        let f = classify_backdoor_ssh(ip(HOST), 53282, "SSH-2.0-OpenSSH_9.6", role).unwrap();
+        assert_eq!(f.confidence, Confidence::Confirmed);
+        assert!(f.cve_ids.iter().any(|c| c == CVE));
+    }
+
+    /// Token match, not substring: `Pegasus` and bare `dropbear` are not ASUS.
+    #[test]
+    fn names_asus_matches_tokens_only() {
+        assert!(names_asus("Asus"));
+        assert!(names_asus("ASUSTek COMPUTER INC."));
+        assert!(names_asus("SSH-2.0-asuswrt_dropbear"));
+        assert!(!names_asus("Pegasus Technologies"));
+        assert!(!names_asus("Raspberry Pi"));
+        assert!(!names_asus("SSH-2.0-dropbear_2020.81"));
     }
 
     /// The firmware banner attributes too; `dropbear` alone does not, since
@@ -4069,12 +4098,12 @@ mod backdoor_ssh_tests {
         d.device_type = DeviceType::AccessPoint;
         assert!(HostRole::of_device(&d, false).router_like);
 
-        d.device_type = DeviceType::Unknown;
-        d.vendor = Some("ASUSTek COMPUTER INC.".to_owned());
-        assert!(HostRole::of_device(&d, false).router_like);
+        // OUI-derived ASUS hardware is router-like even with an Unknown type.
+        let asus = Device::new(ip(HOST)).with_mac("00:04:0f:11:22:33");
+        assert!(HostRole::of_device(&asus, false).router_like);
 
-        d.vendor = Some("Raspberry Pi Trading Ltd".to_owned());
-        assert!(!HostRole::of_device(&d, false).router_like);
+        let rpi = Device::new(ip(HOST)).with_mac("28:cd:c1:11:22:33");
+        assert!(!HostRole::of_device(&rpi, false).router_like);
     }
 
     fn arp(ip_s: &str, mac: &str) -> ArpEntry {

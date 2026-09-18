@@ -1,0 +1,33 @@
+# Version-threshold example rules.
+#
+# Run with:  rikitikitavi scan --rules examples/rules/eol-web-servers.yaml
+#
+# service_version_lt parses the numeric components of the port's recorded
+# version and compares them numerically, so 1.24.0 < 1.25.0 (not a string
+# compare). A port with no parsed version never matches. These thresholds are
+# illustrative — set your own from your patch baseline.
+
+rules:
+  - id: nginx-below-1-27
+    title: nginx below the current stable branch
+    severity: medium
+    confidence: probable
+    description: >-
+      This host runs nginx older than 1.27.x. Confirm the distribution has
+      backported security fixes, or upgrade.
+    references:
+      - https://nginx.org/en/security_advisories.html
+    match:
+      - service_version_lt: { service: nginx, version: "1.27.0" }
+
+  - id: openssh-below-9-6
+    title: OpenSSH below 9.6
+    severity: medium
+    description: >-
+      OpenSSH earlier than 9.6 predates the Terrapin (CVE-2023-48795) channel
+      fixes. Verify the build carries the backport or upgrade.
+    cwe: CWE-222
+    references:
+      - https://www.openssh.com/txt/release-9.6
+    match:
+      - service_version_lt: { port: 22, service: openssh, version: "9.6" }

@@ -13,6 +13,7 @@ pub mod cast;
 pub mod credentials;
 pub mod database;
 pub mod ddwrt_upnp;
+pub mod default_creds_db;
 pub mod device;
 pub mod dhcp;
 pub mod dns;

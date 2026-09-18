@@ -1,0 +1,79 @@
+# Example declarative rules for rikitikitavi.
+#
+# Run with:  rikitikitavi scan --rules examples/rules/home-network.yaml
+#
+# A rule matches over facts the scan already collected — it never sends a
+# packet of its own. Predicates are total: plain case-insensitive substrings
+# (bounded length), a port number, a device type, or a dotted-numeric version
+# comparison. A matched device produces one finding.
+#
+# Fields:
+#   id           author's slug (required)
+#   title        finding title — keep it version-free so a patch does not churn
+#                the fingerprint (required)
+#   severity     info | low | medium | high | critical (required)
+#   confidence   inferred (default) | probable — a rule may not claim confirmed
+#   description  finding body
+#   cwe          e.g. CWE-319
+#   references   list of URLs
+#   remediation  { description, steps: [...], effort }
+#   match        a list of predicates (implicit AND), or { all: [...], any: [...] }
+#
+# Predicates (each is a one-key map):
+#   port_open: <port>
+#   device_type_is: <wire name>          e.g. camera, nvr, nas, iot, router
+#   has_finding: <text>                  a scanner id, or substring of a title
+#   banner_contains: <text>              or { port: <p>, text: <t> }
+#   service_version_lt: { service: <s>, version: <v> }   (or port: <p>)
+
+rules:
+  - id: telnet-on-camera
+    title: Telnet reachable on a camera or recorder
+    severity: high
+    confidence: probable
+    description: >-
+      Telnet exposes an unencrypted administrative shell. On cameras and NVRs it
+      is a routine entry point for botnet recruitment.
+    cwe: CWE-319
+    remediation:
+      description: Disable Telnet; use the vendor's HTTPS or SSH management path.
+      steps:
+        - Log in to the device's web UI.
+        - Turn off Telnet / legacy management under network or security settings.
+        - Reboot and re-scan to confirm the port is closed.
+      effort: 10 minutes
+    match:
+      all:
+        - port_open: 23
+      any:
+        - device_type_is: camera
+        - device_type_is: nvr
+
+  - id: unencrypted-nas-http
+    title: NAS admin interface served over plain HTTP
+    severity: medium
+    description: >-
+      A network-attached storage device answers on port 80. Credentials and
+      session cookies for the file store then cross the LAN in clear text.
+    cwe: CWE-319
+    remediation:
+      description: Force HTTPS for the management UI and redirect port 80.
+      steps:
+        - Enable HTTPS in the NAS control panel.
+        - Set an HTTP-to-HTTPS redirect or disable port 80.
+      effort: 15 minutes
+    match:
+      all:
+        - device_type_is: nas
+        - port_open: 80
+
+  - id: upnp-igd-exposed
+    title: Router UPnP IGD service is reachable
+    severity: low
+    description: >-
+      A device already flagged for UPnP is a router. UPnP IGD lets any LAN host
+      open inbound WAN port mappings without authentication.
+    match:
+      all:
+        - device_type_is: router
+        - has_finding: upnp

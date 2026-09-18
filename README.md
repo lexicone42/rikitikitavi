@@ -358,6 +358,8 @@ Options:
   --write-baseline <F>   Write current findings' fingerprints to a baseline file
   --known-devices <F>    Flag any device not in this file as a "new device"
   --write-known-devices <F>  Write current devices to a known-devices file
+  --rules <FILE>         Evaluate a YAML declarative-rules file against the scan
+                         facts and add its findings (see "Custom rules")
   --quiet                Suppress progress output and the consent notice; with
                          no --output the findings report is suppressed too
                          (stderr then notes if --fail-on is unset)
@@ -440,6 +442,55 @@ Exclusion semantics: MAC entries are resolved to IPs through the ARP cache befor
 Independently of `scan.timeout_seconds`, each scanner runs under its own budget of 4× its estimated duration, clamped to 60–600 s; a scanner that exceeds it is skipped with a warning and contributes no findings.
 
 Reports, baseline and known-device files are written with mode `0600` (the Prometheus textfile export is `0644`); the scan-history directory with `0700`.
+
+### Custom rules
+
+`--rules <file>` loads a YAML file of declarative checks and evaluates them
+against the facts a scan already collected — per device: open ports (with
+service, version and banner), device type, and the findings already raised.
+No packets are sent; rules only reason over what the scanners found, and run
+after scanning, before the report. Each matched device produces one finding.
+
+```yaml
+rules:
+  - id: telnet-on-camera
+    title: Telnet reachable on a camera or recorder   # keep it version-free
+    severity: high                # info | low | medium | high | critical
+    confidence: probable          # inferred (default) | probable
+    description: Unencrypted admin shell on a camera or NVR.
+    cwe: CWE-319
+    references: [https://example.test/advisory]
+    remediation:
+      description: Disable Telnet; use HTTPS or SSH.
+      steps: [Log in, Turn off Telnet, Re-scan]
+      effort: 10 minutes
+    match:                        # a bare list is an implicit "all"
+      all:
+        - port_open: 23
+      any:
+        - device_type_is: camera
+        - device_type_is: nvr
+```
+
+Predicates (each is a one-key map, and the whole set is total — no code
+execution, no regex):
+
+| Predicate | Holds when |
+|-----------|------------|
+| `port_open: <port>` | the device has that port open |
+| `device_type_is: <name>` | device type equals that wire name (`camera`, `nvr`, `nas`, `router`, `iot`, …) |
+| `has_finding: <text>` | a finding on the device has that scanner id, or a title containing that text (case-insensitive) |
+| `banner_contains: <text>` | a service, version or banner on any open port contains that text; scope with `{ port: <p>, text: <t> }` |
+| `service_version_lt: { service: <s>, version: <v> }` | a service (optionally `port: <p>`) has a version below `v`, compared dotted-numerically (`1.9.0 < 1.10.0`) |
+
+`match` is a bare list (all must hold), or `{ all: [...], any: [...] }` — a rule
+matches when every `all` predicate holds and, if `any` is present, at least one
+`any` predicate holds. Substring patterns are bounded to 200 bytes and matched
+case-insensitively as plain text. A rule may not claim `confirmed` confidence:
+it reasons over collected facts rather than performing a fresh protocol
+exchange, so confidence is capped at `probable`. Loading fails with a clear
+error on malformed YAML, an unknown field or device type, an empty match, or an
+over-long pattern. See [`examples/rules/`](examples/rules/).
 
 ### Host Discovery
 

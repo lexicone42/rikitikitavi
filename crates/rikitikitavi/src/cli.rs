@@ -122,6 +122,11 @@ pub struct ScanArgs {
     #[arg(long)]
     pub write_known_devices: Option<PathBuf>,
 
+    /// Evaluate a YAML declarative-rules file against the scan facts and add its
+    /// findings. The file must exist and be readable. See examples/rules/.
+    #[arg(long)]
+    pub rules: Option<PathBuf>,
+
     /// Generate attack path analysis.
     #[arg(long)]
     pub attack_paths: bool,

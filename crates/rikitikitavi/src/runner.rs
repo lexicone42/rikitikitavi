@@ -426,24 +426,53 @@ async fn run_scanner_bounded(
     scanner: &dyn rikitikitavi_scanners::Scanner,
     ctx: &ScanContext,
 ) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
-    let budget = std::time::Duration::from_secs(
+    let budget = Duration::from_secs(
         scanner
             .estimated_duration_secs()
             .saturating_mul(4)
             .clamp(60, 600),
     );
-    tokio::time::timeout(budget, scanner.scan(ctx))
-        .await
-        .unwrap_or_else(|_| {
+    run_scanner_within(scanner, ctx, budget).await
+}
+
+/// [`run_scanner_bounded`] with an explicit budget.
+///
+/// On overrun the scanner keeps whatever findings it streamed into `sink` before
+/// the deadline (see [`Scanner::scan_collecting`]); a scanner that does not stream
+/// yields nothing, as before, but the run continues either way. `sink` outlives the
+/// scan future so a dropped (timed-out) future leaves its partial results behind.
+async fn run_scanner_within(
+    scanner: &dyn rikitikitavi_scanners::Scanner,
+    ctx: &ScanContext,
+    budget: Duration,
+) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+    let mut collected: Vec<Finding> = Vec::new();
+    let outcome = tokio::time::timeout(budget, scanner.scan_collecting(ctx, &mut collected)).await;
+    match outcome {
+        Ok(Ok(())) => Ok(collected),
+        Ok(Err(e)) => {
+            if collected.is_empty() {
+                Err(e)
+            } else {
+                tracing::warn!(
+                    scanner = scanner.id(),
+                    error = %e,
+                    kept = collected.len(),
+                    "scanner failed after streaming findings; keeping partial results"
+                );
+                Ok(collected)
+            }
+        }
+        Err(_) => {
             tracing::warn!(
                 scanner = scanner.id(),
                 budget_secs = budget.as_secs(),
-                "scanner exceeded its time budget, skipping"
+                kept = collected.len(),
+                "scanner exceeded its time budget; keeping partial results"
             );
-            Err(rikitikitavi_core::ScanError::Timeout {
-                target: scanner.id().to_owned(),
-            })
-        })
+            Ok(collected)
+        }
+    }
 }
 
 /// Run all applicable scanners in two phases: `network`, `ports`, `device` run first
@@ -2054,5 +2083,132 @@ mod tests {
             Some("aa:aa:aa:aa:aa:aa")
         );
         assert!(devices[2].mac.is_none() && devices[3].mac.is_none());
+    }
+
+    /// Streams two findings, then blocks past the deadline before a third.
+    struct PartialThenHang;
+
+    #[async_trait::async_trait]
+    impl Scanner for PartialThenHang {
+        fn id(&self) -> &'static str {
+            "partial-hang"
+        }
+        fn name(&self) -> &'static str {
+            "partial then hang"
+        }
+        fn supported_perspectives(&self) -> &[Perspective] {
+            &[Perspective::Unauthenticated]
+        }
+        async fn scan(
+            &self,
+            _ctx: &ScanContext,
+        ) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+            Ok(Vec::new())
+        }
+        async fn scan_collecting(
+            &self,
+            _ctx: &ScanContext,
+            sink: &mut Vec<Finding>,
+        ) -> Result<(), rikitikitavi_core::ScanError> {
+            sink.push(Finding::new(
+                "partial-hang",
+                "before deadline",
+                "d",
+                Severity::Low,
+            ));
+            sink.push(Finding::new(
+                "partial-hang",
+                "also before",
+                "d",
+                Severity::Info,
+            ));
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            sink.push(Finding::new(
+                "partial-hang",
+                "after deadline",
+                "d",
+                Severity::High,
+            ));
+            Ok(())
+        }
+    }
+
+    /// Uses the default `scan_collecting`: nothing is observable until `scan` ends.
+    struct DefaultSlow;
+
+    #[async_trait::async_trait]
+    impl Scanner for DefaultSlow {
+        fn id(&self) -> &'static str {
+            "default-slow"
+        }
+        fn name(&self) -> &'static str {
+            "default slow"
+        }
+        fn supported_perspectives(&self) -> &[Perspective] {
+            &[Perspective::Unauthenticated]
+        }
+        async fn scan(
+            &self,
+            _ctx: &ScanContext,
+        ) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(vec![Finding::new(
+                "default-slow",
+                "done",
+                "d",
+                Severity::Info,
+            )])
+        }
+    }
+
+    struct FastOk;
+
+    #[async_trait::async_trait]
+    impl Scanner for FastOk {
+        fn id(&self) -> &'static str {
+            "fast-ok"
+        }
+        fn name(&self) -> &'static str {
+            "fast ok"
+        }
+        fn supported_perspectives(&self) -> &[Perspective] {
+            &[Perspective::Unauthenticated]
+        }
+        async fn scan(
+            &self,
+            _ctx: &ScanContext,
+        ) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+            Ok(vec![Finding::new("fast-ok", "quick", "d", Severity::Info)])
+        }
+    }
+
+    // Real short budgets; the mock scanners sleep far longer, so the timeout
+    // always fires first without needing tokio's `test-util` paused clock.
+    #[tokio::test]
+    async fn run_scanner_within_keeps_streamed_findings_on_timeout() {
+        let ctx = ctx_with(None, Perspective::Unauthenticated);
+        let found = run_scanner_within(&PartialThenHang, &ctx, Duration::from_millis(50))
+            .await
+            .expect("a timeout yields the partial results, not an error");
+        assert_eq!(found.len(), 2, "kept what streamed before the deadline");
+        assert!(found.iter().all(|f| f.title != "after deadline"));
+    }
+
+    #[tokio::test]
+    async fn run_scanner_within_non_streaming_timeout_yields_nothing_but_continues() {
+        let ctx = ctx_with(None, Perspective::Unauthenticated);
+        let found = run_scanner_within(&DefaultSlow, &ctx, Duration::from_millis(50))
+            .await
+            .expect("a non-streaming timeout is Ok(empty), so the run continues");
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_scanner_within_returns_findings_within_budget() {
+        let ctx = ctx_with(None, Perspective::Unauthenticated);
+        let found = run_scanner_within(&FastOk, &ctx, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
     }
 }

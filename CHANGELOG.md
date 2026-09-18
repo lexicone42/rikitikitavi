@@ -167,6 +167,51 @@ Review fixes on the Cast/PaperCut/Kasa/Tuya/SADP/Modbus scanners:
   `_raop._tcp` are metadata types and protocol version, not model and vendor, and
   no longer surface as a device model.
 
+- Default-credential corpus (RouterSploit wordlists, BSD-3-Clause): 79 home/SOHO
+  `user:pass` pairs curated from `defaults.txt` (generic or vendor-tagged) and all
+  119 SNMP community strings from `snmp.txt`, embedded as a sorted generated table
+  (`crates/rikitikitavi-scanners/src/default_creds_db.rs`, regenerate with
+  `uv run python scripts/gen_default_creds_db.py`). No exploit code imported.
+  - SNMP scanner: the community wordlist now extends past `public`/`private` with a
+    capped, prevalence-ordered, corpus-attributed slice (≤ 12 communities per host,
+    with a per-host time budget so silent hosts stay cheap). A GET is a read, not a
+    login, so this still runs at Active; it honours `--exclude` and stops at the
+    first community that answers.
+  - Credentials scanner now honours `scan.excluded_networks` / `excluded_devices`
+    (it did not before).
+  - At Active and below, a device whose class is known to ship default credentials
+    (router, AP, camera, NVR, doorbell, printer, NAS) gets a Low/Inferred advisory
+    keyed on the class — no login is attempted.
+  - Only at `--aggressive`: capped default-login testing for telnet, FTP and HTTP
+    Basic-auth admin panels. Vendor-matching pairs are tried first, attempts are
+    rate-limited and capped at 8 per service per host, and testing stops at the
+    first success — chosen to never risk account lockout on the owner's own LAN.
+    Confirmed only on a real login; the `--aggressive` gate is unchanged (a config
+    file still cannot raise intensity to Aggressive).
+- User-extensible declarative checks (`--rules <file>`): a YAML file of rules
+  matches total predicates over the facts a scan already collected — per device,
+  open ports (service/version/banner), device type, and the findings already
+  raised — and emits a finding. Predicates are `port_open`, `device_type_is`,
+  `has_finding`, `banner_contains` and `service_version_lt`; `match` is a bare
+  list (AND) or `{ all, any }`. No code execution and no regex — substring
+  patterns are plain, case-insensitive and bounded to 200 bytes; versions compare
+  dotted-numerically. Rules send no packets and run after scanning, before the
+  report; each participates in risk scoring and grading. A rule may not claim
+  `confirmed` confidence (it reasons over collected facts), so confidence is
+  capped at `probable`. Loading fails with a clear error on malformed YAML, an
+  unknown field or device type, an empty match, or an over-long pattern. Example
+  rule files ship under `examples/rules/`.
+- A scanner that overruns its per-scanner time budget now keeps the findings it
+  produced before the deadline instead of losing the whole result. The `Scanner`
+  trait gains an optional `scan_collecting` that streams findings into a sink as
+  they are produced; scanners that do not override it behave as before (a timeout
+  yields nothing), but the run always continues.
+- The ASUS "AyySSHush" (CVE-2023-39780) attribution now gates on the OUI of the
+  MAC — the hardware vendor — not `device.vendor`, which a UPnP/SSDP-advertised
+  `manufacturer` string can overwrite. A non-ASUS host advertising "ASUS" over
+  UPnP no longer reaches the Confirmed/Critical CVE tier; it gets the
+  vendor-neutral High/Probable finding.
+
 ## 0.3.0 — 2026-09-16
 
 Hardening pass before the first shared release. Every change below is covered by

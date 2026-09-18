@@ -18,6 +18,22 @@ pub trait Scanner: Send + Sync {
     /// Run the scan and return findings.
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError>;
 
+    /// Run the scan, appending findings to `sink` as they are produced.
+    ///
+    /// The default forwards to [`scan`](Scanner::scan) and appends everything at
+    /// the end, so a per-scanner timeout that fires mid-run keeps nothing. A
+    /// scanner whose work is incremental (a host at a time, say) overrides this
+    /// and pushes into `sink` as it goes; the runner then keeps whatever was
+    /// collected before the deadline instead of discarding the whole result.
+    async fn scan_collecting(
+        &self,
+        ctx: &ScanContext,
+        sink: &mut Vec<Finding>,
+    ) -> Result<(), ScanError> {
+        sink.extend(self.scan(ctx).await?);
+        Ok(())
+    }
+
     /// Estimated time to complete (seconds), used for progress reporting.
     fn estimated_duration_secs(&self) -> u64 {
         30

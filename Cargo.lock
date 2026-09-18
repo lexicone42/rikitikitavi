@@ -2444,6 +2444,7 @@ name = "rikitikitavi"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "crossterm",
@@ -2477,6 +2478,7 @@ dependencies = [
  "rikitikitavi-models",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tracing",
  "uuid",

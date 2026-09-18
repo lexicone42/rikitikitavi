@@ -1,5 +1,6 @@
 pub mod attack_paths;
 pub mod comparison;
+pub mod declarative;
 pub mod device_grade;
 pub mod exploit_intel;
 pub mod history;
@@ -10,6 +11,7 @@ pub mod vulnrichment_db;
 
 pub use attack_paths::generate_attack_paths;
 pub use comparison::{ScanDiff, SeverityChange, diff_scan_results};
+pub use declarative::{Rule, evaluate_rule_file, load_rules, parse_rules, run_rules};
 pub use device_grade::{grade_device, grade_devices};
 pub use exploit_intel::{SsvcCounts, enrich_exploit_intelligence, enrich_ssvc, ssvc_for};
 pub use history::ScanHistory;

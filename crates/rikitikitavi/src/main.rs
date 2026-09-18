@@ -145,6 +145,13 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         .as_deref()
         .map(|p| load_list(p, "known-devices", None, parse_device_identifier))
         .transpose()?;
+    // Rules are parsed and validated up front so a bad file fails before the scan.
+    let rules = args
+        .rules
+        .as_deref()
+        .map(rikitikitavi_analysis::load_rules)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("could not load rules: {e}"))?;
 
     let perspective = args
         .perspective
@@ -240,6 +247,20 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     }
 
     let mut results = runner::run_scan(&mut ctx).await?;
+
+    // Declarative user rules run over the collected facts, before reporting.
+    if let Some(rules) = rules.as_ref() {
+        let rule_findings =
+            rikitikitavi_analysis::run_rules(rules, &results.devices, &results.findings);
+        let n = rule_findings.len();
+        results.findings.extend(rule_findings);
+        if n > 0 {
+            regrade(&mut results, known_devices.as_ref());
+        }
+        if !args.quiet {
+            println!("Applied {} rule(s): {n} finding(s)", rules.len());
+        }
+    }
 
     if let (Some(known), Some(path)) = (known_devices.as_ref(), args.known_devices.as_ref()) {
         mark_device_status(&mut results, known);

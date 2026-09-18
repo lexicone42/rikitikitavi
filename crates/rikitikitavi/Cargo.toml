@@ -40,6 +40,7 @@ crossterm = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+async-trait.workspace = true
 
 [lints]
 workspace = true
