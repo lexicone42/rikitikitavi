@@ -1066,3 +1066,16 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn probe_match(xml: &str) -> bool {
+        super::parse_probe_match(xml).is_some()
+    }
+    #[must_use]
+    pub fn firmware(raw: &str) -> bool {
+        super::parse_firmware_version(raw).is_some()
+    }
+}

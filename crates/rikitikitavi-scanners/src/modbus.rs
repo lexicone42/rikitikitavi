@@ -1397,3 +1397,23 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn response(data: &[u8]) {
+        let _ = super::parse_response(data);
+    }
+    #[must_use]
+    pub fn registers(data: &[u8]) -> bool {
+        super::parse_registers(data).is_some()
+    }
+    #[must_use]
+    pub fn device_id(data: &[u8]) -> usize {
+        super::parse_device_id(data).len()
+    }
+    #[must_use]
+    pub fn common_model(regs: &[u16]) -> bool {
+        super::parse_common_model(regs).is_some()
+    }
+}

@@ -1068,3 +1068,12 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn search_response(frame: &[u8]) -> bool {
+        super::parse_search_response(frame).is_some()
+    }
+}

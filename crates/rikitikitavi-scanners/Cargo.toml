@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
+fuzzing = []
 default = []
 bluetooth = []
 monitor = ["pcap", "rikitikitavi-network/monitor"]

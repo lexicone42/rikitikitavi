@@ -1124,3 +1124,28 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn plex(body: &str) -> bool {
+        super::parse_plex_identity(body).is_some()
+    }
+    #[must_use]
+    pub fn jellyfin(body: &str) -> bool {
+        super::parse_jellyfin_info(body).is_some()
+    }
+    #[must_use]
+    pub fn discovery(body: &str) -> bool {
+        super::parse_jellyfin_discovery(body).is_some()
+    }
+    #[must_use]
+    pub fn version(raw: &str) -> bool {
+        super::parse_version(raw).is_some()
+    }
+    #[must_use]
+    pub fn authority(a: &str) -> bool {
+        super::split_authority(a, 8096).is_some()
+    }
+}

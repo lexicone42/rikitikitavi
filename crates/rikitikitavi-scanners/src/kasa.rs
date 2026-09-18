@@ -1041,3 +1041,20 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn decrypt(cipher: &[u8]) -> usize {
+        super::decrypt(cipher).len()
+    }
+    #[must_use]
+    pub fn json(text: &str) -> bool {
+        super::parse_json(text).is_some()
+    }
+    #[must_use]
+    pub fn sysinfo(text: &str) -> bool {
+        super::parse_sysinfo(text).is_some()
+    }
+}

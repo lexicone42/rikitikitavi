@@ -1473,3 +1473,19 @@ mod tests {
         assert!(control_port_finding(ip, false).device_hint.is_none());
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn datagram(data: &[u8]) {
+        let _ = super::decode_datagram(data);
+    }
+    #[must_use]
+    pub fn json(data: &[u8]) -> bool {
+        super::extract_json(data).is_some()
+    }
+    #[must_use]
+    pub fn broadcast(json: &str) -> bool {
+        super::parse_broadcast(json).is_some()
+    }
+}

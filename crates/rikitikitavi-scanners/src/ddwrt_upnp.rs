@@ -484,3 +484,11 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn server(s: &str) {
+        let _ = super::classify_server(s);
+    }
+}

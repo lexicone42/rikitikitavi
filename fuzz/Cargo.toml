@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 rikitikitavi-models = { path = "../crates/rikitikitavi-models" }
 rikitikitavi-network = { path = "../crates/rikitikitavi-network" }
-rikitikitavi-scanners = { path = "../crates/rikitikitavi-scanners" }
+rikitikitavi-scanners = { path = "../crates/rikitikitavi-scanners", features = ["fuzzing"] }
 
 [workspace]
 
@@ -70,6 +70,41 @@ bench = false
 [[bin]]
 name = "identifiers"
 path = "fuzz_targets/identifiers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smart_home"
+path = "fuzz_targets/smart_home.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ot_protocols"
+path = "fuzz_targets/ot_protocols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_apps"
+path = "fuzz_targets/web_apps.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recog"
+path = "fuzz_targets/recog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tables"
+path = "fuzz_targets/tables.rs"
 test = false
 doc = false
 bench = false

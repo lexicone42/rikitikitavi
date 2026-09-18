@@ -458,6 +458,8 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     let start = Instant::now();
     let registry = ScannerRegistry::new();
+    // Recog pattern sets compile in ~1.7 s; overlap that with phase 1.
+    let recog_warm = tokio::task::spawn_blocking(rikitikitavi_scanners::recog::warm_up);
 
     let exclusions = ctx.config.exclusions()?;
     apply_exclusions(&mut ctx.discovered_devices, &exclusions);
@@ -514,6 +516,8 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         discovered_devices = ctx.discovered_devices.len(),
         "enriched context with discovered devices"
     );
+
+    let _ = recog_warm.await;
 
     // Phase 2: deep analysis, concurrent
     let phase2_filtered = filter_phase2(phase2, ctx, &exclusions, &excluded_mac_ips);

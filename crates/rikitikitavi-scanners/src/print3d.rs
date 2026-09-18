@@ -979,3 +979,20 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn access(body: &str) -> bool {
+        super::parse_access_info(body).is_some()
+    }
+    #[must_use]
+    pub fn server(body: &str) -> bool {
+        super::parse_server_info(body).is_some()
+    }
+    #[must_use]
+    pub fn octoprint(body: &str) -> bool {
+        super::parse_octoprint_version(body).is_some()
+    }
+}

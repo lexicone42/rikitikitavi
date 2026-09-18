@@ -1336,3 +1336,16 @@ mod tests {
         assert!(!verdict.expect("verdict").is_tls());
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn eureka(body: &str) -> bool {
+        super::parse_eureka_info(body).is_some()
+    }
+    #[must_use]
+    pub fn tls(data: &[u8]) -> bool {
+        super::classify_tls_response(data).is_some()
+    }
+}

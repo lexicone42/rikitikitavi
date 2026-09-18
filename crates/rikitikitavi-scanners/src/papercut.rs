@@ -772,3 +772,12 @@ mod tests {
         }
     }
 }
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[must_use]
+    pub fn asset(body: &str) -> bool {
+        super::parse_papercut_asset(body).is_some()
+    }
+}

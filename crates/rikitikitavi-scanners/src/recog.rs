@@ -60,6 +60,17 @@ fn set_for(key: RecogKey) -> Option<&'static RegexSet> {
     SETS[key.index()].get_or_init(|| build_set(key)).as_ref()
 }
 
+/// Build every key's pattern set now, one thread per key. Idempotent.
+pub fn warm_up() {
+    std::thread::scope(|scope| {
+        for key in RecogKey::ALL {
+            scope.spawn(move || {
+                let _ = set_for(key);
+            });
+        }
+    });
+}
+
 /// A resolved Recog match: the fingerprint that claimed the input and the
 /// parameter values it yields.
 #[derive(Debug, Clone)]
