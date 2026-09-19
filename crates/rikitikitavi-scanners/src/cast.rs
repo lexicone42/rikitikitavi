@@ -1326,6 +1326,26 @@ mod tests {
             let finding = build_identification_finding(ip, 8443, &info);
             prop_assert!(!finding.title.is_empty());
         }
+
+        /// `eureka_url`'s authority is the literal address (IPv6 bracketed), it
+        /// parses as a URL, and its host is exactly that address (survey #18).
+        #[test]
+        fn prop_eureka_url_authority(ip in any::<IpAddr>(), port in any::<u16>()) {
+            let url = eureka_url("http", ip, port);
+            let authority = SocketAddr::new(ip, port).to_string();
+            prop_assert!(url.contains(&authority));
+            if ip.is_ipv6() {
+                prop_assert!(url.contains('[') && url.contains(']'));
+            }
+            let parsed = reqwest::Url::parse(&url).expect("valid url");
+            let host = parsed.host_str().expect("host");
+            let host_ip: IpAddr = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse()
+                .expect("host is an ip literal");
+            prop_assert_eq!(host_ip, ip);
+        }
     }
 
     // ── Loopback probe tests ────────────────────────────────────────

@@ -213,6 +213,7 @@ impl DeviceReportCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn grade_wire_names_round_trip() {
@@ -262,5 +263,68 @@ mod tests {
     fn ordering_is_best_first() {
         assert!(Grade::A < Grade::F);
         assert!(Grade::F < Grade::NotAssessed);
+    }
+
+    /// Real letter grades, excluding the `NotAssessed` sentinel.
+    fn arb_real_grade() -> impl Strategy<Value = Grade> {
+        prop::sample::select(vec![Grade::A, Grade::B, Grade::C, Grade::D, Grade::F])
+    }
+
+    proptest! {
+        /// Survey #7: `Grade::from_name` is a case-insensitive round-trip over the wire names.
+        #[test]
+        fn prop_grade_from_name_round_trips(g in prop::sample::select(Grade::ALL.to_vec())) {
+            let name = g.as_str();
+            prop_assert_eq!(Grade::from_name(&name.to_ascii_uppercase()), Some(g));
+            prop_assert_eq!(Grade::from_name(&name.to_ascii_lowercase()), Some(g));
+        }
+
+        /// Survey #7: `from_name` never panics and `Deserialize` maps unknown names to
+        /// `NotAssessed`, known names to themselves.
+        #[test]
+        fn prop_grade_deserialize_never_panics(s in ".{0,32}") {
+            let expected = Grade::from_name(&s).unwrap_or(Grade::NotAssessed);
+            let json = serde_json::to_string(&s).unwrap();
+            let g: Grade = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(g, expected);
+        }
+
+        /// Survey #8: `step_down` never improves a grade; `F` and `NotAssessed` are fixpoints.
+        #[test]
+        fn prop_step_down_is_monotone(g in prop::sample::select(Grade::ALL.to_vec())) {
+            let d = g.step_down();
+            prop_assert!(d >= g, "{g:?} -> {d:?}");
+            if matches!(g, Grade::F | Grade::NotAssessed) {
+                prop_assert_eq!(d, g);
+            } else {
+                prop_assert!(d > g);
+            }
+        }
+
+        /// Survey #8: iterating `step_down` from any real grade converges to `F`.
+        #[test]
+        fn prop_step_down_converges_to_f(g in arb_real_grade()) {
+            let mut cur = g;
+            for _ in 0..5 {
+                cur = cur.step_down();
+            }
+            prop_assert_eq!(cur, Grade::F);
+        }
+
+        /// Survey #9: `DeviceStatus::from_name` round-trips the wire names.
+        #[test]
+        fn prop_status_from_name_round_trips(s in prop::sample::select(DeviceStatus::ALL.to_vec())) {
+            prop_assert_eq!(DeviceStatus::from_name(s.as_str()), Some(s));
+        }
+
+        /// Survey #9: `from_name` never panics and `Deserialize` maps unknown names to
+        /// `Untracked`, known names to themselves.
+        #[test]
+        fn prop_status_deserialize_never_panics(s in ".{0,32}") {
+            let expected = DeviceStatus::from_name(&s).unwrap_or(DeviceStatus::Untracked);
+            let json = serde_json::to_string(&s).unwrap();
+            let st: DeviceStatus = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(st, expected);
+        }
     }
 }

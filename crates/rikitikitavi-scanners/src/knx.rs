@@ -1066,6 +1066,24 @@ mod tests {
                 let _ = findings_for(ip(), &server);
             }
         }
+
+        /// The decoded friendly name never carries a control character or an
+        /// interior NUL (survey #16).
+        #[test]
+        fn prop_decode_friendly_name_is_clean(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            if let Some(name) = decode_friendly_name(&bytes) {
+                prop_assert!(!name.chars().any(char::is_control));
+                prop_assert!(!name.contains('\0'));
+            }
+        }
+
+        /// One `(id, version)` pair per whole octet pair; a trailing octet is
+        /// dropped (survey #17).
+        #[test]
+        fn prop_service_families_count(payload in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let families = parse_service_families(&payload);
+            prop_assert_eq!(families.len(), payload.len() / 2);
+        }
     }
 }
 

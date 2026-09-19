@@ -317,6 +317,37 @@ mod tests {
     }
 
     #[test]
+    fn grade_rank_is_worst_first_and_distinct() {
+        assert_eq!(grade_rank(Grade::F), 0);
+        assert_eq!(grade_rank(Grade::D), 1);
+        assert_eq!(grade_rank(Grade::C), 2);
+        assert_eq!(grade_rank(Grade::B), 3);
+        assert_eq!(grade_rank(Grade::A), 4);
+        assert_eq!(grade_rank(Grade::NotAssessed), 5);
+    }
+
+    #[test]
+    fn rationale_lists_exactly_the_nonzero_severity_counts() {
+        // Desktop is not a weighted class, so the rationale is the severity phrase alone.
+        let card = grade_device(
+            &device(40, DeviceType::Desktop),
+            &[
+                finding(40, Severity::High),
+                finding(40, Severity::Medium),
+                finding(40, Severity::Low),
+            ],
+        );
+        assert_eq!(card.rationale, "1 high, 1 medium, 1 low");
+
+        // A critical-plus-info host: worst-first, zero counts omitted.
+        let card = grade_device(
+            &device(41, DeviceType::Desktop),
+            &[finding(41, Severity::Critical), finding(41, Severity::Info)],
+        );
+        assert_eq!(card.rationale, "1 critical, 1 info");
+    }
+
+    #[test]
     fn cards_are_ordered_worst_first_and_not_assessed_last() {
         let devices = [
             device(20, DeviceType::Unknown),

@@ -429,3 +429,129 @@ proptest! {
         let _ = homekit_domain(&model);
     }
 }
+
+// ── Proptest: glob_match algebra (survey #3) ────────────────────────
+
+/// Known domains with pairwise-distinct device types.
+const KNOWN_DISTINCT_DOMAINS: &[&str] =
+    &["shelly", "sonos", "roomba", "axis", "samsungtv", "my_pv"];
+
+/// A mix of known and Unknown-mapping domains for consensus sampling.
+const SAMPLE_DOMAINS: &[&str] = &[
+    "shelly",
+    "sonos",
+    "roomba",
+    "axis",
+    "doorbird",
+    "samsungtv",
+    "my_pv",
+    "esphome",
+    "zha",
+    "no_such_integration",
+    "unifi_discovery",
+    "nope",
+    "cast",
+];
+
+prop_compose! {
+    /// A domain list paired with one of its permutations.
+    fn domains_and_shuffle()(
+        v in proptest::collection::vec(prop::sample::select(SAMPLE_DOMAINS.to_vec()), 0..6)
+    )(
+        shuffled in Just(v.clone()).prop_shuffle(),
+        original in Just(v),
+    ) -> (Vec<&'static str>, Vec<&'static str>) {
+        (original, shuffled)
+    }
+}
+
+proptest! {
+    #[test]
+    fn prop_glob_match_reflexive(s in ".*") {
+        prop_assert!(glob_match(&s, &s));
+    }
+
+    #[test]
+    fn prop_glob_star_matches_everything(v in ".*") {
+        prop_assert!(glob_match("*", &v));
+    }
+
+    /// A wildcard-free pattern matches only the exact value.
+    #[test]
+    fn prop_glob_literal_is_exact(p in "[a-z0-9._-]{0,16}", v in "[a-z0-9._-]{0,16}") {
+        prop_assert_eq!(glob_match(&p, &v), p == v);
+    }
+
+    #[test]
+    fn prop_glob_star_suffix_matches(prefix in "[a-z0-9._-]{0,16}", suffix in "[a-z0-9._-]{0,16}") {
+        let pattern = format!("{prefix}*");
+        let value = format!("{prefix}{suffix}");
+        prop_assert!(glob_match(&pattern, &value));
+    }
+
+    /// A literal must match the whole value; it never matches a strict substring
+    /// at the start or the end.
+    #[test]
+    fn prop_glob_literal_is_fully_anchored(
+        needle in "[a-z0-9._-]{1,16}",
+        extra in "[a-z0-9._-]{1,8}",
+    ) {
+        let with_suffix = format!("{needle}{extra}");
+        let with_prefix = format!("{extra}{needle}");
+        prop_assert!(!glob_match(&needle, &with_suffix));
+        prop_assert!(!glob_match(&needle, &with_prefix));
+    }
+}
+
+// ── Proptest: consensus_device_type algebra (survey #4) ─────────────
+
+proptest! {
+    #[test]
+    fn prop_consensus_no_panic(domains in proptest::collection::vec(".*", 0..8)) {
+        let refs: Vec<&str> = domains.iter().map(String::as_str).collect();
+        let _ = consensus_device_type(&refs);
+    }
+
+    #[test]
+    fn prop_consensus_single_equals_domain_type(d in ".*") {
+        prop_assert_eq!(consensus_device_type(&[d.as_str()]), domain_device_type(&d));
+    }
+
+    #[test]
+    fn prop_consensus_permutation_invariant((original, shuffled) in domains_and_shuffle()) {
+        prop_assert_eq!(
+            consensus_device_type(&original),
+            consensus_device_type(&shuffled)
+        );
+    }
+
+    /// Inserting an Unknown-mapping domain, at either end, changes nothing.
+    #[test]
+    fn prop_consensus_unknown_domains_are_noops(
+        domains in proptest::collection::vec(prop::sample::select(SAMPLE_DOMAINS.to_vec()), 0..6)
+    ) {
+        let base = consensus_device_type(&domains);
+        for unknown in ["no_such_integration", "nope", "unifi_discovery"] {
+            let mut appended = domains.clone();
+            appended.push(unknown);
+            prop_assert_eq!(consensus_device_type(&appended), base);
+
+            let mut prepended = vec![unknown];
+            prepended.extend_from_slice(&domains);
+            prop_assert_eq!(consensus_device_type(&prepended), base);
+        }
+    }
+
+    /// Two known domains of different device types never agree.
+    #[test]
+    fn prop_consensus_disagreeing_knowns_are_unknown(
+        i in 0usize..KNOWN_DISTINCT_DOMAINS.len(),
+        j in 0usize..KNOWN_DISTINCT_DOMAINS.len(),
+    ) {
+        prop_assume!(i != j);
+        prop_assert_eq!(
+            consensus_device_type(&[KNOWN_DISTINCT_DOMAINS[i], KNOWN_DISTINCT_DOMAINS[j]]),
+            DeviceType::Unknown
+        );
+    }
+}

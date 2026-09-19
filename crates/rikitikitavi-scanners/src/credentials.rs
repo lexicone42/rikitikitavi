@@ -2241,6 +2241,23 @@ mod tests {
         assert!(!is_thin_redirect(&body.to_lowercase()));
     }
 
+    /// Vendors present in the credential corpus.
+    const VENDOR_POOL: &[&str] = &[
+        "d-link",
+        "cisco",
+        "hikvision",
+        "netgear",
+        "zyxel",
+        "tp-link",
+    ];
+    /// Every login-capable service class.
+    const CRED_SERVICES: &[CredService] = &[
+        CredService::Any,
+        CredService::Telnet,
+        CredService::Ftp,
+        CredService::HttpAdmin,
+    ];
+
     proptest! {
         #[test]
         fn prop_parse_ftp_response_no_panic(text in ".*") {
@@ -2295,6 +2312,65 @@ mod tests {
             let line = format!("227 Entering Passive Mode ({},{},{},{},{p1},{p2}).", o[0], o[1], o[2], o[3]);
             let want = SocketAddr::new(IpAddr::from(o), port);
             prop_assert_eq!(parse_pasv_response(&line), Some(want));
+        }
+
+        // ── login_list assembly invariants (survey #12) ─────────────
+
+        /// Arbitrary vendor and banner: never panics, capped, no duplicate pair.
+        #[test]
+        fn prop_login_list_no_panic(
+            vendor in ".*",
+            banner in ".*",
+            si in 0usize..CRED_SERVICES.len(),
+        ) {
+            let list = login_list(Some(&vendor), &banner, CRED_SERVICES[si]);
+            prop_assert!(list.len() <= MAX_LOGIN_ATTEMPTS);
+            let mut seen = std::collections::BTreeSet::new();
+            for pair in &list {
+                prop_assert!(seen.insert(*pair));
+            }
+        }
+
+        /// Every corpus pair fed into the list comes from an entry whose service
+        /// covers the requested one.
+        #[test]
+        fn prop_corpus_candidates_satisfy_covers(
+            vendor in "[ -~]{0,20}",
+            si in 0usize..CRED_SERVICES.len(),
+        ) {
+            let service = CRED_SERVICES[si];
+            for pair in corpus_vendor_candidates(Some(&vendor), service)
+                .into_iter()
+                .chain(corpus_generic_candidates(service))
+            {
+                let covered = default_creds_db::DEFAULT_CREDS
+                    .iter()
+                    .any(|c| (c.username, c.password) == pair && c.service.covers(service));
+                prop_assert!(covered);
+            }
+        }
+
+        /// Corpus vendor pairs always precede generic corpus fill in the list.
+        #[test]
+        fn prop_login_list_vendor_before_generic(
+            vi in 0usize..VENDOR_POOL.len(),
+            si in 0usize..CRED_SERVICES.len(),
+        ) {
+            let vendor = VENDOR_POOL[vi];
+            let service = CRED_SERVICES[si];
+            let list = login_list(Some(vendor), "", service);
+            let vendor_pairs = corpus_vendor_candidates(Some(vendor), service);
+            let generic_pairs = corpus_generic_candidates(service);
+            let pos = |pair: &(&'static str, &'static str)| list.iter().position(|p| p == pair);
+            let last_vendor = vendor_pairs.iter().filter_map(pos).max();
+            let first_generic = generic_pairs
+                .iter()
+                .filter(|p| !vendor_pairs.contains(p))
+                .filter_map(pos)
+                .min();
+            if let (Some(lv), Some(fg)) = (last_vendor, first_generic) {
+                prop_assert!(lv < fg);
+            }
         }
     }
 

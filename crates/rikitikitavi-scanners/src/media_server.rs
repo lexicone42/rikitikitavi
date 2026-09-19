@@ -1237,6 +1237,89 @@ mod tests {
             let finding = plex_finding(ip(), PLEX_PORT, &identity, "u", DeviceType::Unknown);
             prop_assert!(finding.title.starts_with("Plex Media Server"));
         }
+
+        // ── version_cmp total order + parse_version (survey #5) ──────
+
+        #[test]
+        fn prop_version_cmp_reflexive(a in proptest::collection::vec(0u32..8, 0..5)) {
+            prop_assert_eq!(version_cmp(&a, &a), std::cmp::Ordering::Equal);
+        }
+
+        #[test]
+        fn prop_version_cmp_antisymmetric(
+            a in proptest::collection::vec(0u32..8, 0..5),
+            b in proptest::collection::vec(0u32..8, 0..5),
+        ) {
+            prop_assert_eq!(version_cmp(&a, &b), version_cmp(&b, &a).reverse());
+        }
+
+        #[test]
+        fn prop_version_cmp_transitive(
+            a in proptest::collection::vec(0u32..8, 0..5),
+            b in proptest::collection::vec(0u32..8, 0..5),
+            c in proptest::collection::vec(0u32..8, 0..5),
+        ) {
+            if version_cmp(&a, &b).is_le() && version_cmp(&b, &c).is_le() {
+                prop_assert!(version_cmp(&a, &c).is_le());
+            }
+        }
+
+        /// Trailing zeros do not change a version's rank.
+        #[test]
+        fn prop_version_cmp_ignores_trailing_zeros(
+            a in proptest::collection::vec(0u32..8, 0..5),
+            pad in 0usize..4,
+        ) {
+            let mut padded = a.clone();
+            padded.extend(std::iter::repeat_n(0, pad));
+            prop_assert_eq!(version_cmp(&a, &padded), std::cmp::Ordering::Equal);
+        }
+
+        #[test]
+        fn prop_parse_version_no_panic(raw in ".*") {
+            if let Some(parsed) = parse_version(&raw) {
+                prop_assert!(!parsed.is_empty());
+            }
+        }
+
+        // ── classify_plex boundary monotonicity (survey #6) ─────────
+
+        /// The KevRce verdict is downward-closed: if a version is flagged, every
+        /// lower version is too.
+        #[test]
+        fn prop_classify_plex_kev_is_downward_closed(
+            a in proptest::collection::vec(0u32..45, 1..4),
+            b in proptest::collection::vec(0u32..45, 1..4),
+        ) {
+            if version_cmp(&a, &b).is_le() && classify_plex(Some(&b)) == PlexVerdict::KevRce {
+                prop_assert_eq!(classify_plex(Some(&a)), PlexVerdict::KevRce);
+            }
+        }
+
+        /// The CredentialExposure verdict covers a contiguous version interval:
+        /// a version between two flagged versions is flagged too.
+        #[test]
+        fn prop_classify_plex_credexposure_is_an_interval(
+            x in proptest::collection::vec(0u32..45, 1..4),
+            y in proptest::collection::vec(0u32..45, 1..4),
+            z in proptest::collection::vec(0u32..45, 1..4),
+        ) {
+            let (mut lo, mut mid, mut hi) = (x, y, z);
+            if version_cmp(&lo, &mid).is_gt() {
+                std::mem::swap(&mut lo, &mut mid);
+            }
+            if version_cmp(&mid, &hi).is_gt() {
+                std::mem::swap(&mut mid, &mut hi);
+            }
+            if version_cmp(&lo, &mid).is_gt() {
+                std::mem::swap(&mut lo, &mut mid);
+            }
+            if classify_plex(Some(&lo)) == PlexVerdict::CredentialExposure
+                && classify_plex(Some(&hi)) == PlexVerdict::CredentialExposure
+            {
+                prop_assert_eq!(classify_plex(Some(&mid)), PlexVerdict::CredentialExposure);
+            }
+        }
     }
 }
 

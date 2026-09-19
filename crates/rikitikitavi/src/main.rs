@@ -344,7 +344,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     }
 
     if let Some(output) = args.output {
-        write_report(args.format, &results, &output)?;
+        write_report(args.format, &results, &output, args.quiet)?;
         tolerate_broken_pipe(writeln!(
             std::io::stdout().lock(),
             "Results written to {}",
@@ -603,18 +603,22 @@ fn backfill_report_cards(
     results
 }
 
-/// Write `results` to `path` in `format`.
+/// Write `results` to `path` in `format`. `quiet` suppresses the Prometheus
+/// world-readable-file warning.
 fn write_report(
     format: cli::ReportFormatArg,
     results: &rikitikitavi_models::ScanResults,
     path: &std::path::Path,
+    quiet: bool,
 ) -> Result<()> {
     match format {
         cli::ReportFormatArg::Json => rikitikitavi_export::export_json(results, path),
         cli::ReportFormatArg::Html => rikitikitavi_export::export_html(results, path),
         cli::ReportFormatArg::Csv => rikitikitavi_export::export_csv(results, path),
         cli::ReportFormatArg::Ocsf => rikitikitavi_export::export_ocsf_json(results, path),
-        cli::ReportFormatArg::Prometheus => rikitikitavi_export::export_prometheus(results, path),
+        cli::ReportFormatArg::Prometheus => {
+            rikitikitavi_export::export_prometheus(results, path, quiet)
+        }
     }
 }
 
@@ -1648,7 +1652,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
         };
 
         if let Some(ref output) = args.output {
-            write_report(args.format, &scan_results, output)?;
+            write_report(args.format, &scan_results, output, true)?;
             println!("Results written to {}", output.display());
         }
 
@@ -1667,7 +1671,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
             ..Default::default()
         };
 
-        write_report(args.format, &scan_results, output)?;
+        write_report(args.format, &scan_results, output, true)?;
         println!("Results written to {}", output.display());
     }
 
@@ -2227,6 +2231,7 @@ mod tests {
             crate::cli::ReportFormatArg::Prometheus,
             &two_device_results(),
             &path,
+            true,
         )
         .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();

@@ -16,6 +16,17 @@ pub const KEV_CATALOG_VERSION: &str = "2026.09.16";
 /// Case-insensitive; O(log n) binary search over the sorted table.
 #[must_use]
 pub fn is_kev(cve: &str) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        use std::sync::Once;
+        static SORTED: Once = Once::new();
+        SORTED.call_once(|| {
+            assert!(
+                KEV_CVES.windows(2).all(|w| w[0] < w[1]),
+                "KEV_CVES must be strictly ascending for binary_search"
+            );
+        });
+    }
     let needle = cve.trim().to_ascii_uppercase();
     KEV_CVES.binary_search(&needle.as_str()).is_ok()
 }

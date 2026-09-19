@@ -742,5 +742,84 @@ mod tests {
                 identify(RecogKey::HttpServer, &padded).map(|m| m.index)
             );
         }
+
+        // ── identify_all determinism (survey #13) ───────────────────
+
+        /// `identify_all` never panics and is deterministic; the hint it merges
+        /// is order-stable for the same inputs.
+        #[test]
+        fn prop_identify_all_deterministic(
+            raw in proptest::collection::vec((0usize..RecogKey::ALL.len(), ".*"), 0..6)
+        ) {
+            let inputs: Vec<(RecogKey, &str)> =
+                raw.iter().map(|(i, s)| (RecogKey::ALL[*i], s.as_str())).collect();
+            let a = identify_all(&inputs);
+            let b = identify_all(&inputs);
+            let proj = |ms: &[RecogMatch]| {
+                ms.iter()
+                    .map(|m| (m.key.index(), m.index, m.description))
+                    .collect::<Vec<_>>()
+            };
+            prop_assert_eq!(proj(&a), proj(&b));
+            prop_assert_eq!(merge_hints(&a), merge_hints(&b));
+        }
+
+        // ── excerpt char-boundary safety (survey #14) ───────────────
+
+        /// Over arbitrary (incl. astral) input, `excerpt` is length-bounded and
+        /// its retained prefix always lands on a char boundary.
+        #[test]
+        fn prop_excerpt_bounded_and_char_safe(input in any::<String>()) {
+            let out = excerpt(&input);
+            prop_assert!(out.len() <= MAX_EVIDENCE + 3);
+            let trimmed = input.trim();
+            if trimmed.len() <= MAX_EVIDENCE {
+                prop_assert_eq!(out.as_str(), trimmed);
+            } else {
+                prop_assert!(out.ends_with("..."));
+                let body = &out[..out.len() - 3];
+                prop_assert!(body.len() <= MAX_EVIDENCE);
+                prop_assert!(trimmed.starts_with(body));
+            }
+        }
+
+        // ── interpolate satisfiability (survey #15) ─────────────────
+
+        #[test]
+        fn prop_interpolate_no_panic(
+            template in ".*",
+            present in proptest::collection::vec(any::<bool>(), 16),
+        ) {
+            let mut fields: std::collections::BTreeMap<RecogField, String> =
+                std::collections::BTreeMap::new();
+            for (i, keep) in present.iter().enumerate() {
+                if *keep {
+                    fields.insert(RecogField::ALL[i], format!("v{i}"));
+                }
+            }
+            let _ = interpolate(&template, &fields);
+        }
+
+        /// `Some` exactly when every `{ref}` names a field present in the map.
+        #[test]
+        fn prop_interpolate_some_iff_all_refs_present(
+            present in proptest::collection::vec(any::<bool>(), 16),
+            refs in proptest::collection::vec(0usize..16, 0..6),
+        ) {
+            let mut fields: std::collections::BTreeMap<RecogField, String> =
+                std::collections::BTreeMap::new();
+            for (i, keep) in present.iter().enumerate() {
+                if *keep {
+                    fields.insert(RecogField::ALL[i], format!("v{i}"));
+                }
+            }
+            let template = refs
+                .iter()
+                .map(|&i| format!("{{{}}}", RecogField::ALL[i].as_str()))
+                .collect::<Vec<_>>()
+                .join("-");
+            let expected = refs.iter().all(|&i| present[i]);
+            prop_assert_eq!(interpolate(&template, &fields).is_some(), expected);
+        }
     }
 }

@@ -482,6 +482,14 @@ mod tests {
                 let _ = classify_server(&server);
             }
         }
+
+        /// Any extracted os_version token is a substring of the banner (survey #19).
+        #[test]
+        fn banner_os_version_is_a_substring(server in ".*") {
+            if let Some(token) = banner_os_version(&server) {
+                prop_assert!(server.contains(token));
+            }
+        }
     }
 }
 

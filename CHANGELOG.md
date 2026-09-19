@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- cargo-mutants configured (generated tables excluded); a first run scored 82%
+  on the new analysis logic, and the 18 non-equivalent surviving mutants are
+  now caught by targeted assertions.
+- 56 new property tests over the rule engine, report cards, the OWASP and
+  Home Assistant matchers, the Recog matcher, and the new scanner parsers.
+- The SSVC enrichment pass no longer escalates an Inferred finding's severity,
+  matching the KEV pass. kev_db and vulnrichment_db debug-assert their table
+  is sorted so a bad regeneration trips in dev builds.
+- `--format prometheus` warns on stderr that the file is world-readable
+  (0644, as node_exporter requires) unless --quiet.
+
 Roadmap waves 1 and 2 (see docs/ROADMAP.md).
 
 - OWASP IoT Top 10 (2018) taxonomy tags: a post-scan enrichment pass maps each

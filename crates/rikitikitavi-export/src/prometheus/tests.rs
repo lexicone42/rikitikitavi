@@ -209,7 +209,7 @@ fn empty_results_still_render() {
 fn export_writes_the_file_and_leaves_no_temp() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rikitikitavi.prom");
-    export_prometheus(&sample(), &path).unwrap();
+    export_prometheus(&sample(), &path, true).unwrap();
     let body = std::fs::read_to_string(&path).unwrap();
     check_exposition(&body);
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -226,7 +226,7 @@ fn exported_file_is_world_readable() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rikitikitavi.prom");
-    export_prometheus(&sample(), &path).unwrap();
+    export_prometheus(&sample(), &path, true).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o644, "node_exporter reads this as its own user");
 }
@@ -236,8 +236,18 @@ fn export_overwrites_an_existing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rikitikitavi.prom");
     std::fs::write(&path, "stale").unwrap();
-    export_prometheus(&sample(), &path).unwrap();
+    export_prometheus(&sample(), &path, true).unwrap();
     assert!(!std::fs::read_to_string(&path).unwrap().contains("stale"));
+}
+
+/// The world-readable warning names the file and its risk, so the operator can move it.
+#[cfg(unix)]
+#[test]
+fn world_readable_warning_names_the_file_and_the_risk() {
+    let msg = world_readable_warning(Path::new("/var/lib/node_exporter/riki.prom"));
+    assert!(msg.contains("/var/lib/node_exporter/riki.prom"), "{msg}");
+    assert!(msg.contains("world-readable"), "{msg}");
+    assert!(msg.contains("0644"), "{msg}");
 }
 
 /// Any Unicode scalar values, including controls and quotes.
@@ -246,6 +256,36 @@ fn arb_text() -> impl Strategy<Value = String> {
 }
 
 proptest! {
+    /// Survey #11: `escape` is the load-bearing label-value primitive. Over arbitrary
+    /// Unicode (control chars and quotes included) its output is a well-formed escaped
+    /// label value: no raw newline, every backslash leads a `\\`/`\n`/`\"` escape, every
+    /// `"` is inside a `\"` escape, and no other control character remains. The walk
+    /// decodes rather than re-encodes, so it does not restate `escape`.
+    #[test]
+    fn prop_escape_label_value_invariants(raw in arb_text()) {
+        let out = escape(&raw);
+        prop_assert!(!out.contains('\n'), "raw newline survived: {out:?}");
+
+        let chars: Vec<char> = out.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\\' {
+                prop_assert!(
+                    matches!(chars.get(i + 1), Some('\\' | 'n' | '"')),
+                    "lone or invalid backslash escape at {i} in {out:?}"
+                );
+                i += 2;
+                continue;
+            }
+            prop_assert!(chars[i] != '"', "unescaped quote at {i} in {out:?}");
+            prop_assert!(
+                !chars[i].is_control(),
+                "residual control char at {i} in {out:?}"
+            );
+            i += 1;
+        }
+    }
+
     /// Hostile identity strings never produce a document the collector would reject.
     #[test]
     fn prop_exposition_stays_parseable(

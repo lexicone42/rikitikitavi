@@ -63,6 +63,17 @@ pub const VULNRICHMENT_SNAPSHOT: &str = "2026-09-17";
 /// Case-insensitive; O(log n) binary search over the sorted table.
 #[must_use]
 pub fn lookup_ssvc(cve: &str) -> Option<&'static Ssvc> {
+    #[cfg(debug_assertions)]
+    {
+        use std::sync::Once;
+        static SORTED: Once = Once::new();
+        SORTED.call_once(|| {
+            assert!(
+                SSVC_ENTRIES.windows(2).all(|w| w[0].cve < w[1].cve),
+                "SSVC_ENTRIES must be strictly ascending by cve for binary_search"
+            );
+        });
+    }
     let needle = cve.trim().to_ascii_uppercase();
     SSVC_ENTRIES
         .binary_search_by(|entry| entry.cve.cmp(needle.as_str()))

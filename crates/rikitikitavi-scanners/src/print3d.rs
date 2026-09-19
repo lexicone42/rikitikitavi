@@ -977,6 +977,13 @@ mod tests {
             let finding = moonraker_finding(ip(), MOONRAKER_PORT, &probe, "http://x");
             prop_assert!(finding.title.starts_with("Moonraker printer"));
         }
+
+        /// The allowlist admits an arbitrary path only when it is one of the
+        /// four identification paths (survey #20).
+        #[test]
+        fn prop_path_allowed_only_for_vocabulary(path in ".*") {
+            prop_assert_eq!(path_allowed(&path), ALLOWED_PATHS.contains(&path.as_str()));
+        }
     }
 }
 

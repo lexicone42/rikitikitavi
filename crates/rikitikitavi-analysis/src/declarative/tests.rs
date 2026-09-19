@@ -247,7 +247,234 @@ fn shipped_example_rules_parse() {
     assert!(count >= 2, "expected the shipped example rule files");
 }
 
+#[test]
+fn evaluate_rule_file_emits_matches() {
+    let path = std::env::temp_dir().join(format!(
+        "rikitikitavi_decl_{}_{}.yaml",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::write(
+        &path,
+        "rules:\n  - id: r1\n    title: Telnet open\n    severity: high\n    match:\n      - port_open: 23\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(23, Some("telnet"), None, None)]);
+    let out = evaluate_rule_file(&path, &[dev], &[]).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].affected_port, Some(23));
+    assert_eq!(out[0].title, "Telnet open");
+}
+
+#[test]
+fn device_type_is_predicate() {
+    let rules = parse_rules(
+        "rules:\n  - id: d\n    title: Camera\n    severity: low\n    match:\n      - device_type_is: camera\n",
+    )
+    .unwrap();
+    let mut cam = device_with(vec![tcp(80, None, None, None)]);
+    cam.device_type = DeviceType::Camera;
+    assert_eq!(run_rules(&rules, &[cam], &[]).len(), 1);
+    // A different device type must not match.
+    let mut printer = device_with(vec![tcp(80, None, None, None)]);
+    printer.device_type = DeviceType::Printer;
+    assert!(run_rules(&rules, &[printer], &[]).is_empty());
+}
+
+#[test]
+fn banner_contains_no_match_when_text_absent() {
+    let rules = parse_rules(
+        "rules:\n  - id: b\n    title: X\n    severity: low\n    match:\n      - banner_contains: zzznomatch\n",
+    )
+    .unwrap();
+    // Port is open but none of service/version/banner contains the needle.
+    let dev = device_with(vec![tcp(
+        80,
+        Some("http"),
+        Some("1.0"),
+        Some("Server: Boa"),
+    )]);
+    assert!(run_rules(&rules, &[dev], &[]).is_empty());
+}
+
+#[test]
+fn banner_contains_matches_service_and_version_fields() {
+    // Needle only in the service field: exercises the service arm of the OR.
+    let svc = parse_rules(
+        "rules:\n  - id: b\n    title: X\n    severity: low\n    match:\n      - banner_contains: nginx\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(80, Some("nginx"), None, None)]);
+    assert_eq!(run_rules(&svc, &[dev], &[]).len(), 1);
+    // Needle only in the version field: exercises the version arm of the OR.
+    let ver = parse_rules(
+        "rules:\n  - id: b\n    title: X\n    severity: low\n    match:\n      - banner_contains: beta7\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(80, Some("http"), Some("1.0-beta7"), None)]);
+    assert_eq!(run_rules(&ver, &[dev], &[]).len(), 1);
+}
+
+#[test]
+fn service_version_lt_respects_service_filter() {
+    let rules = parse_rules(
+        "rules:\n  - id: v\n    title: Old nginx\n    severity: medium\n    match:\n      - service_version_lt: { service: nginx, version: 2.0.0 }\n",
+    )
+    .unwrap();
+    // Version is below the bound but the service is not nginx: filtered out.
+    let apache = device_with(vec![tcp(80, Some("apache"), Some("1.0.0"), None)]);
+    assert!(run_rules(&rules, &[apache], &[]).is_empty());
+    // Matching service is kept.
+    let nginx = device_with(vec![tcp(80, Some("nginx"), Some("1.0.0"), None)]);
+    assert_eq!(run_rules(&rules, &[nginx], &[]).len(), 1);
+}
+
+#[test]
+fn rule_port_from_scoped_banner_and_version() {
+    // A scoped banner predicate names the port to stamp on the finding.
+    let scoped = parse_rules(
+        "rules:\n  - id: b\n    title: Boa\n    severity: low\n    match:\n      - banner_contains: { port: 8080, text: boa }\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(8080, Some("http"), None, Some("Boa/0.94"))]);
+    let out = run_rules(&scoped, &[dev], &[]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].affected_port, Some(8080));
+
+    // service_version_lt with an explicit port likewise supplies the port.
+    let ver = parse_rules(
+        "rules:\n  - id: v\n    title: Old\n    severity: low\n    match:\n      - service_version_lt: { port: 8443, version: 2.0 }\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(8443, Some("nginx"), Some("1.0"), None)]);
+    let out = run_rules(&ver, &[dev], &[]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].affected_port, Some(8443));
+}
+
+#[test]
+fn rule_port_none_when_ports_conflict() {
+    // Two different ports named: no single port to attach.
+    let rules = parse_rules(
+        "rules:\n  - id: p\n    title: T\n    severity: low\n    match:\n      - port_open: 22\n      - port_open: 23\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(22, None, None, None), tcp(23, None, None, None)]);
+    let out = run_rules(&rules, &[dev], &[]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].affected_port, None);
+}
+
+#[test]
+fn rule_port_set_when_ports_agree() {
+    // Two predicates naming the same port: that port is stamped on the finding.
+    let rules = parse_rules(
+        "rules:\n  - id: p\n    title: T\n    severity: low\n    match:\n      - port_open: 23\n      - banner_contains: { port: 23, text: boa }\n",
+    )
+    .unwrap();
+    let dev = device_with(vec![tcp(23, Some("telnet"), None, Some("Boa"))]);
+    let out = run_rules(&rules, &[dev], &[]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].affected_port, Some(23));
+}
+
+fn arb_confidence() -> impl Strategy<Value = Confidence> {
+    prop_oneof![
+        Just(Confidence::Inferred),
+        Just(Confidence::Probable),
+        Just(Confidence::Confirmed),
+    ]
+}
+
+fn arb_severity() -> impl Strategy<Value = Severity> {
+    prop_oneof![
+        Just(Severity::Info),
+        Just(Severity::Low),
+        Just(Severity::Medium),
+        Just(Severity::High),
+        Just(Severity::Critical),
+    ]
+}
+
+/// A dotted-numeric version and its component vector, both of length `n`.
+fn arb_same_len_versions() -> impl Strategy<Value = (Vec<u64>, Vec<u64>)> {
+    (1usize..6).prop_flat_map(|n| {
+        (
+            proptest::collection::vec(0u64..1000, n),
+            proptest::collection::vec(0u64..1000, n),
+        )
+    })
+}
+
+fn join_dotted(v: &[u64]) -> String {
+    v.iter().map(u64::to_string).collect::<Vec<_>>().join(".")
+}
+
+fn arb_dotted() -> impl Strategy<Value = String> {
+    proptest::collection::vec(0u64..1000, 1..6).prop_map(|v| join_dotted(&v))
+}
+
 proptest! {
+    /// Survey #1: no rule, not even one declaring `Confirmed`, can mint a `Confirmed`
+    /// finding — confidence is clamped to at most `Probable`.
+    #[test]
+    fn prop_run_rules_never_emits_confirmed(
+        severity in arb_severity(),
+        confidence in proptest::option::of(arb_confidence()),
+        port in any::<u16>(),
+    ) {
+        let rule = Rule {
+            id: "p".to_owned(),
+            title: "T".to_owned(),
+            description: String::new(),
+            severity,
+            confidence,
+            cwe: None,
+            references: Vec::new(),
+            remediation: None,
+            match_expr: Match::List(vec![Predicate::PortOpen(port)]),
+        };
+        let dev = device_with(vec![tcp(port, None, None, None)]);
+        let out = run_rules(std::slice::from_ref(&rule), &[dev], &[]);
+        prop_assert_eq!(out.len(), 1);
+        for f in &out {
+            prop_assert!(f.confidence <= Confidence::Probable, "{:?}", f.confidence);
+        }
+    }
+
+    /// Survey #2: `version_lt` is irreflexive.
+    #[test]
+    fn prop_version_lt_irreflexive(a in arb_dotted()) {
+        prop_assert!(!version_lt(&a, &a));
+    }
+
+    /// Survey #2: `version_lt` is transitive.
+    #[test]
+    fn prop_version_lt_transitive(a in arb_dotted(), b in arb_dotted(), c in arb_dotted()) {
+        if version_lt(&a, &b) && version_lt(&b, &c) {
+            prop_assert!(version_lt(&a, &c), "{a} < {b} < {c}");
+        }
+    }
+
+    /// Survey #2: for equal-length dotted-numeric strings, `version_lt` agrees with the
+    /// lexicographic order of the numeric keys, and `version_key` recovers the components.
+    #[test]
+    fn prop_version_lt_agrees_with_key_order((a, b) in arb_same_len_versions()) {
+        let sa = join_dotted(&a);
+        let sb = join_dotted(&b);
+        let expect = a < b;
+        prop_assert_eq!(version_lt(&sa, &sb), expect);
+        prop_assert_eq!(version_key(&sa), a);
+        prop_assert_eq!(version_key(&sb), b);
+    }
+
+    /// Survey #2: `version_key` never exceeds the component cap, on any input.
+    #[test]
+    fn prop_version_key_is_bounded(s in ".{0,256}") {
+        prop_assert!(version_key(&s).len() <= MAX_VERSION_COMPONENTS);
+    }
+
     // The parser never panics on arbitrary text.
     #[test]
     fn parse_never_panics(s in ".{0,4096}") {

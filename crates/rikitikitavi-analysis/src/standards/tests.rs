@@ -80,6 +80,53 @@ fn tag_is_id_space_label() {
 }
 
 #[test]
+fn scanner_category_mappings_are_pinned() {
+    // Each arm of category_for_scanner, so deleting one is caught.
+    for scanner in ["credentials", "kasa", "tuya"] {
+        assert_eq!(
+            category_for_scanner(scanner),
+            Some(IotCategory::I1),
+            "{scanner}"
+        );
+    }
+    for scanner in [
+        "arp",
+        "dhcp",
+        "dns",
+        "isolation",
+        "network",
+        "neighbor",
+        "exposure",
+        "mgmt-plane",
+        "modbus",
+        "mqtt",
+        "knx",
+        "tr069",
+    ] {
+        assert_eq!(
+            category_for_scanner(scanner),
+            Some(IotCategory::I2),
+            "{scanner}"
+        );
+    }
+    for scanner in ["wifi", "passive-wifi", "ssl"] {
+        assert_eq!(
+            category_for_scanner(scanner),
+            Some(IotCategory::I7),
+            "{scanner}"
+        );
+    }
+    for scanner in ["router", "unifi"] {
+        assert_eq!(
+            category_for_scanner(scanner),
+            Some(IotCategory::I9),
+            "{scanner}"
+        );
+    }
+    assert_eq!(category_for_scanner("some-unknown-scanner"), None);
+}
+
+#[test]
 fn cwe_takes_priority_over_scanner() {
     // `credentials` scanner falls back to I1, but a CWE-319 finding is I7.
     let f = Finding::new("credentials", "t", "d", Severity::Low).with_cwe("CWE-319");
@@ -216,5 +263,20 @@ proptest! {
             }
         }
         prop_assert_eq!(tagged, count);
+    }
+
+    /// Survey #10: enrichment is idempotent — a second pass returns the same count and
+    /// leaves every finding's `standards` list byte-for-byte unchanged (guards against an
+    /// append-instead-of-recompute regression).
+    #[test]
+    fn prop_enrich_is_idempotent(
+        mut findings in proptest::collection::vec(arb_finding(), 0..16)
+    ) {
+        let first = enrich_standards(&mut findings);
+        let snapshot: Vec<Vec<String>> = findings.iter().map(|f| f.standards.clone()).collect();
+        let second = enrich_standards(&mut findings);
+        let after: Vec<Vec<String>> = findings.iter().map(|f| f.standards.clone()).collect();
+        prop_assert_eq!(second, first);
+        prop_assert_eq!(after, snapshot);
     }
 }

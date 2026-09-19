@@ -321,11 +321,28 @@ fn temp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Stderr warning that the 0644 exposition file is world-readable.
+///
+/// The mode stays 0644 (`node_exporter` reads it as its own user); the file must instead
+/// live where only `node_exporter` and the operator can reach it.
+#[cfg(unix)]
+fn world_readable_warning(path: &Path) -> String {
+    format!(
+        "warning: {} is world-readable (mode 0644, required by node_exporter's textfile \
+         collector) and lists every device on your network; keep it in a directory only \
+         node_exporter and the operator can read",
+        path.display()
+    )
+}
+
 /// Write the exposition document to `path`, atomically.
 ///
 /// The textfile collector reads whatever is on disk whenever it scrapes, so the file is
 /// written under a temporary name and renamed into place.
-pub fn export_prometheus(results: &ScanResults, path: &Path) -> Result<()> {
+///
+/// Unless `quiet`, a stderr warning notes that the file is world-readable (0644): the mode
+/// is required by the collector, so the fix is to place the file out of other users' reach.
+pub fn export_prometheus(results: &ScanResults, path: &Path, quiet: bool) -> Result<()> {
     tracing::info!(?path, "exporting Prometheus metrics");
     let body = render_prometheus(results);
     let temp = temp_path(path);
@@ -336,6 +353,12 @@ pub fn export_prometheus(results: &ScanResults, path: &Path) -> Result<()> {
         return Err(e)
             .with_context(|| format!("renaming {} to {}", temp.display(), path.display()));
     }
+    #[cfg(unix)]
+    if !quiet {
+        eprintln!("{}", world_readable_warning(path));
+    }
+    #[cfg(not(unix))]
+    let _ = quiet;
     Ok(())
 }
 
