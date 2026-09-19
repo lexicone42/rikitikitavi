@@ -13,3 +13,14 @@ exclude_globs = [
 ]
 timeout_multiplier = 3.0
 minimum_test_timeout = 60
+
+# Not worth mutating: test-only fuzz wrappers and trivial trait accessors
+# (a scanner's id/name/duration/ports are constants pinned by registration).
+exclude_re = [
+    "fuzz::",
+    "::id ->",
+    "::name ->",
+    "estimated_duration_secs ->",
+    "supported_perspectives ->",
+    "relevant_ports ->",
+]

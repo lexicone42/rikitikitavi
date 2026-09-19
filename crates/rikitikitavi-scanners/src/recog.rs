@@ -635,6 +635,9 @@ mod tests {
         assert_eq!(device_type_for("Printer"), Some(DeviceType::Printer));
         assert_eq!(device_type_for("WAP"), Some(DeviceType::AccessPoint));
         assert_eq!(device_type_for("DVR"), Some(DeviceType::Nvr));
+        assert_eq!(device_type_for("Smart TV"), Some(DeviceType::SmartTv));
+        assert_eq!(device_type_for("Network Audio"), Some(DeviceType::Speaker));
+        assert_eq!(device_type_for("Light Bulb"), Some(DeviceType::IoT));
         // Classes with no DeviceType variant stay unmapped rather than guess.
         assert_eq!(device_type_for("Firewall"), None);
         assert_eq!(device_type_for("VoIP"), None);
@@ -712,6 +715,130 @@ mod tests {
         let cut = excerpt(&s);
         assert!(cut.ends_with("..."));
         assert!(cut.len() <= MAX_EVIDENCE + 3);
+    }
+
+    /// A multibyte character straddling the cut is not sliced: one leading ASCII
+    /// byte makes `MAX_EVIDENCE` land mid-`é`, so the loop must step back to 199.
+    #[test]
+    fn excerpt_steps_back_off_a_split_multibyte_char() {
+        let s = format!("a{}", "é".repeat(MAX_EVIDENCE));
+        let cut = excerpt(&s);
+        // Boundary below MAX_EVIDENCE: "a" + 99 whole "é" = 1 + 198 = 199 bytes.
+        assert_eq!(cut, format!("a{}...", "é".repeat((MAX_EVIDENCE - 1) / 2)));
+        assert!(cut.starts_with("aé"));
+    }
+
+    /// Long ASCII truncates exactly at `MAX_EVIDENCE`, not at 0.
+    #[test]
+    fn excerpt_ascii_cuts_at_the_evidence_limit() {
+        let s = "x".repeat(MAX_EVIDENCE + 50);
+        assert_eq!(excerpt(&s), format!("{}...", "x".repeat(MAX_EVIDENCE)));
+    }
+
+    fn recog_match(desc: &'static str, pairs: &[(RecogField, &str)]) -> RecogMatch {
+        let mut fields = BTreeMap::new();
+        for (field, value) in pairs {
+            fields.insert(*field, (*value).to_owned());
+        }
+        RecogMatch {
+            key: RecogKey::HttpServer,
+            index: 0,
+            description: desc,
+            fields,
+        }
+    }
+
+    #[test]
+    fn os_label_joins_vendor_product_version() {
+        let m = recog_match(
+            "d",
+            &[
+                (RecogField::OsVendor, "Cisco"),
+                (RecogField::OsProduct, "IOS"),
+                (RecogField::OsVersion, "12.4"),
+            ],
+        );
+        assert_eq!(m.os_label().as_deref(), Some("Cisco IOS 12.4"));
+        assert_eq!(recog_match("d", &[]).os_label(), None);
+    }
+
+    /// A product equal to the vendor is not repeated in the OS sentence.
+    #[test]
+    fn os_label_does_not_repeat_the_vendor() {
+        let m = recog_match(
+            "d",
+            &[
+                (RecogField::OsVendor, "Ubuntu"),
+                (RecogField::OsProduct, "Ubuntu"),
+            ],
+        );
+        assert_eq!(m.os_label().as_deref(), Some("Ubuntu"));
+    }
+
+    #[test]
+    fn hardware_label_combines_vendor_and_product() {
+        let m = recog_match(
+            "d",
+            &[
+                (RecogField::HwVendor, "MikroTik"),
+                (RecogField::HwProduct, "RB951G"),
+            ],
+        );
+        assert_eq!(m.hardware_label().as_deref(), Some("MikroTik RB951G"));
+        // A product already carrying the vendor is not doubled.
+        let m2 = recog_match(
+            "d",
+            &[
+                (RecogField::HwVendor, "Cisco"),
+                (RecogField::HwModel, "Cisco 2960"),
+            ],
+        );
+        assert_eq!(m2.hardware_label().as_deref(), Some("Cisco 2960"));
+        assert_eq!(recog_match("d", &[]).hardware_label(), None);
+    }
+
+    /// Bare exactly when nothing identifying is set; any single signal lifts it.
+    #[test]
+    fn is_bare_needs_every_signal_absent() {
+        assert!(recog_match("d", &[]).is_bare());
+        assert!(!recog_match("d", &[(RecogField::HwVendor, "MikroTik")]).is_bare());
+        assert!(!recog_match("d", &[(RecogField::ServiceProduct, "nginx")]).is_bare());
+        assert!(!recog_match("d", &[(RecogField::HwDevice, "IP Camera")]).is_bare());
+        assert!(!recog_match("d", &[(RecogField::ServiceVendor, "nginx")]).is_bare());
+    }
+
+    /// The empty and length guards are exact: a matching line is accepted at the
+    /// limit and refused one byte over. `SshBanner` index 0 matches `^ArrayOS$`
+    /// under the table's `(?m)` flag, so trailing junk lines do not stop it.
+    #[test]
+    fn input_length_guard_is_exact() {
+        let key = RecogKey::SshBanner;
+        assert!(identify(key, "ArrayOS").is_some());
+
+        let pad = MAX_INPUT - "ArrayOS".len() - 1;
+        let at_limit = format!("ArrayOS\n{}", "x".repeat(pad));
+        assert_eq!(at_limit.len(), MAX_INPUT);
+        assert!(identify(key, &at_limit).is_some());
+
+        let over = format!("ArrayOS\n{}", "x".repeat(pad + 1));
+        assert_eq!(over.len(), MAX_INPUT + 1);
+        assert!(identify(key, &over).is_none());
+
+        assert!(identify(key, "   ").is_none());
+    }
+
+    /// A match that names a device class leads the finding even without a
+    /// hardware label and even when a software-only match came first.
+    #[test]
+    fn identification_finding_prefers_a_device_class_match() {
+        let ip: IpAddr = "192.168.1.7".parse().unwrap();
+        let software = recog_match("some server", &[(RecogField::ServiceProduct, "nginx")]);
+        let classed = recog_match("some camera", &[(RecogField::HwDevice, "IP Camera")]);
+        assert!(classed.hardware_label().is_none());
+        assert_eq!(classed.device_class(), Some("IP Camera"));
+        let finding =
+            identification_finding("t", ip, Some(80), &[software, classed]).expect("finding");
+        assert!(finding.title.contains("some camera"), "{}", finding.title);
     }
 
     proptest! {

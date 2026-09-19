@@ -547,6 +547,20 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Option<(u16, String)> {
     Some((status, body))
 }
 
+/// A probe response is usable only on `200 OK`.
+const fn is_http_ok(status: u16) -> bool {
+    status == 200
+}
+
+/// Scheme for a Jellyfin port: TLS only on the HTTPS port.
+const fn jellyfin_scheme(port: u16) -> &'static str {
+    if port == JELLYFIN_TLS_PORT {
+        "https"
+    } else {
+        "http"
+    }
+}
+
 /// Probe Plex on one port, trying HTTP then HTTPS: the server multiplexes both
 /// on 32400 and refuses plaintext when "Secure connections" is set to Required.
 async fn probe_plex(
@@ -559,7 +573,7 @@ async fn probe_plex(
         let Some((status, body)) = fetch(client, &url).await else {
             continue;
         };
-        if status != 200 {
+        if !is_http_ok(status) {
             continue;
         }
         if let Some(identity) = parse_plex_identity(&body) {
@@ -573,7 +587,7 @@ async fn probe_plex(
 async fn probe_jellyfin_at(client: &reqwest::Client, base: &str) -> Option<(JellyfinInfo, String)> {
     let url = format!("{base}{JELLYFIN_PATH}");
     let (status, body) = fetch(client, &url).await?;
-    if status != 200 {
+    if !is_http_ok(status) {
         return None;
     }
     parse_jellyfin_info(&body).map(|info| (info, url))
@@ -585,21 +599,35 @@ async fn probe_jellyfin(
     ip: IpAddr,
     port: u16,
 ) -> Option<(JellyfinInfo, String)> {
-    let scheme = if port == JELLYFIN_TLS_PORT {
-        "https"
-    } else {
-        "http"
-    };
-    probe_jellyfin_at(client, &format!("{scheme}://{ip}:{port}")).await
+    probe_jellyfin_at(client, &format!("{}://{ip}:{port}", jellyfin_scheme(port))).await
+}
+
+/// Fold raw discovery datagrams into parsed base addresses: one reply per
+/// responder, capped, invalid replies dropped. A host that answers repeatedly
+/// must not fill the cap or be probed twice.
+fn collect_discovery(replies: &[(IpAddr, Vec<u8>)]) -> Vec<(IpAddr, String)> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (from, chunk) in replies {
+        if found.len() >= MAX_DISCOVERY_REPLIES {
+            break;
+        }
+        if !seen.insert(*from) {
+            continue;
+        }
+        if let Some(address) = parse_jellyfin_discovery(&String::from_utf8_lossy(chunk)) {
+            found.push((*from, address));
+        }
+    }
+    found
 }
 
 /// Ask each target the Jellyfin discovery question on UDP/7359 and return the
 /// base addresses that answered. Unicast only: no broadcast is sent.
 async fn discover_jellyfin(targets: &[IpAddr]) -> Vec<(IpAddr, String)> {
-    let mut found = Vec::new();
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
         tracing::debug!("could not bind a Jellyfin discovery socket");
-        return found;
+        return Vec::new();
     };
     for &ip in targets {
         let dest = SocketAddr::new(ip, JELLYFIN_DISCOVERY_PORT);
@@ -610,23 +638,17 @@ async fn discover_jellyfin(targets: &[IpAddr]) -> Vec<(IpAddr, String)> {
 
     let deadline = tokio::time::Instant::now() + DISCOVERY_WINDOW;
     let mut buf = vec![0u8; 4096];
-    let mut seen = std::collections::HashSet::new();
-    while found.len() < MAX_DISCOVERY_REPLIES {
+    let mut replies = Vec::new();
+    // Bound raw collection; `collect_discovery` applies the real dedup and cap.
+    while replies.len() < MAX_DISCOVERY_REPLIES {
         let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
         else {
             break;
         };
         let Some(chunk) = buf.get(..n) else { continue };
-        // One reply per responder: a host that answers repeatedly must not fill
-        // the cap or be probed twice.
-        if !seen.insert(from.ip()) {
-            continue;
-        }
-        if let Some(address) = parse_jellyfin_discovery(&String::from_utf8_lossy(chunk)) {
-            found.push((from.ip(), address));
-        }
+        replies.push((from.ip(), chunk.to_vec()));
     }
-    found
+    collect_discovery(&replies)
 }
 
 #[async_trait]
@@ -1198,6 +1220,164 @@ mod tests {
         let text = jellyfin_evidence(&info, "http://x/System/Info/Public");
         assert!(text.contains("Version=10.10.7"));
         assert!(text.contains("StartupWizardCompleted=true"));
+    }
+
+    #[test]
+    fn plex_evidence_records_what_was_read() {
+        let text = plex_evidence(&plex_with("1.42.1"), "http://x/identity");
+        assert!(text.contains("GET http://x/identity"));
+        assert!(text.contains("version=1.42.1"));
+        assert!(text.contains("machineIdentifier=abc"));
+        assert!(text.contains("claimed=true"));
+    }
+
+    #[test]
+    fn reference_lists_name_the_advisories() {
+        let plex = plex_references();
+        assert_eq!(plex.len(), 4);
+        assert!(plex.iter().any(|r| r.contains("CVE-2020-5741")));
+        assert!(plex.iter().any(|r| r.contains("CVE-2025-34158")));
+        assert!(plex.iter().any(|r| r.contains("cisa.gov")));
+
+        let jf = jellyfin_references();
+        assert_eq!(jf.len(), 3);
+        assert!(jf.iter().any(|r| r.contains("jellyfin.org")));
+        assert!(
+            jf.iter()
+                .any(|r| r.contains("cwe.mitre.org/data/definitions/306"))
+        );
+    }
+
+    // ── Jellyfin fallback identification ────────────────────────────
+
+    /// Without a `ProductName`, both version and id are required; either alone
+    /// is not enough to distinguish Jellyfin from anything else on the port.
+    #[test]
+    fn the_version_and_id_fallback_needs_both() {
+        assert!(parse_jellyfin_info(r#"{"Version":"10.10.7","Id":"abc"}"#).is_some());
+        assert!(parse_jellyfin_info(r#"{"Version":"10.10.7"}"#).is_none());
+        assert!(parse_jellyfin_info(r#"{"Id":"abc"}"#).is_none());
+    }
+
+    // ── Authority splitting ─────────────────────────────────────────
+
+    #[test]
+    fn split_authority_handles_the_bracketed_forms() {
+        // A bracketed host with no port takes the default.
+        assert_eq!(
+            split_authority("[fd00::40]", 8096),
+            Some(("fd00::40", 8096))
+        );
+        // A bracketed host with a port reads it.
+        assert_eq!(
+            split_authority("[fd00::40]:8920", 8096),
+            Some(("fd00::40", 8920))
+        );
+        assert_eq!(
+            split_authority("192.168.1.40", 80),
+            Some(("192.168.1.40", 80))
+        );
+        assert_eq!(
+            split_authority("192.168.1.40:8096", 80),
+            Some(("192.168.1.40", 8096))
+        );
+    }
+
+    // ── Probe classification helpers ────────────────────────────────
+
+    #[test]
+    fn only_200_is_a_usable_probe_response() {
+        assert!(is_http_ok(200));
+        assert!(!is_http_ok(204));
+        assert!(!is_http_ok(301));
+        assert!(!is_http_ok(404));
+        assert!(!is_http_ok(500));
+    }
+
+    #[test]
+    fn jellyfin_scheme_is_https_only_on_the_tls_port() {
+        assert_eq!(jellyfin_scheme(JELLYFIN_TLS_PORT), "https");
+        assert_eq!(jellyfin_scheme(JELLYFIN_PORT), "http");
+        assert_eq!(jellyfin_scheme(80), "http");
+    }
+
+    // ── Discovery-context device type ───────────────────────────────
+
+    fn ctx_with(devices: Vec<rikitikitavi_models::Device>) -> ScanContext {
+        ScanContext {
+            target_network: None,
+            gateway: None,
+            perspective: Perspective::Unauthenticated,
+            network_mode: rikitikitavi_core::NetworkMode::Auto,
+            config: rikitikitavi_models::config::ScanConfig::default(),
+            discovered_devices: devices,
+        }
+    }
+
+    #[test]
+    fn device_type_of_reads_the_matching_device() {
+        let ip_a: IpAddr = "192.168.1.40".parse().unwrap();
+        let ip_b: IpAddr = "192.168.1.41".parse().unwrap();
+        let ctx = ctx_with(vec![
+            rikitikitavi_models::Device::new(ip_a).with_device_type(DeviceType::Nas),
+            rikitikitavi_models::Device::new(ip_b).with_device_type(DeviceType::Router),
+        ]);
+        assert_eq!(device_type_of(&ctx, ip_a), DeviceType::Nas);
+        assert_eq!(device_type_of(&ctx, ip_b), DeviceType::Router);
+        // An unknown IP is not any device's type.
+        let ip_c: IpAddr = "192.168.1.99".parse().unwrap();
+        assert_eq!(device_type_of(&ctx, ip_c), DeviceType::Unknown);
+    }
+
+    // ── Discovery reply folding ─────────────────────────────────────
+
+    #[test]
+    fn collect_discovery_dedups_parses_and_caps() {
+        let a: IpAddr = "192.168.1.40".parse().unwrap();
+        let b: IpAddr = "192.168.1.41".parse().unwrap();
+        let reply = |ip| format!(r#"{{"Address":"http://{ip}:8096"}}"#).into_bytes();
+
+        // One reply per responder, even when it answers twice.
+        let got = collect_discovery(&[(a, reply(a)), (a, reply(a)), (b, reply(b))]);
+        assert_eq!(
+            got,
+            vec![
+                (a, "http://192.168.1.40:8096".to_owned()),
+                (b, "http://192.168.1.41:8096".to_owned()),
+            ]
+        );
+
+        // An unparseable reply consumes its responder's slot but yields nothing.
+        assert!(collect_discovery(&[(a, b"garbage".to_vec())]).is_empty());
+
+        // The cap bounds the number of distinct responders returned.
+        let flood: Vec<(IpAddr, Vec<u8>)> = (0..=MAX_DISCOVERY_REPLIES)
+            .map(|i| {
+                let [hi, lo] = u16::try_from(i).unwrap().to_be_bytes();
+                let ip = IpAddr::from([10, 0, hi, lo]);
+                (ip, reply(ip))
+            })
+            .collect();
+        assert!(flood.len() > MAX_DISCOVERY_REPLIES);
+        assert_eq!(collect_discovery(&flood).len(), MAX_DISCOVERY_REPLIES);
+    }
+
+    // ── Scanner metadata ────────────────────────────────────────────
+
+    #[test]
+    fn scanner_metadata_is_stable() {
+        let s = MediaServerScanner;
+        assert_eq!(s.id(), "media_server");
+        assert_eq!(s.name(), "Plex / Jellyfin Media Servers");
+        assert_eq!(s.estimated_duration_secs(), 15);
+        assert_eq!(
+            s.supported_perspectives(),
+            &[
+                Perspective::Unauthenticated,
+                Perspective::Authenticated,
+                Perspective::Privileged,
+            ]
+        );
     }
 
     proptest! {

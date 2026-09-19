@@ -1120,6 +1120,66 @@ mod tests {
         assert_eq!(parts.body_lower.len(), MAX_RESPONSE_BYTES);
     }
 
+    #[test]
+    fn tcp_parts_is_empty_tracks_the_body() {
+        assert!(TcpParts::default().is_empty());
+        assert!(!body(b"x").is_empty());
+    }
+
+    fn probe(data: &'static [u8], name: Option<&'static str>, read: Option<usize>) -> Probe {
+        Probe { data, name, read }
+    }
+
+    #[test]
+    fn same_probes_compares_every_field() {
+        let base = [probe(b"a", Some("n"), Some(10))];
+        assert!(same_probes(&base, &base));
+        assert!(same_probes(&[], &[]));
+        // A single field differing is enough to differ.
+        assert!(!same_probes(&base, &[probe(b"b", Some("n"), Some(10))]));
+        assert!(!same_probes(&base, &[probe(b"a", Some("m"), Some(10))]));
+        assert!(!same_probes(&base, &[probe(b"a", Some("n"), Some(20))]));
+        // Length differences differ even when the shared prefix matches.
+        assert!(!same_probes(
+            &base,
+            &[base[0], probe(b"a", Some("n"), Some(10))]
+        ));
+        assert!(!same_probes(&base, &[]));
+    }
+
+    fn leak_template(id: &'static str, data: &'static [u8]) -> &'static TcpTemplate {
+        let probes: &'static [Probe] = Box::leak(vec![probe(data, None, None)].into_boxed_slice());
+        Box::leak(Box::new(TcpTemplate {
+            id,
+            product: "test",
+            ports: &[1],
+            probes,
+            read_size: 1024,
+            condition: Condition::Or,
+            matchers: &[],
+        }))
+    }
+
+    #[test]
+    fn probe_groups_over_the_cap_are_truncated() {
+        // One distinct probe sequence per template -> one group each.
+        let ids = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"];
+        let datas: [&[u8]; 7] = [b"a", b"b", b"c", b"d", b"e", b"f", b"g"];
+        assert_eq!(ids.len(), MAX_PROBE_GROUPS + 1);
+        let templates: Vec<&'static TcpTemplate> = ids
+            .iter()
+            .zip(datas)
+            .map(|(id, data)| leak_template(id, data))
+            .collect();
+        assert_eq!(group_by_probe(&templates).len(), MAX_PROBE_GROUPS);
+
+        // Templates sharing a probe collapse into one group, none dropped.
+        let shared = vec![leak_template("s0", b"same"), leak_template("s1", b"same")];
+        let groups = group_by_probe(&shared);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].templates.len(), 2);
+    }
+
     /// A banner split across segments must arrive whole, or detection would
     /// depend on how the peer chunked its write.
     #[tokio::test]
@@ -1427,6 +1487,12 @@ mod tests {
             Some("diskstation-ftp-service")
         );
         assert!(finding.description.contains("FTP Service"));
+        // The "also matched" list names the *other* hits, not the primary.
+        assert!(
+            finding.description.contains("also matched: FTP Service."),
+            "{}",
+            finding.description
+        );
         let evidence = finding.evidence.unwrap();
         assert!(evidence.contains("diskstation-ftp-detect"));
         assert!(evidence.contains("ftp-detect"));
@@ -1664,6 +1730,10 @@ mod tests {
         );
         assert_eq!(service_slug("Pi-hole Login Panel"), "pi-hole-login-panel");
         assert_eq!(service_slug("  "), "");
+        // No leading separator, and consecutive separators collapse to one.
+        assert_eq!(service_slug(" nginx"), "nginx");
+        assert_eq!(service_slug("a  b"), "a-b");
+        assert_eq!(service_slug("abc!"), "abc");
     }
 
     #[test]
@@ -1671,6 +1741,24 @@ mod tests {
         assert_eq!(escape_pattern(b"6ES7"), "6ES7");
         assert_eq!(escape_pattern(b"\x00\xff"), "\\x00\\xff");
         assert_eq!(escape_pattern(&[b'a'; 60]).chars().count(), 49);
+    }
+
+    #[test]
+    fn scanner_metadata_is_stable() {
+        let s = NucleiDetectScanner;
+        assert_eq!(s.id(), "nuclei-detect");
+        assert_eq!(s.name(), "Nuclei Detection Templates");
+        assert_eq!(s.estimated_duration_secs(), 20);
+        assert_eq!(
+            s.supported_perspectives(),
+            &[
+                Perspective::Unauthenticated,
+                Perspective::Authenticated,
+                Perspective::Privileged,
+            ]
+        );
+        assert_eq!(s.relevant_ports(), crate::nuclei_db::NUCLEI_PORTS);
+        assert!(!s.relevant_ports().is_empty());
     }
 
     // ── Targeting ───────────────────────────────────────────────────
