@@ -1,0 +1,15 @@
+# cargo-mutants configuration. Generated data tables carry no logic worth
+# mutating and are slow to rebuild, so they are excluded; their lookup
+# helpers live in sibling files or are covered by table-integrity tests.
+exclude_globs = [
+    "**/recog_db.rs",
+    "**/oui_db.rs",
+    "**/kev_db.rs",
+    "**/ha_discovery_db.rs",
+    "**/nuclei_db.rs",
+    "**/vulnrichment_db.rs",
+    "**/default_creds_db.rs",
+    "**/eol_db.rs",
+]
+timeout_multiplier = 3.0
+minimum_test_timeout = 60

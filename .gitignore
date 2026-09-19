@@ -41,3 +41,6 @@ fuzz-*.log
 .playwright-mcp/
 
 __pycache__/
+
+# cargo-mutants
+mutants.out*/
