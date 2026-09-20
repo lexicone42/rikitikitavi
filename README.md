@@ -64,6 +64,8 @@ Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
 network.
 
+Devices are identified by a layered stack: IEEE OUI vendor lookup, then Home Assistant's discovery tables (DHCP/mDNS/SSDP matchers), Rapid7 Recog banner fingerprints (2,430 patterns), and mDNS service types including Matter and Thread border routers. Each scan also produces a per-device letter-grade report card.
+
 ```
 Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 ┌─────────┐                  ┌──────────────┐
@@ -83,7 +85,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | Scanner | What it checks |
 |---------|---------------|
 | **Network Discovery** | Interface enumeration, ARP cache, device count |
-| **Port Scanner** | TCP connect scan of 42+ common ports across all LAN hosts |
+| **Port Scanner** | TCP connect scan of 58 common ports across all LAN hosts |
 | **Device Fingerprinting** | MAC OUI vendor lookup, port-based device classification |
 | **DNS Security** | Resolver config, DNSSEC validation, DNS rebinding, cross-resolver checks |
 | **Router Security** | Admin panel exposure, HTTPS enforcement, UPnP |
@@ -144,6 +146,10 @@ of raw CVE/CVSS so a non-expert knows what to fix first:
   (banner/version match), or **~ inferred** (heuristic). A version banner is
   only *probable* because a backported patch can leave an old version string,
   so confirmed findings stand out from ones worth double-checking.
+- **Exploitation tier (CISA Vulnrichment):** an embedded SSVC snapshot (CC0) adds a `poc` tier — public exploit code exists but exploitation is not yet observed — between KEV and the rest, and backfills CWEs.
+- **End-of-life components:** server and OS versions are checked against endoflife.date cycles; a distribution-backported build is flagged Low rather than Medium since it may still carry fixes.
+- **OWASP IoT Top 10:** each finding is tagged with its OWASP IoT Top 10 (2018) category (`I1`–`I10`) in the JSON, HTML and OCSF output.
+- **AyySSHush backdoor:** SSH on TCP 53282 is flagged (CVE-2023-39780, CISA KEV), with the ASUS-specific CVE asserted only when the host is identifiably ASUS.
 
 ### Per-Device Report Cards
 
@@ -831,7 +837,7 @@ performance.
 ## Development
 
 ```bash
-# Run all tests (2010 tests across 17 binaries, incl. ~200 proptest invariants)
+# Run all tests (2196 tests across 17 binaries, incl. ~200 proptest invariants)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)

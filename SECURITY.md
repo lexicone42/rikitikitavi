@@ -9,8 +9,8 @@ or have authorization to test. It is not an offensive security tool.
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x   | Yes       |
-| < 0.3   | No        |
+| 0.4.x   | Yes       |
+| < 0.4   | No        |
 
 ## Reporting a Vulnerability
 
@@ -66,13 +66,17 @@ check:
 
 ### Fuzzing and Property Tests
 
-Eight libFuzzer harnesses under `fuzz/fuzz_targets/` cover the parsers that
+Thirteen libFuzzer harnesses under `fuzz/fuzz_targets/` cover the parsers that
 consume network-sourced bytes: `dns_packet`, `wifi_frame`, `ssh_kex`,
-`service_banners`, `http_headers`, `ssdp_upnp`, `x509_der`, `identifiers`. CI
-builds every target on nightly (`fuzz-build` job) but does not run them; run
-them locally per `fuzz/README.md`. The workspace also carries ~200 `proptest`
-invariants (no panic on arbitrary input, counting invariants, serialization and
-fingerprint round-trips).
+`service_banners`, `http_headers`, `ssdp_upnp`, `x509_der`, `identifiers`,
+`smart_home`, `ot_protocols`, `web_apps`, `recog`, `tables`. CI builds every
+target on nightly (`fuzz-build` job) but does not run them; run them locally per
+`fuzz/README.md`. The workspace also carries ~200 `proptest` invariants (no
+panic on arbitrary input, counting invariants, serialization and fingerprint
+round-trips). Mutation testing (cargo-mutants, `.cargo/mutants.toml`) measures
+whether those tests actually catch bugs: the analysis logic is hardened to only
+proven-equivalent surviving mutants, and the scanner classification logic to an
+86.5% catchable score.
 
 ### Network Scanning Safety
 
@@ -110,7 +114,7 @@ all 119 SNMP community strings from `snmp.txt`. It is a static table
 code. How it is used depends strictly on scan intensity:
 
 - **SNMP communities (Active-ok)**: an SNMP `GET` is a read, not a login, so the
-  community wordlist runs at Active. It is capped at 12 communities per host,
+  community wordlist runs at Active. It is capped at 8 communities per host,
   ordered by prevalence, time-budgeted so a silent host is not probed for long,
   and it stops at the first community that answers. No SET is ever sent.
 - **Active and below — no login**: for a device whose class is known to ship
