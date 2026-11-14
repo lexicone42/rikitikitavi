@@ -44,6 +44,9 @@ pub enum Command {
         error or timeout, or the finding cannot be replayed by a unicast probe)")]
     Verify(VerifyArgs),
 
+    /// Markdown fix checklist from the last full scan (Do now / This weekend / Replace / Accepted).
+    FixPlan(FixPlanArgs),
+
     /// Generate a report from the last scan.
     Report(ReportArgs),
 
@@ -211,6 +214,17 @@ pub struct VerifyArgs {
     pub format: VerifyFormatArg,
 
     /// Write the report to this file instead of stdout.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct FixPlanArgs {
+    /// Accepted-risk ledger (YAML, as for `scan --accept-file`); fills the Accepted section.
+    #[arg(long)]
+    pub accept_file: Option<PathBuf>,
+
+    /// Write the plan to this file (mode 0600) instead of stdout.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 }
@@ -555,6 +569,28 @@ mod tests {
         assert_eq!(args.fail_on, FailOnArg::Never);
         assert!(matches!(args.network, NetworkArg::Auto));
         assert!(args.accept_file.is_none());
+    }
+
+    #[test]
+    fn fix_plan_parses() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "fix-plan"]).unwrap();
+        let Command::FixPlan(args) = cli.command else {
+            panic!("expected fix-plan command");
+        };
+        assert!(args.accept_file.is_none() && args.output.is_none());
+        let cli = Cli::try_parse_from([
+            "rikitikitavi",
+            "fix-plan",
+            "--accept-file",
+            "a.yaml",
+            "-o",
+            "plan.md",
+        ])
+        .unwrap();
+        let Command::FixPlan(args) = cli.command else {
+            panic!("expected fix-plan command");
+        };
+        assert_eq!(args.output.unwrap(), PathBuf::from("plan.md"));
     }
 
     #[test]

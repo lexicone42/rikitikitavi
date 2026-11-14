@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Command::Scan(args) => cmd_scan(args, &loaded).await,
         Command::Verify(args) => cmd_verify(args, &loaded).await,
+        Command::FixPlan(args) => cmd_fix_plan(&args),
         #[cfg(feature = "tui")]
         Command::Tui(args) => cmd_tui(args, app_config).await,
         Command::Report(args) => {
@@ -389,6 +390,34 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         }
     }
 
+    Ok(())
+}
+
+fn cmd_fix_plan(args: &cli::FixPlanArgs) -> Result<()> {
+    use anyhow::Context as _;
+    let ledger = args.accept_file.as_deref().map(accept::load).transpose()?;
+    let history = rikitikitavi_analysis::ScanHistory::new()
+        .context("could not determine the scan history directory")?;
+    let mut results = history
+        .load_latest()?
+        .context("no saved full scan; run `rikitikitavi scan` first")?;
+    if let Some(ledger) = ledger.as_ref() {
+        apply_ledger(ledger, &mut results);
+    }
+    let generated = format!(
+        "Generated {} from the scan of {}.",
+        chrono::Local::now().format("%Y-%m-%d %H:%M"),
+        results.scanned_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    if let Some(path) = args.output.as_ref() {
+        rikitikitavi_export::export_fix_plan(&results, Some(&generated), path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("Fix plan written to {}", path.display());
+    } else {
+        use std::io::Write as _;
+        let plan = rikitikitavi_export::render_fix_plan(&results, Some(&generated));
+        tolerate_broken_pipe(write!(std::io::stdout().lock(), "{plan}"))?;
+    }
     Ok(())
 }
 

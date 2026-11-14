@@ -470,12 +470,14 @@ pub fn write_text<W: std::io::Write>(
             None => writeln!(out, "(no host)")?,
         }
         for item in items {
-            let port = item.port.map_or_else(String::new, |p| format!(":{p}"));
+            let port = item
+                .port
+                .map_or_else(String::new, |p| format!(" (port {p})"));
             writeln!(
                 out,
                 "  {:<13}  {:<8}  {}{port}  [{}]",
                 item.verdict.label(),
-                item.severity,
+                item.severity.to_string(),
                 item.title,
                 item.fingerprint
             )?;
