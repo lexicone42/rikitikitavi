@@ -38,7 +38,7 @@ pub fn load_config(path: Option<&Path>) -> Result<LoadedConfig> {
 fn read_config_file(p: &Path) -> Result<AppConfig> {
     let contents = std::fs::read_to_string(p)
         .with_context(|| format!("failed to read config file: {}", p.display()))?;
-    serde_yaml_ng::from_str(&contents)
+    serde_saphyr::from_str(&contents)
         .with_context(|| format!("failed to parse config file: {}", p.display()))
 }
 

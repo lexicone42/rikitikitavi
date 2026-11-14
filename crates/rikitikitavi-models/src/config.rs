@@ -362,8 +362,8 @@ mod tests {
             ..ScanConfig::default()
         };
 
-        let yaml = serde_yaml_ng::to_string(&config).unwrap();
-        let recovered: ScanConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let recovered: ScanConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(recovered.timeout_seconds, 60);
         assert_eq!(recovered.parallelism, 50);
         assert!(!recovered.attack_paths);
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn test_partial_deserialization_uses_defaults() {
         let yaml = "timeout_seconds: 120\n";
-        let config: ScanConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: ScanConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.timeout_seconds, 120);
         // Other fields should use defaults
         assert_eq!(config.parallelism, 100);
@@ -464,19 +464,19 @@ mod tests {
     #[test]
     fn test_unifi_controller_yaml_omitting_site_uses_default() {
         let yaml = "url: https://192.168.1.1\n";
-        let config: UniFiControllerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: UniFiControllerConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.url.as_deref(), Some("https://192.168.1.1"));
         assert_eq!(config.site, "default");
 
         let yaml = "unifi:\n  controller:\n    url: https://192.168.1.1\n";
-        let app: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let app: AppConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(app.unifi.controller.unwrap().site, "default");
     }
 
     #[test]
     fn test_unifi_controller_yaml_explicit_site_kept() {
         let yaml = "site: office\n";
-        let config: UniFiControllerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: UniFiControllerConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.site, "office");
     }
 
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn example_config_parses_and_matches_defaults() {
         let cfg: AppConfig =
-            serde_yaml_ng::from_str(include_str!("../../../config.example.yaml")).unwrap();
+            serde_saphyr::from_str(include_str!("../../../config.example.yaml")).unwrap();
         let defaults = AppConfig::default();
         assert_eq!(cfg.scan.intensity, defaults.scan.intensity);
         assert_eq!(cfg.scan.parallelism, defaults.scan.parallelism);

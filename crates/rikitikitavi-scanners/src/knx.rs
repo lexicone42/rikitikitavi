@@ -265,7 +265,7 @@ fn parse_device_info(payload: &[u8], server: &mut KnxServer) {
 /// Parse a service-families DIB payload into `(id, version)` pairs.
 fn parse_service_families(payload: &[u8]) -> Vec<(u8, u8)> {
     let (pairs, _) = payload.as_chunks::<2>();
-    pairs.iter().map(|p| (p[0], p[1])).collect()
+    pairs.iter().map(|&p| p.into()).collect()
 }
 
 /// Parse a `SEARCH_RESPONSE` or `SEARCH_RESPONSE_EXTENDED` frame.

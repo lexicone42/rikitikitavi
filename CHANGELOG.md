@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Dependencies refreshed; six `quinn-proto`/`quinn-udp` advisories cleared.
+- YAML parsing moved from `serde_yaml_ng` (on the archived `unsafe-libyaml`) to
+  the pure-Rust `serde-saphyr`, for config, rule files and remediation templates.
+- MSRV raised to 1.89 (required by `uuid`). Unused workspace dependencies removed.
+- KEV catalog 2026.11.13 (1,781 entries), IEEE OUI table (40,497) and the
+  endoflife.date table regenerated.
+
 ## 0.4.0 — 2026-09-20
 
 The whole detection roadmap, plus custom rules, per-device report cards, and a

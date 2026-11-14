@@ -21,25 +21,25 @@ struct OvrsTemplate {
     metadata: Option<TemplateMetadata>,
     #[serde(default)]
     #[allow(dead_code)]
-    r#match: Option<serde_yaml_ng::Value>,
+    r#match: Option<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
     parameters: Vec<ParameterDef>,
     steps: Vec<Step>,
     #[serde(default)]
     #[allow(dead_code)]
-    preflight: Vec<serde_yaml_ng::Value>,
+    preflight: Vec<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
-    validation: Vec<serde_yaml_ng::Value>,
+    validation: Vec<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
-    rollback: Option<serde_yaml_ng::Value>,
+    rollback: Option<serde_json::Value>,
     #[serde(default)]
     remediation: Option<RemediationHints>,
     #[serde(default)]
     #[allow(dead_code)]
-    extensions: Option<serde_yaml_ng::Value>,
+    extensions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +77,7 @@ struct Step {
     id: String,
     kind: String,
     #[serde(default)]
-    params: HashMap<String, serde_yaml_ng::Value>,
+    params: HashMap<String, serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
     depends_on: Vec<String>,
@@ -123,9 +123,9 @@ fn init_registry() -> RemediationRegistry {
 
     let mut templates = HashMap::new();
     for source in yaml_sources {
-        for document in serde_yaml_ng::Deserializer::from_str(source) {
-            let template: OvrsTemplate = serde::Deserialize::deserialize(document)
-                .expect("embedded OVRS YAML must be valid");
+        for document in yaml_documents(source) {
+            let template: OvrsTemplate =
+                serde_saphyr::from_str(&document).expect("embedded OVRS YAML must be valid");
             let id = template.id.clone();
             assert!(
                 templates.insert(id.clone(), template).is_none(),
@@ -135,6 +135,24 @@ fn init_registry() -> RemediationRegistry {
     }
 
     RemediationRegistry { templates }
+}
+
+/// Split a multi-document YAML stream on `---` separator lines; empty documents are dropped.
+fn yaml_documents(source: &str) -> Vec<String> {
+    let mut docs = vec![String::new()];
+    for line in source.lines() {
+        if line.trim_end() == "---" {
+            docs.push(String::new());
+        } else if let Some(doc) = docs.last_mut() {
+            doc.push_str(line);
+            doc.push('\n');
+        }
+    }
+    docs.retain(|d| {
+        d.lines()
+            .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+    });
+    docs
 }
 
 /// Look up a remediation template by ID, applying parameter interpolation.
@@ -147,7 +165,7 @@ pub fn get(id: &str, params: &[(&str, &str)]) -> Option<Remediation> {
         .iter()
         .filter(|s| s.kind == "manual.step")
         .filter_map(|s| s.params.get("text"))
-        .filter_map(serde_yaml_ng::Value::as_str)
+        .filter_map(serde_json::Value::as_str)
         .map(|text| interpolate(text, params))
         .collect();
 

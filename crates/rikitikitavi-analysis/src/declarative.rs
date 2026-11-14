@@ -146,14 +146,20 @@ pub struct VersionMatch {
 /// Deserialize a YAML scalar (string, integer or float) to its string form, so
 /// an unquoted `version: 9.6` is accepted alongside `version: "1.27.0"`.
 fn scalar_to_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    use serde::de::Error as _;
-    match serde_yaml_ng::Value::deserialize(d)? {
-        serde_yaml_ng::Value::String(s) => Ok(s),
-        serde_yaml_ng::Value::Number(n) => Ok(n.to_string()),
-        other => Err(D::Error::custom(format!(
-            "expected a version scalar, got {other:?}"
-        ))),
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Scalar {
+        Text(String),
+        Unsigned(u64),
+        Signed(i64),
+        Float(f64),
     }
+    Ok(match Scalar::deserialize(d)? {
+        Scalar::Text(s) => s,
+        Scalar::Unsigned(n) => n.to_string(),
+        Scalar::Signed(n) => n.to_string(),
+        Scalar::Float(n) => n.to_string(),
+    })
 }
 
 /// A rule file: a bare list of rules, or `{ rules: [ ... ] }`.
@@ -174,7 +180,7 @@ pub fn load_rules(path: &Path) -> anyhow::Result<Vec<Rule>> {
 
 /// Parse and validate rules from YAML text.
 pub fn parse_rules(text: &str) -> anyhow::Result<Vec<Rule>> {
-    let file: RuleFile = serde_yaml_ng::from_str(text)?;
+    let file: RuleFile = serde_saphyr::from_str(text)?;
     let rules = match file {
         RuleFile::Wrapped { rules } | RuleFile::Bare(rules) => rules,
     };

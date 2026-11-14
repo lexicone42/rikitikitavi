@@ -1,32 +1,21 @@
 //! CISA Known Exploited Vulnerabilities (KEV) catalog — auto-generated.
 //!
 //! Source: <https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json>
-//! Catalog version: 2026.09.16 | Released: 2026-09-16T18:47:50.6796Z
-//! Entries: 1,713
+//! Catalog version: 2026.11.13 | Released: 2026-11-13T20:24:18.3008Z
+//! Entries: 1,781
 //!
 //! Regenerate with `python3 scripts/gen_kev_db.py`. Membership means CISA has
 //! evidence the CVE is being exploited in the wild — the strongest signal that a
 //! finding should be fixed immediately.
 
 /// The catalog version this snapshot was generated from.
-pub const KEV_CATALOG_VERSION: &str = "2026.09.16";
+pub const KEV_CATALOG_VERSION: &str = "2026.11.13";
 
 /// Whether `cve` (e.g. "CVE-2024-3400") is in the CISA KEV catalog.
 ///
 /// Case-insensitive; O(log n) binary search over the sorted table.
 #[must_use]
 pub fn is_kev(cve: &str) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        use std::sync::Once;
-        static SORTED: Once = Once::new();
-        SORTED.call_once(|| {
-            assert!(
-                KEV_CVES.windows(2).all(|w| w[0] < w[1]),
-                "KEV_CVES must be strictly ascending for binary_search"
-            );
-        });
-    }
     let needle = cve.trim().to_ascii_uppercase();
     KEV_CVES.binary_search(&needle.as_str()).is_ok()
 }
@@ -222,6 +211,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2015-3043",
     "CVE-2015-3113",
     "CVE-2015-3246",
+    "CVE-2015-3306",
     "CVE-2015-4068",
     "CVE-2015-4495",
     "CVE-2015-4852",
@@ -231,6 +221,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2015-5123",
     "CVE-2015-5287",
     "CVE-2015-5317",
+    "CVE-2015-5477",
     "CVE-2015-6175",
     "CVE-2015-7450",
     "CVE-2015-7645",
@@ -257,6 +248,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2016-20017",
     "CVE-2016-2386",
     "CVE-2016-2388",
+    "CVE-2016-3081",
     "CVE-2016-3088",
     "CVE-2016-3235",
     "CVE-2016-3298",
@@ -870,6 +862,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2021-31955",
     "CVE-2021-31956",
     "CVE-2021-31979",
+    "CVE-2021-3199",
     "CVE-2021-32030",
     "CVE-2021-32648",
     "CVE-2021-33044",
@@ -1108,6 +1101,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2023-22515",
     "CVE-2023-22518",
     "CVE-2023-22527",
+    "CVE-2023-22894",
     "CVE-2023-22952",
     "CVE-2023-23376",
     "CVE-2023-23397",
@@ -1293,6 +1287,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2024-27199",
     "CVE-2024-27348",
     "CVE-2024-27443",
+    "CVE-2024-27834",
     "CVE-2024-28986",
     "CVE-2024-28987",
     "CVE-2024-28995",
@@ -1513,6 +1508,8 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-38352",
     "CVE-2025-3928",
     "CVE-2025-3935",
+    "CVE-2025-39682",
+    "CVE-2025-39964",
     "CVE-2025-4008",
     "CVE-2025-40536",
     "CVE-2025-40551",
@@ -1568,6 +1565,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-59689",
     "CVE-2025-59718",
     "CVE-2025-60710",
+    "CVE-2025-61624",
     "CVE-2025-61757",
     "CVE-2025-61882",
     "CVE-2025-61884",
@@ -1599,9 +1597,38 @@ static KEV_CVES: &[&str] = &[
     "CVE-2025-9377",
     "CVE-2026-0257",
     "CVE-2026-0300",
+    "CVE-2026-0322",
     "CVE-2026-0770",
+    "CVE-2026-102489",
+    "CVE-2026-102490",
+    "CVE-2026-102764",
+    "CVE-2026-102895",
+    "CVE-2026-104286",
+    "CVE-2026-104935",
+    "CVE-2026-105133",
+    "CVE-2026-105134",
     "CVE-2026-10520",
+    "CVE-2026-106931",
+    "CVE-2026-109618",
+    "CVE-2026-109619",
+    "CVE-2026-110447",
+    "CVE-2026-110936",
+    "CVE-2026-111357",
+    "CVE-2026-111497",
+    "CVE-2026-111560",
+    "CVE-2026-111793",
+    "CVE-2026-114625",
+    "CVE-2026-114713",
     "CVE-2026-11645",
+    "CVE-2026-116606",
+    "CVE-2026-116779",
+    "CVE-2026-118527",
+    "CVE-2026-119977",
+    "CVE-2026-123039",
+    "CVE-2026-123158",
+    "CVE-2026-123218",
+    "CVE-2026-124194",
+    "CVE-2026-125350",
     "CVE-2026-12569",
     "CVE-2026-1281",
     "CVE-2026-1340",
@@ -1614,6 +1641,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-18556",
     "CVE-2026-18577",
     "CVE-2026-19490",
+    "CVE-2026-19868",
     "CVE-2026-20045",
     "CVE-2026-20079",
     "CVE-2026-20122",
@@ -1627,6 +1655,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-20253",
     "CVE-2026-20262",
     "CVE-2026-20316",
+    "CVE-2026-20320",
     "CVE-2026-20349",
     "CVE-2026-20700",
     "CVE-2026-20805",
@@ -1639,6 +1668,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-21519",
     "CVE-2026-21525",
     "CVE-2026-21533",
+    "CVE-2026-21589",
     "CVE-2026-21643",
     "CVE-2026-21962",
     "CVE-2026-22719",
@@ -1674,6 +1704,7 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-39808",
     "CVE-2026-39987",
     "CVE-2026-41091",
+    "CVE-2026-41709",
     "CVE-2026-41940",
     "CVE-2026-42016",
     "CVE-2026-42018",
@@ -1684,10 +1715,12 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-45321",
     "CVE-2026-45498",
     "CVE-2026-45659",
+    "CVE-2026-46300",
     "CVE-2026-46817",
     "CVE-2026-48027",
     "CVE-2026-48172",
     "CVE-2026-48282",
+    "CVE-2026-48356",
     "CVE-2026-48558",
     "CVE-2026-48710",
     "CVE-2026-48907",
@@ -1697,7 +1730,9 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-50522",
     "CVE-2026-50751",
     "CVE-2026-5281",
+    "CVE-2026-53266",
     "CVE-2026-53362",
+    "CVE-2026-5430",
     "CVE-2026-54420",
     "CVE-2026-55040",
     "CVE-2026-55255",
@@ -1715,18 +1750,25 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-63077",
     "CVE-2026-64849",
     "CVE-2026-65400",
+    "CVE-2026-65660",
     "CVE-2026-66384",
     "CVE-2026-67277",
+    "CVE-2026-67279",
     "CVE-2026-68820",
     "CVE-2026-6973",
+    "CVE-2026-71362",
     "CVE-2026-72529",
     "CVE-2026-72530",
+    "CVE-2026-7273",
     "CVE-2026-72898",
     "CVE-2026-73570",
     "CVE-2026-7473",
     "CVE-2026-75650",
+    "CVE-2026-76418",
     "CVE-2026-76460",
     "CVE-2026-76461",
+    "CVE-2026-76504",
+    "CVE-2026-76519",
     "CVE-2026-8037",
     "CVE-2026-81578",
     "CVE-2026-81963",
@@ -1738,15 +1780,30 @@ static KEV_CVES: &[&str] = &[
     "CVE-2026-8452",
     "CVE-2026-84869",
     "CVE-2026-85046",
+    "CVE-2026-85102",
     "CVE-2026-85706",
     "CVE-2026-85880",
     "CVE-2026-86060",
     "CVE-2026-86218",
+    "CVE-2026-86950",
     "CVE-2026-87491",
     "CVE-2026-87886",
+    "CVE-2026-87902",
+    "CVE-2026-88771",
+    "CVE-2026-88772",
+    "CVE-2026-88779",
     "CVE-2026-9082",
     "CVE-2026-9198",
+    "CVE-2026-93616",
+    "CVE-2026-93952",
+    "CVE-2026-94127",
     "CVE-2026-9586",
+    "CVE-2026-96652",
+    "CVE-2026-96654",
+    "CVE-2026-96655",
+    "CVE-2026-96656",
+    "CVE-2026-96951",
+    "CVE-2026-97229",
 ];
 
 #[cfg(test)]

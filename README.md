@@ -25,7 +25,7 @@ learning to kill your own snakes. This one hunts security vulnerabilities.
 ## Quick Start
 
 ```bash
-# Install from GitHub (Rust 1.88+ required)
+# Install from GitHub (Rust 1.89+ required)
 cargo install --git https://github.com/lexicone42/rikitikitavi
 
 # Run a scan
@@ -862,7 +862,7 @@ cargo build --profile release-embedded
 
 CI (`.github/workflows/ci.yml`) runs six jobs on every push to `main` and
 every PR: `check` (fmt + clippy), `test` (Linux), `test-macos`, `msrv`
-(`cargo check` on Rust 1.88), `deny`, and `fuzz-build` (nightly `cargo fuzz
+(`cargo check` on Rust 1.89), `deny`, and `fuzz-build` (nightly `cargo fuzz
 build`; the fuzzers are built, not run). Release-profile builds are not part
 of CI.
 

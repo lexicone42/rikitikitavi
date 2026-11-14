@@ -314,7 +314,7 @@ impl Scanner for Tr069Scanner {
                 Some(resp) => {
                     let signal = classify_tr069_response(&resp);
                     let evidence = build_evidence(&resp);
-                    (signal, evidence, resp.server.clone())
+                    (signal, evidence, resp.server)
                 }
                 None => (Tr069Signal::OpenPortOnly, None, None),
             };

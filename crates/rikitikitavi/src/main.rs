@@ -1499,7 +1499,7 @@ fn cmd_config(args: &cli::ConfigArgs, loaded: &config::LoadedConfig) -> Result<(
             }
         }
         cli::ConfigCommand::Show => {
-            let yaml = serde_yaml_ng::to_string(&redacted_for_display(&loaded.config))?;
+            let yaml = serde_saphyr::to_string(&redacted_for_display(&loaded.config))?;
             println!("{yaml}");
         }
     }
@@ -1757,7 +1757,7 @@ mod tests {
         cfg.apis.shodan_api_key = Some("shodan_zzz".to_owned());
         cfg.apis.censys_api_secret = Some("censys_sss".to_owned());
 
-        let yaml = serde_yaml_ng::to_string(&redacted_for_display(&cfg)).unwrap();
+        let yaml = serde_saphyr::to_string(&redacted_for_display(&cfg)).unwrap();
 
         // No secret value survives to the displayed output.
         for leaked in [

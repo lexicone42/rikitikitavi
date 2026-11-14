@@ -32,14 +32,14 @@ pub fn calculate_risk_score(findings: &[Finding]) -> f64 {
     let mut score: f64 = 0.0;
 
     for finding in findings {
-        let base = match finding.severity {
+        let base: f64 = match finding.severity {
             Severity::Critical => 25.0,
             Severity::High => 15.0,
             Severity::Medium => 8.0,
             Severity::Low => 3.0,
             Severity::Info => 1.0,
         };
-        score += base * exploit_multiplier(finding);
+        score = base.mul_add(exploit_multiplier(finding), score);
     }
 
     score.min(100.0)

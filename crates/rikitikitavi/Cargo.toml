@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "rikitikitavi"
@@ -31,7 +32,7 @@ futures.workspace = true
 clap.workspace = true
 serde.workspace = true
 chrono.workspace = true
-serde_yaml_ng.workspace = true
+serde-saphyr.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
