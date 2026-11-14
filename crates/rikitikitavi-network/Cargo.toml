@@ -18,6 +18,7 @@ tracing.workspace = true
 anyhow.workspace = true
 ipnetwork.workspace = true
 reqwest.workspace = true
+hickory-resolver.workspace = true
 pcap = { workspace = true, optional = true }
 
 [dev-dependencies]

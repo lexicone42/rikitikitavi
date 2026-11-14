@@ -20,6 +20,7 @@ pub mod dns;
 pub mod eol_db;
 pub mod exposure;
 pub mod ha_discovery_db;
+pub mod hostname_db;
 pub mod http_audit;
 pub mod http_util;
 pub mod isolation;

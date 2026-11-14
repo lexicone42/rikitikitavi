@@ -589,6 +589,8 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     let _ = recog_warm.await;
 
+    let rdns_task = spawn_rdns(ctx, &exclusions, &excluded_mac_ips);
+
     // Phase 2: deep analysis, concurrent
     let phase2_filtered = filter_phase2(phase2, ctx, &exclusions, &excluded_mac_ips);
 
@@ -626,6 +628,13 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
                 );
             }
         }
+    }
+
+    if let Some(task) = rdns_task
+        && let Ok(outcome) = task.await
+    {
+        let ptr = rdns_findings(&outcome, &ctx.discovered_devices, &all_findings);
+        all_findings.extend(ptr);
     }
 
     if !exclusions.is_empty() {
@@ -946,6 +955,141 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
     }
 }
 
+/// Scanner id of reverse-DNS hint findings.
+const RDNS_SCANNER: &str = "dns_ptr";
+
+/// Nameservers and targets for the PTR pass: local nameservers from the gateway
+/// and `resolv`, and IPv4 devices, both minus exclusions. `None` below Active
+/// intensity or without a nameserver.
+fn rdns_plan(
+    ctx: &ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+    resolv: &str,
+) -> Option<(Vec<std::net::Ipv4Addr>, Vec<std::net::Ipv4Addr>)> {
+    use rikitikitavi_models::config::ScanIntensity;
+    use std::net::Ipv4Addr;
+
+    if !ctx.config.intensity.at_least(ScanIntensity::Active) {
+        return None;
+    }
+    let allowed = |ip: Ipv4Addr| {
+        let ip = IpAddr::V4(ip);
+        !exclusions.excludes_ip(ip) && !excluded_mac_ips.contains(&ip)
+    };
+    let gateway = match ctx.gateway {
+        Some(IpAddr::V4(gw)) => Some(gw),
+        _ => None,
+    };
+    let nameservers: Vec<Ipv4Addr> = rikitikitavi_network::rdns::local_nameservers(gateway, resolv)
+        .into_iter()
+        .filter(|ns| allowed(*ns))
+        .collect();
+    if nameservers.is_empty() {
+        return None;
+    }
+    let targets: Vec<Ipv4Addr> = ctx
+        .discovered_devices
+        .iter()
+        .filter_map(|d| match d.ip {
+            IpAddr::V4(ip) if allowed(ip) => Some(ip),
+            _ => None,
+        })
+        .collect();
+    Some((nameservers, targets))
+}
+
+/// Start the PTR pass planned by [`rdns_plan`] under the `rdns` span.
+fn spawn_rdns(
+    ctx: &ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> Option<tokio::task::JoinHandle<rikitikitavi_network::rdns::RdnsOutcome>> {
+    use rikitikitavi_network::rdns;
+
+    let resolv = rdns::system_resolv_conf();
+    let (nameservers, targets) = rdns_plan(ctx, exclusions, excluded_mac_ips, &resolv)?;
+    let cfg = rdns::RdnsConfig {
+        strip_suffixes: rdns::search_domains(&resolv),
+        ..rdns::RdnsConfig::default()
+    };
+    let span = tracing::info_span!(
+        "rdns",
+        queried = tracing::field::Empty,
+        resolved = tracing::field::Empty,
+    );
+    Some(tokio::spawn(
+        async move {
+            let outcome = rdns::reverse_lookup(&nameservers, &targets, &cfg).await;
+            let span = tracing::Span::current();
+            span.record("queried", outcome.queried);
+            span.record("resolved", outcome.names.len());
+            tracing::info!(
+                via_rd0 = outcome.via_rd0,
+                via_rd1 = outcome.via_rd1,
+                "reverse DNS complete"
+            );
+            outcome
+        }
+        .instrument(span),
+    ))
+}
+
+/// One `dns_ptr` hint finding per resolved device. The hostname is left off when
+/// another hint already names the host; the type comes from the hostname table.
+fn rdns_findings(
+    outcome: &rikitikitavi_network::rdns::RdnsOutcome,
+    devices: &[Device],
+    findings: &[Finding],
+) -> Vec<Finding> {
+    use rikitikitavi_scanners::hostname_db::classify_hostname;
+
+    let named: HashSet<IpAddr> = findings
+        .iter()
+        .filter(|f| f.device_hint.as_ref().is_some_and(|h| h.hostname.is_some()))
+        .filter_map(|f| f.affected_ip)
+        .collect();
+    let mut out: Vec<Finding> = outcome
+        .names
+        .iter()
+        .filter_map(|(ip, name)| {
+            let ip = IpAddr::V4(*ip);
+            let device = devices.iter().find(|d| d.ip == ip)?;
+            let mut hint = DeviceHint::new();
+            if device.hostname.is_none() && !named.contains(&ip) {
+                hint = hint.with_hostname(name);
+            }
+            let mut description = format!("The local resolver's PTR record for {ip} is {name}.");
+            if let Some(rule) = classify_hostname(name, device.vendor.as_deref()) {
+                hint = hint
+                    .with_device_type(rule.device_type)
+                    .with_device_subtype(rule.subtype);
+                let _ = std::fmt::Write::write_fmt(
+                    &mut description,
+                    format_args!(
+                        " The name matches hostname pattern `{}` ({}).",
+                        rule.pattern,
+                        rule.device_type.label()
+                    ),
+                );
+            }
+            Some(
+                Finding::new(
+                    RDNS_SCANNER,
+                    &format!("Reverse DNS name {name} for {ip}"),
+                    &description,
+                    rikitikitavi_core::Severity::Info,
+                )
+                .with_ip(ip)
+                .with_confidence(rikitikitavi_core::Confidence::Probable)
+                .with_device_hint(hint),
+            )
+        })
+        .collect();
+    out.sort_by_key(|f| f.affected_ip);
+    out
+}
+
 /// Strip a `.local` suffix; return `None` for empty or UUID-style hostnames.
 fn clean_hostname(raw: &str) -> Option<String> {
     let cleaned = raw.strip_suffix(".local").unwrap_or(raw).trim();
@@ -1010,6 +1154,8 @@ fn mdns_hint_is_qualified(service: Option<&str>, hint: &DeviceHint) -> bool {
 fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
     match finding.scanner.as_str() {
         "services" => (2, 0),
+        "device" => (1, 0),
+        RDNS_SCANNER => (1, 1),
         "mdns" => {
             // `mdns` hints carrying a vendor come from UPnP.
             if hint.vendor.is_some() {
@@ -1019,7 +1165,7 @@ fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
                 (3, u8::from(qualified))
             }
         }
-        _ => (1, 0),
+        _ => (1, 2),
     }
 }
 
@@ -1037,7 +1183,8 @@ fn hint_order_key(rank: (u8, u8), hint: &DeviceHint) -> (u8, u8, &str, &str, &st
 }
 
 /// Merge `DeviceHint`s from findings into devices; higher rank overwrites lower.
-/// Tier: `device`/other = 1, `services` = 2, `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
+/// Tier: `device`/other = 1 (`device` < `dns_ptr` < other within it), `services` = 2,
+/// `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
 /// Within the `mdns` tier a name-glob or TXT-predicate match outranks a bare
 /// service-type match; anything still equal is ordered by hint content, never by
 /// the order the responses arrived in.
@@ -1831,6 +1978,103 @@ mod tests {
         assert_eq!(devices[0].vendor.as_deref(), Some("LG"));
         // mDNS hostname is set
         assert_eq!(devices[0].hostname.as_deref(), Some("denon"));
+    }
+
+    fn rdns_outcome(entries: &[(&str, &str)]) -> rikitikitavi_network::rdns::RdnsOutcome {
+        rikitikitavi_network::rdns::RdnsOutcome {
+            names: entries
+                .iter()
+                .map(|(a, n)| (a.parse().unwrap(), (*n).to_owned()))
+                .collect(),
+            queried: entries.len(),
+            via_rd0: entries.len(),
+            via_rd1: 0,
+        }
+    }
+
+    fn oui_finding(addr: &str, vendor: &str, dt: DeviceType) -> Finding {
+        Finding::new("device", "oui", "desc", Severity::Info)
+            .with_ip(ip(addr))
+            .with_device_hint(DeviceHint::new().with_vendor(vendor).with_device_type(dt))
+    }
+
+    #[test]
+    fn rdns_hint_types_unifi_ap_over_oui_switch() {
+        let mut ap = Device::new(ip("192.168.1.20"));
+        ap.vendor = Some("Ubiquiti".to_owned());
+        let mut devices = vec![ap];
+        let mut findings = vec![oui_finding("192.168.1.20", "Ubiquiti", DeviceType::Switch)];
+        let ptr = rdns_findings(
+            &rdns_outcome(&[("192.168.1.20", "U7Pro")]),
+            &devices,
+            &findings,
+        );
+        assert_eq!(ptr.len(), 1);
+        assert_eq!(ptr[0].confidence, rikitikitavi_core::Confidence::Probable);
+        findings.extend(ptr);
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].device_type, DeviceType::AccessPoint);
+        assert_eq!(devices[0].device_subtype.as_deref(), Some("unifi_ap"));
+        assert_eq!(devices[0].hostname.as_deref(), Some("U7Pro"));
+    }
+
+    #[test]
+    fn rdns_hint_ranks_below_mdns_and_protocol_scanners() {
+        let mut devices = vec![
+            Device::new(ip("192.168.1.30")),
+            Device::new(ip("192.168.1.31")),
+        ];
+        let mut findings = vec![
+            Finding::new("mdns", "AirPlay", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.30"))
+                .with_device_hint(
+                    DeviceHint::new()
+                        .with_hostname("denon.local")
+                        .with_device_type(DeviceType::MediaPlayer),
+                ),
+            Finding::new("kasa", "kasa", "desc", Severity::Info)
+                .with_ip(ip("192.168.1.31"))
+                .with_device_hint(DeviceHint::new().with_device_type(DeviceType::IoT)),
+        ];
+        let ptr = rdns_findings(
+            &rdns_outcome(&[("192.168.1.30", "MyQ-6C7"), ("192.168.1.31", "MyQ-0C9")]),
+            &devices,
+            &findings,
+        );
+        assert!(ptr[0].device_hint.as_ref().unwrap().hostname.is_none());
+        findings.extend(ptr);
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].hostname.as_deref(), Some("denon"));
+        assert_eq!(devices[0].device_type, DeviceType::MediaPlayer);
+        assert_eq!(devices[1].device_type, DeviceType::IoT);
+        assert_eq!(devices[1].hostname.as_deref(), Some("MyQ-0C9"));
+    }
+
+    #[test]
+    fn rdns_plan_respects_intensity_and_exclusions() {
+        let mut ctx = ctx_with(None, Perspective::Unauthenticated);
+        ctx.gateway = Some(ip("192.168.1.1"));
+        ctx.discovered_devices = vec![
+            Device::new(ip("192.168.1.20")),
+            Device::new(ip("192.168.1.21")),
+            Device::new(ip("192.168.9.9")),
+        ];
+        let resolv = "nameserver 192.168.1.53\nnameserver 8.8.8.8\n";
+        let exclusions = ExclusionSet::parse(
+            &["192.168.9.0/24".to_owned(), "192.168.1.53".to_owned()],
+            &[],
+        )
+        .unwrap();
+        let by_mac = HashSet::from([ip("192.168.1.21")]);
+        let (ns, targets) = rdns_plan(&ctx, &exclusions, &by_mac, resolv).unwrap();
+        assert_eq!(ns, vec![std::net::Ipv4Addr::new(192, 168, 1, 1)]);
+        assert_eq!(targets, vec![std::net::Ipv4Addr::new(192, 168, 1, 20)]);
+
+        let gw_excluded = HashSet::from([ip("192.168.1.1")]);
+        assert!(rdns_plan(&ctx, &ExclusionSet::default(), &gw_excluded, "").is_none());
+
+        ctx.config.intensity = rikitikitavi_models::config::ScanIntensity::Passive;
+        assert!(rdns_plan(&ctx, &ExclusionSet::default(), &HashSet::new(), resolv).is_none());
     }
 
     /// mDNS hints for a host advertising both `_http._tcp` (shelly, name glob) and

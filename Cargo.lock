@@ -2786,6 +2786,7 @@ name = "rikitikitavi-network"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "hickory-resolver",
  "ipnetwork",
  "pcap",
  "proptest",
