@@ -10,6 +10,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use futures::stream::StreamExt as _;
+
 use crate::Scanner;
 use crate::eol_db;
 use crate::recog;
@@ -2066,6 +2068,9 @@ async fn deep_probe(ip: IpAddr, port: u16, banner: Option<&str>) -> Vec<Finding>
     }
 }
 
+/// Hosts banner-probed at once.
+const DEVICE_CONCURRENCY: usize = 16;
+
 /// Banner and protocol probes for one discovered device.
 async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Finding> {
     let ip = device.ip;
@@ -2156,13 +2161,20 @@ impl Scanner for ServicesScanner {
                 "adaptive banner scan using discovered devices"
             );
 
+            // Hosts in parallel, ports within a host in sequence; `buffered` keeps device order.
+            let mut probes = Vec::new();
             for device in &ctx.discovered_devices {
                 if exclusions.excludes_device(device) {
                     continue;
                 }
                 let role = HostRole::of_device(device, ctx.gateway == Some(device.ip));
-                findings.extend(probe_device(device, role, active).await);
+                probes.push(probe_device(device, role, active));
             }
+            let per_device: Vec<Vec<Finding>> = futures::stream::iter(probes)
+                .buffered(DEVICE_CONCURRENCY)
+                .collect()
+                .await;
+            findings.extend(per_device.into_iter().flatten());
 
             // Discovery can miss the gateway; it is the highest-value target here.
             // An excluded gateway is also missing from `discovered_devices` — by MAC

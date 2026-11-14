@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The services scanner probes hosts concurrently (16 at a time, device order
+  preserved): a full scan of a 58-device LAN drops from about 126 s to 51 s.
 - Tracing: `scan`, `discovery` and per-scanner spans (findings, outcome, time
   budget); spans log busy/idle time on close. `--log-format text|json`.
 - Optional OTLP/HTTP trace export behind the `otel` cargo feature, active only
