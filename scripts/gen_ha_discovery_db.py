@@ -11,17 +11,16 @@ Upstream is Apache-2.0 (`LICENSE.md` at the repository root, no NOTICE file).
 Extracted fields only; integration domains are kept verbatim as `device_subtype`.
 The domain -> `DeviceType` map below is ours, not upstream's.
 
+DHCP entries carrying a `hostname` go to a separate hostname table with their
+`macaddress` conjunct kept on the same row; they are never folded into the MAC
+prefix table (HA's `august` rows pair `connect`/`august*` with WNC and AMPAK
+module OUIs).
+
 Deliberate omissions:
-  * Every DHCP entry carrying a `hostname` — we observe no DHCP traffic and have
-    no reverse DNS, so the hostname conjunct cannot be evaluated. This drops the
-    hostname-only matchers AND the `macaddress`+`hostname` ones: keeping the MAC
-    half of a two-condition matcher would widen it into a false identification
-    (HA's `august` rows pair `connect`/`august*` with WNC and AMPAK module OUIs).
   * DHCP `registered_devices: True` entries — no matcher at all, would encode as
     match-everything.
+  * DHCP hostname rows whose `macaddress` is not a hex prefix followed by `*`.
   * SSDP matchers keyed on `X_*` vendor extensions — we do not parse those fields.
-  * Zeroconf globs using fnmatch character classes (`[...]`) — the glob matcher
-    here implements `*` and `?` only.
 
 Usage:
     uv run python scripts/gen_ha_discovery_db.py [--ref <sha>] \
@@ -39,7 +38,7 @@ import urllib.request
 
 # The snapshot recorded in THIRD-PARTY-NOTICES.md. `dev` is a moving branch, so
 # regeneration pins this by default and `--ref` selects another commit.
-DEFAULT_REF = "8e2c2c3cf5c533fa8bc38d2a5432831c7e244ad8"
+DEFAULT_REF = "fa470750e69e8922dc20628f186b56db10e4f95b"
 BASE = "https://raw.githubusercontent.com/home-assistant/core"
 SOURCE_FILES = ("zeroconf", "ssdp", "dhcp")
 LICENCE_URL = "https://github.com/home-assistant/core/blob/dev/LICENSE.md"
@@ -79,6 +78,7 @@ DOMAIN_TYPES: dict[str, str] = {
     "synology_dsm": "Nas",
     # Printers
     "brother": "Printer",
+    "hp_printer": "Printer",
     "ipp": "Printer",
     "syncthru": "Printer",
     "octoprint": "Printer3d",
@@ -316,8 +316,15 @@ def doc_para(text: str) -> str:
     return "\n".join(textwrap.wrap(text, width=84, initial_indent="//! ", subsequent_indent="//! "))
 
 
-def supported_glob(pattern: str) -> bool:
-    return "[" not in pattern and "]" not in pattern
+def mac_prefix_glob(pattern: str) -> str | None:
+    """Uppercase nibbles of a `<hex>*` MAC glob, else `None`."""
+    head = pattern.upper()
+    if not head.endswith("*"):
+        return None
+    head = head[:-1]
+    if not head or any(c not in "0123456789ABCDEF" for c in head):
+        return None
+    return head
 
 
 def main() -> None:
@@ -337,17 +344,11 @@ def main() -> None:
 
     # ── zeroconf ────────────────────────────────────────────────────
     zeroconf: list[tuple[str, str, str | None, list[tuple[str, str]]]] = []
-    dropped_globs = 0
     for service_type, matchers in zeroconf_mod["ZEROCONF"].items():
         st = service_type.rstrip(".").lower()
         for matcher in matchers:
             name = matcher.get("name")
             props = sorted(matcher.get("properties", {}).items())
-            if (name is not None and not supported_glob(name)) or any(
-                not supported_glob(v) for _, v in props
-            ):
-                dropped_globs += 1
-                continue
             zeroconf.append(
                 (
                     st,
@@ -375,10 +376,8 @@ def main() -> None:
     ssdp.sort(key=lambda e: (e[0], sorted(e[1].items())))
 
     # ── dhcp MAC prefixes ───────────────────────────────────────────
-    # Only entries whose sole condition is the MAC. HA ANDs `hostname` with
-    # `macaddress` in 154 of its 257 MAC entries; we cannot evaluate a hostname,
-    # and keeping the MAC half alone turns a two-condition matcher into a false
-    # identification of every device built on that OUI.
+    # Only entries whose sole condition is the MAC; MAC+hostname rows go to the
+    # hostname table below.
     mac_prefixes = sorted(
         {
             (entry["macaddress"].rstrip("*").upper(), entry["domain"])
@@ -393,12 +392,30 @@ def main() -> None:
     dhcp_registered = sum(1 for e in dhcp_table if e.get("registered_devices"))
     finer_than_oui = sum(1 for p, _ in mac_prefixes if len(p) > OUI_NIBBLES)
 
+    # ── dhcp hostname matchers ──────────────────────────────────────
+    hostname_rows: set[tuple[str, str, str]] = set()
+    dropped_hostname = 0
+    for entry in dhcp_table:
+        if "hostname" not in entry:
+            continue
+        mac = ""
+        if "macaddress" in entry:
+            nibbles = mac_prefix_glob(entry["macaddress"])
+            if nibbles is None:
+                dropped_hostname += 1
+                continue
+            mac = nibbles
+        hostname_rows.add((entry["hostname"].lower(), mac, entry["domain"]))
+    hostname_matchers = sorted(hostname_rows)
+    hostname_conjunctive = sum(1 for _, m, _ in hostname_matchers if m)
+
     # A domain we map but no carried table can produce would never fire.
     carried = (
         {e[1] for e in zeroconf}
         | {d for _, d in homekit}
         | {d for d, _ in ssdp}
         | {d for _, d in mac_prefixes}
+        | {d for _, _, d in hostname_matchers}
     )
     unreachable = sorted(set(DOMAIN_TYPES) - carried)
     if unreachable:
@@ -415,17 +432,18 @@ def main() -> None:
         f"Entries: {len(zeroconf)} zeroconf matchers over "
         f"{len({e[0] for e in zeroconf})} service types, {len(homekit)} `HomeKit` "
         f"models, {len(ssdp)} SSDP matchers, {len(mac_prefixes)} DHCP MAC prefixes, "
+        f"{len(hostname_matchers)} DHCP hostname matchers "
+        f"({hostname_conjunctive} with a MAC prefix), "
         f"{len(domain_types)} domain -> `DeviceType` mappings."
     )
     not_extracted_note = doc_para(
-        f"Not extracted, every DHCP entry naming a `hostname`: {dhcp_conjunctive} AND "
-        f"it with a `macaddress`, {dhcp_hostname_only} use it alone. This tool sees no "
-        "DHCP traffic and has no reverse DNS, and keeping the MAC half of a "
-        "two-condition matcher would widen it into a false identification. Also "
-        f"dropped: {dhcp_registered} `registered_devices` entries (no matcher), "
-        f"{dropped_ssdp} SSDP matcher{'s' if dropped_ssdp != 1 else ''} keyed on `X_*` "
-        f"vendor extensions, {dropped_globs} zeroconf "
-        f"matcher{'s' if dropped_globs != 1 else ''} using fnmatch character classes."
+        f"Upstream DHCP entries naming a `hostname`: {dhcp_conjunctive} AND it with a "
+        f"`macaddress`, {dhcp_hostname_only} use it alone; they are carried only in "
+        "[`DHCP_HOSTNAME_MATCHERS`], MAC conjunct on the same row. Not extracted: "
+        f"{dropped_hostname} hostname row{'s' if dropped_hostname != 1 else ''} with a "
+        f"non-prefix MAC glob, {dhcp_registered} `registered_devices` entries (no "
+        f"matcher), {dropped_ssdp} SSDP matcher{'s' if dropped_ssdp != 1 else ''} keyed "
+        "on `X_*` vendor extensions."
     )
     verb = "is" if finer_than_oui == 1 else "are"
     oui_note = doc_para(
@@ -454,7 +472,7 @@ def main() -> None:
 
 use rikitikitavi_models::DeviceType;
 
-/// A TXT-property predicate: key, and a `*`/`?` glob over the value.
+/// A TXT-property predicate: key, and a glob over the value.
 pub type TxtPredicate = (&'static str, &'static str);
 
 /// One matcher from HA's `generated/zeroconf.py`.
@@ -532,7 +550,9 @@ impl MacPrefixMatch {{
     }}
 }}
 
-/// Match `value` against an fnmatch-style `pattern` supporting `*` and `?`.
+/// Match `value` against an fnmatch-style `pattern`: `*`, `?`, and `[...]`
+/// classes with ranges and `!` negation, as Python's `fnmatch`. A `]` first in a
+/// class is literal; an unterminated `[` is literal.
 ///
 /// Both are compared bytewise; callers lowercase first.
 #[must_use]
@@ -543,29 +563,61 @@ pub fn glob_match(pattern: &str, value: &str) -> bool {{
     let mut star: Option<(usize, usize)> = None;
 
     while vi < v.len() {{
-        match p.get(pi) {{
-            Some(b'*') => {{
-                star = Some((pi, vi));
-                pi += 1;
-            }}
-            Some(b'?') => {{
-                pi += 1;
-                vi += 1;
-            }}
-            Some(&c) if c == v[vi] => {{
-                pi += 1;
-                vi += 1;
-            }}
-            _ => {{
-                let Some((sp, sv)) = star else {{ return false }};
-                pi = sp + 1;
-                vi = sv + 1;
-                star = Some((sp, vi));
-            }}
+        if p.get(pi) == Some(&b'*') {{
+            star = Some((pi, vi));
+            pi += 1;
+        }} else if let Some(next) = match_one(p, pi, v[vi]) {{
+            pi = next;
+            vi += 1;
+        }} else {{
+            let Some((sp, sv)) = star else {{ return false }};
+            pi = sp + 1;
+            vi = sv + 1;
+            star = Some((sp, vi));
         }}
     }}
 
     p[pi..].iter().all(|&c| c == b'*')
+}}
+
+/// Pattern index after the one-byte token at `pi`, if that token matches `c`.
+fn match_one(p: &[u8], pi: usize, c: u8) -> Option<usize> {{
+    match *p.get(pi)? {{
+        b'?' => Some(pi + 1),
+        b'[' => match class_match(p, pi + 1, c) {{
+            Some((matched, next)) => matched.then_some(next),
+            None => (c == b'[').then_some(pi + 1),
+        }},
+        b => (b == c).then_some(pi + 1),
+    }}
+}}
+
+/// Evaluate the class body starting at `i` against `c`: whether it matched and
+/// the index after the closing `]`. `None` when unterminated.
+fn class_match(p: &[u8], mut i: usize, c: u8) -> Option<(bool, usize)> {{
+    let negate = p.get(i) == Some(&b'!');
+    if negate {{
+        i += 1;
+    }}
+    let mut matched = false;
+    let mut first = true;
+    loop {{
+        let lo = *p.get(i)?;
+        if lo == b']' && !first {{
+            return Some((matched != negate, i + 1));
+        }}
+        first = false;
+        match (p.get(i + 1), p.get(i + 2)) {{
+            (Some(b'-'), Some(&hi)) if hi != b']' => {{
+                matched |= (lo..=hi).contains(&c);
+                i += 3;
+            }}
+            _ => {{
+                matched |= lo == c;
+                i += 1;
+            }}
+        }}
+    }}
 }}
 
 /// HA integration domains whose zeroconf matchers all hold for this service.
@@ -732,6 +784,84 @@ pub fn mac_prefix_match(mac: &str) -> Option<MacPrefixMatch> {{
     None
 }}
 
+/// One DHCP hostname matcher from HA's `generated/dhcp.py`. Every condition on
+/// the row must hold.
+#[derive(Debug, Clone, Copy)]
+pub struct DhcpHostnameMatcher {{
+    /// fnmatch glob (`*`, `?`, `[...]`) over the lowercase hostname.
+    pub hostname: &'static str,
+    /// Uppercase hex nibbles the MAC must start with; `None` on hostname-only rows.
+    pub mac_prefix: Option<&'static str>,
+    /// HA integration domain.
+    pub domain: &'static str,
+}}
+
+/// Which conditions produced a [`DhcpHostnameHit`]. Orders weakest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostnameMatchKind {{
+    /// Hostname-only row; lower confidence.
+    HostnameOnly,
+    /// Row naming both a MAC prefix and a hostname glob.
+    MacAndHostname,
+}}
+
+/// One hit in [`DHCP_HOSTNAME_MATCHERS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DhcpHostnameHit {{
+    /// HA integration domain.
+    pub domain: &'static str,
+    /// Strongest row kind that matched for this domain.
+    pub kind: HostnameMatchKind,
+}}
+
+/// HA integration domains whose DHCP hostname matchers hold.
+///
+/// `hostname` is reduced to its first label and lowercased. A row naming a MAC
+/// prefix holds only when `mac` (any common format) starts with it. One hit per
+/// domain with its strongest kind; `MacAndHostname` hits first, then by domain.
+#[must_use]
+pub fn dhcp_hostname_hits(hostname: &str, mac: Option<&str>) -> Vec<DhcpHostnameHit> {{
+    let label = hostname
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if label.is_empty() {{
+        return Vec::new();
+    }}
+    let nibbles: Option<String> = mac.map(|m| {{
+        m.chars()
+            .filter(char::is_ascii_hexdigit)
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    }});
+
+    let mut hits: Vec<DhcpHostnameHit> = Vec::new();
+    for matcher in DHCP_HOSTNAME_MATCHERS {{
+        let kind = match matcher.mac_prefix {{
+            None => HostnameMatchKind::HostnameOnly,
+            Some(prefix) if nibbles.as_deref().is_some_and(|n| n.starts_with(prefix)) => {{
+                HostnameMatchKind::MacAndHostname
+            }}
+            Some(_) => continue,
+        }};
+        if !glob_match(matcher.hostname, &label) {{
+            continue;
+        }}
+        if let Some(hit) = hits.iter_mut().find(|h| h.domain == matcher.domain) {{
+            hit.kind = hit.kind.max(kind);
+        }} else {{
+            hits.push(DhcpHostnameHit {{
+                domain: matcher.domain,
+                kind,
+            }});
+        }}
+    }}
+    hits.sort_by(|a, b| b.kind.cmp(&a.kind).then(a.domain.cmp(b.domain)));
+    hits
+}}
+
 /// Our `DeviceType` for an HA integration domain, or `Unknown`.
 #[must_use]
 pub fn domain_device_type(domain: &str) -> DeviceType {{
@@ -794,6 +924,16 @@ pub fn consensus_device_type(domains: &[&str]) -> DeviceType {{
     for nibbles, domain in mac_prefixes:
         out.write(
             f"    MacPrefix {{ nibbles: {rs_str(nibbles)}, domain: {rs_str(domain)} }},\n"
+        )
+    out.write("];\n\n")
+
+    out.write("/// DHCP hostname matchers, sorted by hostname glob.\n")
+    out.write("#[rustfmt::skip]\n")
+    out.write("pub static DHCP_HOSTNAME_MATCHERS: &[DhcpHostnameMatcher] = &[\n")
+    for hostname, mac, domain in hostname_matchers:
+        out.write(
+            f"    DhcpHostnameMatcher {{ hostname: {rs_str(hostname)}, "
+            f"mac_prefix: {rs_opt(mac or None)}, domain: {rs_str(domain)} }},\n"
         )
     out.write("];\n\n")
 

@@ -47,40 +47,40 @@ Embedded in `crates/rikitikitavi-scanners/src/ha_discovery_db.rs` (regenerate wi
 
 - Source: https://github.com/home-assistant/core — `homeassistant/generated/zeroconf.py`,
   `homeassistant/generated/ssdp.py` and `homeassistant/generated/dhcp.py`, all read at
-  commit `8e2c2c3cf5c533fa8bc38d2a5432831c7e244ad8` (2026-09-10, branch `dev`).
-- Snapshot taken: 2026-09-17
+  commit `fa470750e69e8922dc20628f186b56db10e4f95b` (2026-11-14, branch `dev`).
+- Snapshot taken: 2026-11-14
 - Licence: Apache License 2.0, https://github.com/home-assistant/core/blob/dev/LICENSE.md
   (verified: the repository root `LICENSE.md` is the Apache-2.0 text). There is no
   upstream `NOTICE` file, so the obligations here are §4(a) licence copy — satisfied by
   this project's own `LICENSE`, the same licence — §4(b) attribution, satisfied by this
   section, and §4(c) a statement of modification, below.
 - Extracted fields: from `zeroconf.py`, the `ZEROCONF` mapping's service type, integration
-  `domain`, `name` glob and `properties` predicates (164 matchers over 113 service types),
-  and the `HOMEKIT` mapping's model key and `domain` (71 models); from `ssdp.py`, the
+  `domain`, `name` glob and `properties` predicates (177 matchers over 121 service types),
+  and the `HOMEKIT` mapping's model key and `domain` (75 models); from `ssdp.py`, the
   `SSDP` mapping's `domain` plus the `st`, `nt`, `deviceType`, `manufacturer`,
-  `manufacturerURL`, `modelName` and `modelDescription` fields (89 matchers); from
+  `manufacturerURL`, `modelName` and `modelDescription` fields (92 matchers); from
   `dhcp.py`, the `macaddress` glob and `domain` of the entries whose only condition is
-  that glob (103 unique prefixes). Home Assistant integration domains are carried verbatim
-  as the `device_subtype` of a finding's device hint.
-- Not extracted, and this is the modification that matters most: **every DHCP entry that
-  names a `hostname`**. Upstream has 388 DHCP entries, 257 of them carrying a
-  `macaddress`; 154 of those 257 AND the MAC glob with a `hostname` glob, and a further 89
-  entries are hostname-only. This tool observes no DHCP traffic and has no reverse DNS, so
-  it cannot evaluate the hostname conjunct — and keeping the MAC half alone would turn a
-  two-condition matcher into a false identification of every device built on that OUI.
-  (Upstream's `august` rows, for instance, pair the hostnames `connect` and `august*` with
-  contract-manufacturer OUIs belonging to Wistron NeWeb and AMPAK, which appear in
-  thousands of unrelated products.) Also not extracted: 42 `registered_devices` entries
-  (no matcher at all), two SSDP matchers keyed on `X_*` vendor extensions, and one
-  zeroconf matcher whose glob uses an fnmatch character class.
+  that glob (98 unique prefixes), and the `hostname` glob, `macaddress` glob if any, and
+  `domain` of every entry naming a `hostname` (245 matchers). Home Assistant integration
+  domains are carried verbatim as the `device_subtype` of a finding's device hint.
+- DHCP entries that name a `hostname` are kept whole in a separate hostname table: upstream
+  has 386 DHCP entries, 252 of them carrying a `macaddress`; 154 of those 252 AND the MAC
+  glob with a `hostname` glob, and a further 91 entries are hostname-only. The MAC half of
+  a two-condition matcher is never placed in the MAC prefix table, which would turn it into
+  a false identification of every device built on that OUI. (Upstream's `august` rows, for
+  instance, pair the hostnames `connect` and `august*` with contract-manufacturer OUIs
+  belonging to Wistron NeWeb and AMPAK, which appear in thousands of unrelated products.)
+  Not extracted: 43 `registered_devices` entries (no matcher at all) and two SSDP matchers
+  keyed on `X_*` vendor extensions.
 - Modifications (Apache-2.0 §4(c)): the Python literals are transformed into sorted Rust
   static tables; service types, name globs and property values are lowercased and trailing
   dots stripped; MAC globs are uppercased with the trailing `*` removed and stored as
-  nibble strings; the DHCP table is reduced to its MAC-only entries as described above.
+  nibble strings; the DHCP table is split into MAC-only and hostname tables as described above.
   The accompanying integration-domain-to-`DeviceType` map in the same file is this
   project's own work, not Home Assistant's, and is emitted only for domains some carried
   table can actually produce.
-- Size: 103 MAC prefixes, 164 + 71 + 89 table rows; 65 KB of generated Rust source.
+- Size: 98 MAC prefixes, 245 hostname matchers, 177 + 75 + 92 table rows; 97 KB of
+  generated Rust source.
 
 The same `zeroconf.py` service-type list also informs the mDNS query set in
 `crates/rikitikitavi-network/src/mdns.rs` (`SERVICE_QUERIES`), under the same licence and

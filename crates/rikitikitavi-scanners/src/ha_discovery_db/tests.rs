@@ -58,13 +58,10 @@ fn zeroconf_entries_are_normalised() {
         assert!(!m.domain.is_empty());
         if let Some(name) = m.name {
             assert_eq!(name, name.to_ascii_lowercase());
-            // The glob matcher implements `*` and `?` only.
-            assert!(!name.contains('['), "{name}");
         }
         for &(key, glob) in m.properties {
             assert_eq!(key, key.to_ascii_lowercase());
             assert_eq!(glob, glob.to_ascii_lowercase());
-            assert!(!glob.contains('['), "{glob}");
         }
     }
 }
@@ -106,6 +103,7 @@ fn mapped_domains_all_occur_in_an_upstream_table() {
     known.extend(HOMEKIT_MODELS.iter().map(|&(_, d)| d));
     known.extend(SSDP_MATCHERS.iter().map(|m| m.domain));
     known.extend(DHCP_MAC_PREFIXES.iter().map(|p| p.domain));
+    known.extend(DHCP_HOSTNAME_MATCHERS.iter().map(|m| m.domain));
 
     for &(domain, _) in DOMAIN_DEVICE_TYPES {
         assert!(
@@ -198,6 +196,113 @@ fn glob_match_handles_stars_and_question_marks() {
     assert!(!glob_match("shelly*", "tasmota-1._http._tcp.local."));
     assert!(glob_match("", ""));
     assert!(!glob_match("", "x"));
+}
+
+#[test]
+fn glob_match_handles_character_classes() {
+    assert!(glob_match("e[sp]*", "ep25"));
+    assert!(glob_match("e[sp]*", "es20m"));
+    assert!(!glob_match("e[sp]*", "ex1"));
+    assert!(glob_match("gs[0-9][0-9]", "gs42"));
+    assert!(!glob_match("gs[0-9][0-9]", "gs4a"));
+    assert!(glob_match("[!a]x", "bx"));
+    assert!(!glob_match("[!a]x", "ax"));
+    assert!(glob_match("[a-]", "-"));
+    assert!(glob_match("[]]", "]"));
+    assert!(glob_match("[!]]", "x"));
+    assert!(!glob_match("[!]]", "]"));
+    assert!(glob_match("duco [[]ab[]].*", "duco [ab]._http._tcp.local."));
+    assert_eq!(
+        zeroconf_domains(
+            "_http._tcp.local",
+            "duco [0123456789ab]._http._tcp.local.",
+            &[]
+        ),
+        vec!["duco"]
+    );
+    // Unterminated `[` is a literal.
+    assert!(glob_match("a[b", "a[b"));
+    assert!(!glob_match("a[b", "ab"));
+    assert!(glob_match("*[0-9]", "abc7"));
+    assert!(!glob_match("*[0-9]", "abc"));
+}
+
+// ── DHCP hostname matchers ──────────────────────────────────────────
+
+#[test]
+fn hostname_table_shape() {
+    assert_eq!(DHCP_HOSTNAME_MATCHERS.len(), 245);
+    assert_eq!(
+        DHCP_HOSTNAME_MATCHERS
+            .iter()
+            .filter(|m| m.mac_prefix.is_some())
+            .count(),
+        154
+    );
+    assert!(DHCP_HOSTNAME_MATCHERS.windows(2).all(|w| (
+        w[0].hostname,
+        w[0].mac_prefix,
+        w[0].domain
+    ) < (
+        w[1].hostname,
+        w[1].mac_prefix,
+        w[1].domain
+    )));
+    for m in DHCP_HOSTNAME_MATCHERS {
+        assert!(!m.hostname.is_empty(), "{m:?}");
+        assert_eq!(m.hostname, m.hostname.to_ascii_lowercase(), "{m:?}");
+        if let Some(p) = m.mac_prefix {
+            assert!(
+                !p.is_empty()
+                    && p.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)),
+                "{m:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mac_and_hostname_rows_need_both_conditions() {
+    let hits = dhcp_hostname_hits("EP25", Some("3C:52:A1:11:22:33"));
+    assert_eq!(
+        hits,
+        vec![DhcpHostnameHit {
+            domain: "tplink",
+            kind: HostnameMatchKind::MacAndHostname
+        }]
+    );
+    assert!(dhcp_hostname_hits("ep25", Some("02:00:00:11:22:33")).is_empty());
+    assert!(dhcp_hostname_hits("ep25", None).is_empty());
+    assert!(dhcp_hostname_hits("ex25", Some("3C:52:A1:11:22:33")).is_empty());
+    // `august` pairs the generic `connect` with module OUIs only.
+    assert!(dhcp_hostname_hits("connect", None).is_empty());
+    assert_eq!(
+        dhcp_hostname_hits("connect", Some("D8-61-62-AA-BB-CC"))[0].domain,
+        "august"
+    );
+}
+
+#[test]
+fn hostname_only_rows_are_lower_confidence() {
+    let hits = dhcp_hostname_hits("Tizen.lan", None);
+    assert_eq!(
+        hits,
+        vec![DhcpHostnameHit {
+            domain: "samsungtv",
+            kind: HostnameMatchKind::HostnameOnly
+        }]
+    );
+    assert!(HostnameMatchKind::HostnameOnly < HostnameMatchKind::MacAndHostname);
+    let duco = dhcp_hostname_hits("duco_a1b2c3", None);
+    assert_eq!(duco[0].domain, "duco");
+    assert!(dhcp_hostname_hits("duco_a1b2cz", None).is_empty());
+}
+
+#[test]
+fn empty_hostname_matches_nothing() {
+    assert!(dhcp_hostname_hits("", Some("3C:52:A1:11:22:33")).is_empty());
+    assert!(dhcp_hostname_hits(".lan", None).is_empty());
 }
 
 /// `_http._tcp` carries 27 matchers over 24 integrations; a flat pair table would
@@ -323,11 +428,11 @@ fn oui_length_prefixes_are_not_finer_than_the_oui() {
     assert_eq!(domain_device_type("unifi_discovery"), DeviceType::Unknown);
 }
 
-/// Upstream ANDs `hostname` with `macaddress` in 154 of its 257 MAC entries; we
-/// cannot evaluate a hostname, so none of those rows may be carried.
+/// Upstream ANDs `hostname` with `macaddress` in 154 of its MAC entries; none of
+/// those rows may enter the MAC prefix table.
 #[test]
 fn only_mac_only_upstream_rows_are_carried() {
-    assert_eq!(DHCP_MAC_PREFIXES.len(), 103);
+    assert_eq!(DHCP_MAC_PREFIXES.len(), 98);
     // `august` pairs `connect`/`august*` with WNC and AMPAK module OUIs, and
     // `ring`/`tesla_wall_connector` are hostname-gated too.
     for domain in ["august", "ring", "tesla_wall_connector"] {
@@ -338,6 +443,39 @@ fn only_mac_only_upstream_rows_are_carried() {
     }
     assert!(mac_prefix_match("D8:61:62:AA:BB:CC").is_none());
     assert!(mac_prefix_match("E0:76:D0:AA:BB:CC").is_none());
+}
+
+/// HA PR #189876 removed six Dahua OUIs from `imou`.
+#[test]
+fn dahua_ouis_are_no_longer_imou() {
+    for mac in [
+        "38:AF:29:00:00:01",
+        "3C:E3:6B:00:00:01",
+        "3C:EF:8C:00:00:01",
+        "A0:BD:1D:00:00:01",
+        "B4:4C:3B:00:00:01",
+        "FC:B6:9D:00:00:01",
+    ] {
+        assert!(
+            !mac_prefix_match(mac).is_some_and(|m| m.domains.contains(&"imou")),
+            "{mac}"
+        );
+    }
+    let kept = mac_prefix_match("1C:4D:89:00:00:01").expect("imou OUI");
+    assert_eq!(kept.domains, vec!["imou"]);
+}
+
+#[test]
+fn hp_printer_matches_hp_named_ipp_services() {
+    for st in ["_ipp._tcp.local", "_ipps._tcp.local"] {
+        let domains = zeroconf_domains(st, &format!("hp laserjet m404.{st}."), &[]);
+        assert!(domains.contains(&"hp_printer"), "{st}: {domains:?}");
+    }
+    assert!(
+        !zeroconf_domains("_ipp._tcp.local", "brother hl._ipp._tcp.local.", &[])
+            .contains(&"hp_printer")
+    );
+    assert_eq!(domain_device_type("hp_printer"), DeviceType::Printer);
 }
 
 #[test]
@@ -428,6 +566,14 @@ proptest! {
     fn prop_homekit_domain_no_panic(model in ".*") {
         let _ = homekit_domain(&model);
     }
+
+    #[test]
+    fn prop_dhcp_hostname_hits_no_panic(hostname in ".*", mac in proptest::option::of(".*")) {
+        let hits = dhcp_hostname_hits(&hostname, mac.as_deref());
+        if mac.is_none() {
+            prop_assert!(hits.iter().all(|h| h.kind == HostnameMatchKind::HostnameOnly));
+        }
+    }
 }
 
 // ── Proptest: glob_match algebra (survey #3) ────────────────────────
@@ -467,8 +613,27 @@ prop_compose! {
 
 proptest! {
     #[test]
-    fn prop_glob_match_reflexive(s in ".*") {
+    fn prop_glob_match_reflexive(s in "[^\\[]*") {
         prop_assert!(glob_match(&s, &s));
+    }
+
+    #[test]
+    fn prop_glob_class_matches_exactly_its_members(
+        members in "[a-z0-9]{1,6}",
+        c in proptest::char::range('!', '~'),
+    ) {
+        let hit = members.contains(c);
+        prop_assert_eq!(glob_match(&format!("[{members}]"), &c.to_string()), hit);
+        prop_assert_eq!(glob_match(&format!("[!{members}]"), &c.to_string()), !hit);
+    }
+
+    #[test]
+    fn prop_glob_range_is_inclusive(lo in b'a'..=b'z', hi in b'a'..=b'z', c in b'a'..=b'z') {
+        let pattern = format!("[{}-{}]", char::from(lo), char::from(hi));
+        prop_assert_eq!(
+            glob_match(&pattern, &char::from(c).to_string()),
+            (lo..=hi).contains(&c)
+        );
     }
 
     #[test]

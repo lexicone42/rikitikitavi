@@ -603,7 +603,7 @@ fn encode_dns_name(buf: &mut Vec<u8>, name: &str) {
 
 /// Service types queried by [`discover_services`].
 ///
-/// The consumer set: the 113 types Home Assistant's `generated/zeroconf.py`
+/// The consumer set: the 121 types Home Assistant's `generated/zeroconf.py`
 /// enumerates (Apache-2.0 — see `THIRD-PARTY-NOTICES.md`), plus the general
 /// host/file-sharing types and the Matter and Thread types from the Matter
 /// specification and `ot-br-posix`, which HA does not list in full.
@@ -689,6 +689,7 @@ pub const SERVICE_QUERIES: &[&str] = &[
     "_wyoming._tcp.local",
     "_lookin._tcp.local",
     "_bbxsrv._tcp.local",
+    "_voice-support._tcp.local",
     "_dvl-deviceapi._tcp.local",
     "_powerhub._udp.local",
     "_systemnexa2._tcp.local",
@@ -700,6 +701,7 @@ pub const SERVICE_QUERIES: &[&str] = &[
     "_meshcop._udp.local",
     "_meshcop-e._udp.local",
     // Lighting, blinds and small IoT.
+    "_lifx._udp.local",
     "_nanoleafapi._tcp.local",
     "_nanoleafms._tcp.local",
     "_wled._tcp.local",
@@ -728,8 +730,11 @@ pub const SERVICE_QUERIES: &[&str] = &[
     "_waermeleser._tcp.local",
     "_wasserleser._tcp.local",
     "_wattwaechter._tcp.local",
+    "_powersensor._udp.local",
+    "_ship._tcp.local",
     // Climate, appliances and sensors.
     "_ecobee._tcp.local",
+    "_haven._tcp.local",
     "_sideplay._tcp.local",
     "_dkapi._tcp.local",
     "_plugwise._tcp.local",
@@ -746,6 +751,7 @@ pub const SERVICE_QUERIES: &[&str] = &[
     "_tbk_vmc._tcp.local",
     // Cameras, doorbells, security and network appliances.
     "_axis-video._tcp.local",
+    "_indi-allsky._tcp.local",
     "_elmax-ssl._tcp.local",
     "_fbx-api._tcp.local",
     "_easylink._tcp.local",
@@ -1877,7 +1883,7 @@ mod tests {
     }
 
     /// The query list must actually be spread over several batches: one burst of
-    /// 127 PTR packets is what the batching exists to avoid.
+    /// 134 PTR packets is what the batching exists to avoid.
     #[test]
     fn test_service_queries_are_spread_over_several_batches() {
         const { assert!(QUERY_BATCH > 0) };

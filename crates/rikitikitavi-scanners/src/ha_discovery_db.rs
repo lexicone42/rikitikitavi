@@ -1,20 +1,20 @@
 //! Home Assistant discovery tables — auto-generated.
 //!
 //! Source: <https://github.com/home-assistant/core> `homeassistant/generated/`
-//! Files: `zeroconf.py`, `ssdp.py`, `dhcp.py` | Commit: `8e2c2c3cf5c533fa8bc38d2a5432831c7e244ad8` | Retrieved: 2026-09-17
+//! Files: `zeroconf.py`, `ssdp.py`, `dhcp.py` | Commit: `fa470750e69e8922dc20628f186b56db10e4f95b` | Retrieved: 2026-11-14
 //! Licence: Apache-2.0 (<https://github.com/home-assistant/core/blob/dev/LICENSE.md>), no upstream NOTICE file.
 //!
-//! Entries: 164 zeroconf matchers over 113 service types, 71 `HomeKit` models, 89
-//! SSDP matchers, 103 DHCP MAC prefixes, 169 domain -> `DeviceType` mappings.
+//! Entries: 177 zeroconf matchers over 121 service types, 75 `HomeKit` models, 92
+//! SSDP matchers, 98 DHCP MAC prefixes, 245 DHCP hostname matchers (154 with a MAC
+//! prefix), 196 domain -> `DeviceType` mappings.
 //!
-//! Not extracted, every DHCP entry naming a `hostname`: 154 AND it with a
-//! `macaddress`, 89 use it alone. This tool sees no DHCP traffic and has no reverse
-//! DNS, and keeping the MAC half of a two-condition matcher would widen it into a
-//! false identification. Also dropped: 42 `registered_devices` entries (no
-//! matcher), 2 SSDP matchers keyed on `X_*` vendor extensions, 1 zeroconf matcher
-//! using fnmatch character classes.
+//! Upstream DHCP entries naming a `hostname`: 154 AND it with a `macaddress`, 91
+//! use it alone; they are carried only in [`DHCP_HOSTNAME_MATCHERS`], MAC conjunct
+//! on the same row. Not extracted: 0 hostname rows with a non-prefix MAC glob, 43
+//! `registered_devices` entries (no matcher), 2 SSDP matchers keyed on `X_*` vendor
+//! extensions.
 //!
-//! 1 of the 103 MAC prefixes is longer than a 24-bit OUI; the rest name a
+//! 1 of the 98 MAC prefixes is longer than a 24-bit OUI; the rest name a
 //! registrant, whose catalogue usually spans several device classes, so no product
 //! class may be read out of them (see [`MacPrefixMatch::finer_than_oui`]).
 //!
@@ -22,11 +22,11 @@
 //! are carried verbatim as `device_subtype`. Mapped domains that no carried table
 //! can produce are omitted.
 //!
-//! Regenerate with `uv run python scripts/gen_ha_discovery_db.py --ref 8e2c2c3cf5c533fa8bc38d2a5432831c7e244ad8`.
+//! Regenerate with `uv run python scripts/gen_ha_discovery_db.py --ref fa470750e69e8922dc20628f186b56db10e4f95b`.
 
 use rikitikitavi_models::DeviceType;
 
-/// A TXT-property predicate: key, and a `*`/`?` glob over the value.
+/// A TXT-property predicate: key, and a glob over the value.
 pub type TxtPredicate = (&'static str, &'static str);
 
 /// One matcher from HA's `generated/zeroconf.py`.
@@ -95,7 +95,7 @@ pub struct MacPrefixMatch {
 impl MacPrefixMatch {
     /// The prefix is finer than the 24-bit OUI an IEEE vendor lookup already uses.
     ///
-    /// Only 1 of the 103 carried prefixes are. A
+    /// Only 1 of the 98 carried prefixes are. A
     /// prefix that is not names the registrant, whose catalogue usually spans
     /// several device classes, so no `DeviceType` may be read out of it.
     #[must_use]
@@ -104,7 +104,9 @@ impl MacPrefixMatch {
     }
 }
 
-/// Match `value` against an fnmatch-style `pattern` supporting `*` and `?`.
+/// Match `value` against an fnmatch-style `pattern`: `*`, `?`, and `[...]`
+/// classes with ranges and `!` negation, as Python's `fnmatch`. A `]` first in a
+/// class is literal; an unterminated `[` is literal.
 ///
 /// Both are compared bytewise; callers lowercase first.
 #[must_use]
@@ -115,29 +117,61 @@ pub fn glob_match(pattern: &str, value: &str) -> bool {
     let mut star: Option<(usize, usize)> = None;
 
     while vi < v.len() {
-        match p.get(pi) {
-            Some(b'*') => {
-                star = Some((pi, vi));
-                pi += 1;
-            }
-            Some(b'?') => {
-                pi += 1;
-                vi += 1;
-            }
-            Some(&c) if c == v[vi] => {
-                pi += 1;
-                vi += 1;
-            }
-            _ => {
-                let Some((sp, sv)) = star else { return false };
-                pi = sp + 1;
-                vi = sv + 1;
-                star = Some((sp, vi));
-            }
+        if p.get(pi) == Some(&b'*') {
+            star = Some((pi, vi));
+            pi += 1;
+        } else if let Some(next) = match_one(p, pi, v[vi]) {
+            pi = next;
+            vi += 1;
+        } else {
+            let Some((sp, sv)) = star else { return false };
+            pi = sp + 1;
+            vi = sv + 1;
+            star = Some((sp, vi));
         }
     }
 
     p[pi..].iter().all(|&c| c == b'*')
+}
+
+/// Pattern index after the one-byte token at `pi`, if that token matches `c`.
+fn match_one(p: &[u8], pi: usize, c: u8) -> Option<usize> {
+    match *p.get(pi)? {
+        b'?' => Some(pi + 1),
+        b'[' => match class_match(p, pi + 1, c) {
+            Some((matched, next)) => matched.then_some(next),
+            None => (c == b'[').then_some(pi + 1),
+        },
+        b => (b == c).then_some(pi + 1),
+    }
+}
+
+/// Evaluate the class body starting at `i` against `c`: whether it matched and
+/// the index after the closing `]`. `None` when unterminated.
+fn class_match(p: &[u8], mut i: usize, c: u8) -> Option<(bool, usize)> {
+    let negate = p.get(i) == Some(&b'!');
+    if negate {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    loop {
+        let lo = *p.get(i)?;
+        if lo == b']' && !first {
+            return Some((matched != negate, i + 1));
+        }
+        first = false;
+        match (p.get(i + 1), p.get(i + 2)) {
+            (Some(b'-'), Some(&hi)) if hi != b']' => {
+                matched |= (lo..=hi).contains(&c);
+                i += 3;
+            }
+            _ => {
+                matched |= lo == c;
+                i += 1;
+            }
+        }
+    }
 }
 
 /// HA integration domains whose zeroconf matchers all hold for this service.
@@ -304,6 +338,84 @@ pub fn mac_prefix_match(mac: &str) -> Option<MacPrefixMatch> {
     None
 }
 
+/// One DHCP hostname matcher from HA's `generated/dhcp.py`. Every condition on
+/// the row must hold.
+#[derive(Debug, Clone, Copy)]
+pub struct DhcpHostnameMatcher {
+    /// fnmatch glob (`*`, `?`, `[...]`) over the lowercase hostname.
+    pub hostname: &'static str,
+    /// Uppercase hex nibbles the MAC must start with; `None` on hostname-only rows.
+    pub mac_prefix: Option<&'static str>,
+    /// HA integration domain.
+    pub domain: &'static str,
+}
+
+/// Which conditions produced a [`DhcpHostnameHit`]. Orders weakest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostnameMatchKind {
+    /// Hostname-only row; lower confidence.
+    HostnameOnly,
+    /// Row naming both a MAC prefix and a hostname glob.
+    MacAndHostname,
+}
+
+/// One hit in [`DHCP_HOSTNAME_MATCHERS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DhcpHostnameHit {
+    /// HA integration domain.
+    pub domain: &'static str,
+    /// Strongest row kind that matched for this domain.
+    pub kind: HostnameMatchKind,
+}
+
+/// HA integration domains whose DHCP hostname matchers hold.
+///
+/// `hostname` is reduced to its first label and lowercased. A row naming a MAC
+/// prefix holds only when `mac` (any common format) starts with it. One hit per
+/// domain with its strongest kind; `MacAndHostname` hits first, then by domain.
+#[must_use]
+pub fn dhcp_hostname_hits(hostname: &str, mac: Option<&str>) -> Vec<DhcpHostnameHit> {
+    let label = hostname
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if label.is_empty() {
+        return Vec::new();
+    }
+    let nibbles: Option<String> = mac.map(|m| {
+        m.chars()
+            .filter(char::is_ascii_hexdigit)
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    });
+
+    let mut hits: Vec<DhcpHostnameHit> = Vec::new();
+    for matcher in DHCP_HOSTNAME_MATCHERS {
+        let kind = match matcher.mac_prefix {
+            None => HostnameMatchKind::HostnameOnly,
+            Some(prefix) if nibbles.as_deref().is_some_and(|n| n.starts_with(prefix)) => {
+                HostnameMatchKind::MacAndHostname
+            }
+            Some(_) => continue,
+        };
+        if !glob_match(matcher.hostname, &label) {
+            continue;
+        }
+        if let Some(hit) = hits.iter_mut().find(|h| h.domain == matcher.domain) {
+            hit.kind = hit.kind.max(kind);
+        } else {
+            hits.push(DhcpHostnameHit {
+                domain: matcher.domain,
+                kind,
+            });
+        }
+    }
+    hits.sort_by(|a, b| b.kind.cmp(&a.kind).then(a.domain.cmp(b.domain)));
+    hits
+}
+
 /// Our `DeviceType` for an HA integration domain, or `Unknown`.
 #[must_use]
 pub fn domain_device_type(domain: &str) -> DeviceType {
@@ -379,6 +491,7 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_hap._tcp.local", domain: "homekit_controller", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_hap._tcp.local", domain: "zwave_me", name: Some("*z.wave-me*"), properties: &[] },
     ZeroconfMatcher { service_type: "_hap._udp.local", domain: "homekit_controller", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_haven._tcp.local", domain: "haven_iaq", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_heos-audio._tcp.local", domain: "heos", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_homeconnect._tcp.local", domain: "home_connect", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_homekit._tcp.local", domain: "homekit", name: None, properties: &[] },
@@ -388,6 +501,7 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "awair", name: Some("awair*"), properties: &[] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "bosch_shc", name: Some("bosch shc*"), properties: &[] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "bsblan", name: Some("bsb-lan*"), properties: &[] },
+    ZeroconfMatcher { service_type: "_http._tcp.local", domain: "duco", name: Some("duco [[][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][]].*"), properties: &[] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "eheimdigital", name: Some("eheimdigital._http._tcp.local."), properties: &[] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "hdfury", name: Some("diva-*"), properties: &[] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "hdfury", name: Some("vertex2-*"), properties: &[] },
@@ -411,17 +525,24 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "synology_dsm", name: None, properties: &[("vendor", "synology*")] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "tailwind", name: None, properties: &[("vendor", "tailwind")] },
     ZeroconfMatcher { service_type: "_http._tcp.local", domain: "velux", name: Some("velux_klf_lan_*"), properties: &[] },
+    ZeroconfMatcher { service_type: "_https._tcp.local", domain: "grandstream_home", name: Some("gds_*"), properties: &[] },
+    ZeroconfMatcher { service_type: "_https._tcp.local", domain: "grandstream_home", name: Some("gsc_*"), properties: &[] },
     ZeroconfMatcher { service_type: "_hue._tcp.local", domain: "hue", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_hwenergy._tcp.local", domain: "homewizard", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_indi-allsky._tcp.local", domain: "indi_allsky", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_iometer._tcp.local", domain: "iometer", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_ipp._tcp.local", domain: "hp_printer", name: Some("hp*"), properties: &[] },
     ZeroconfMatcher { service_type: "_ipp._tcp.local", domain: "ipp", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_ipps._tcp.local", domain: "hp_printer", name: Some("hp*"), properties: &[] },
     ZeroconfMatcher { service_type: "_ipps._tcp.local", domain: "ipp", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_kiosker._tcp.local", domain: "kiosker", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_kizbox._tcp.local", domain: "overkiz", name: Some("gateway*"), properties: &[] },
     ZeroconfMatcher { service_type: "_kizboxdev._tcp.local", domain: "overkiz", name: Some("gateway*"), properties: &[] },
+    ZeroconfMatcher { service_type: "_lifx._udp.local", domain: "lifx", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_linkplay._tcp.local", domain: "linkplay", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_linkplay._tcp.local", domain: "wiim", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_lookin._tcp.local", domain: "lookin", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_lutron._tcp.local", domain: "lutron_caseta", name: None, properties: &[("systype", "athena*")] },
     ZeroconfMatcher { service_type: "_lutron._tcp.local", domain: "lutron_caseta", name: None, properties: &[("systype", "hwqs*")] },
     ZeroconfMatcher { service_type: "_lutron._tcp.local", domain: "lutron_caseta", name: None, properties: &[("systype", "ra2select*")] },
     ZeroconfMatcher { service_type: "_lutron._tcp.local", domain: "lutron_caseta", name: None, properties: &[("systype", "radiora3*")] },
@@ -449,6 +570,7 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_plexmediasvr._tcp.local", domain: "plex", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_plugwise._tcp.local", domain: "plugwise", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_powerhub._udp.local", domain: "bitvis", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_powersensor._udp.local", domain: "powersensor_au", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_powerview-g3._tcp.local", domain: "hunterdouglas_powerview", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_powerview._tcp.local", domain: "hunterdouglas_powerview", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_prana._tcp.local", domain: "prana", name: None, properties: &[] },
@@ -459,6 +581,7 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_raop._tcp.local", domain: "apple_tv", name: None, properties: &[("am", "audioaccessory*")] },
     ZeroconfMatcher { service_type: "_rio._tcp.local", domain: "russound_rio", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_shelly._tcp.local", domain: "shelly", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_ship._tcp.local", domain: "e3dc", name: None, properties: &[("brand", "hager energy"), ("id", "*")] },
     ZeroconfMatcher { service_type: "_sideplay._tcp.local", domain: "ecobee", name: None, properties: &[("mdl", "eb-*")] },
     ZeroconfMatcher { service_type: "_sideplay._tcp.local", domain: "ecobee", name: None, properties: &[("mdl", "ecobee*")] },
     ZeroconfMatcher { service_type: "_sleep-proxy._udp.local", domain: "apple_tv", name: None, properties: &[] },
@@ -484,11 +607,13 @@ static ZEROCONF_MATCHERS: &[ZeroconfMatcher] = &[
     ZeroconfMatcher { service_type: "_uzg-01._tcp.local", domain: "zha", name: Some("uzg-01*"), properties: &[] },
     ZeroconfMatcher { service_type: "_vege._tcp.local", domain: "vegehub", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_viziocast._tcp.local", domain: "vizio", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_voice-support._tcp.local", domain: "voice_support", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_volumio._tcp.local", domain: "volumio", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_waermeleser._tcp.local", domain: "energieleser", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_wasserleser._tcp.local", domain: "energieleser", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_wattwaechter._tcp.local", domain: "wattwaechter", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_wled._tcp.local", domain: "wled", name: None, properties: &[] },
+    ZeroconfMatcher { service_type: "_workstation._tcp.local", domain: "hr_energy_qube", name: None, properties: &[("projectname", "deqsihpb*"), ("vendor", "000a5c")] },
     ZeroconfMatcher { service_type: "_ws._tcp.local", domain: "hotspring", name: Some("watkins_spa*"), properties: &[] },
     ZeroconfMatcher { service_type: "_wyoming._tcp.local", domain: "wyoming", name: None, properties: &[] },
     ZeroconfMatcher { service_type: "_xbmc-jsonrpc-h._tcp.local", domain: "kodi", name: None, properties: &[] },
@@ -535,13 +660,16 @@ static HOMEKIT_MODELS: &[(&str, &str)] = &[
     ("LIFX Lightstrip", "lifx"),
     ("LIFX Luna", "lifx"),
     ("LIFX Mini", "lifx"),
+    ("LIFX Mirror", "lifx"),
     ("LIFX Neon", "lifx"),
     ("LIFX Nightvision", "lifx"),
     ("LIFX PAR38", "lifx"),
+    ("LIFX Path", "lifx"),
     ("LIFX Permanent Outdoor", "lifx"),
     ("LIFX Pls", "lifx"),
     ("LIFX Plus", "lifx"),
     ("LIFX Round", "lifx"),
+    ("LIFX Spot", "lifx"),
     ("LIFX Square", "lifx"),
     ("LIFX String", "lifx"),
     ("LIFX Tile", "lifx"),
@@ -562,6 +690,7 @@ static HOMEKIT_MODELS: &[(&str, &str)] = &[
     ("Rachio", "rachio"),
     ("SPK5", "rainmachine"),
     ("Sensibo", "sensibo"),
+    ("Slide", "slide_local"),
     ("Smart Bridge", "lutron_caseta"),
     ("Socket", "wemo"),
     ("TRADFRI", "tradfri"),
@@ -605,6 +734,7 @@ static SSDP_MATCHERS: &[SsdpMatcher] = &[
     SsdpMatcher { domain: "dlna_dms", st: Some("urn:schemas-upnp-org:device:mediaserver:4"), nt: None, device_type: Some("urn:schemas-upnp-org:device:mediaserver:4"), manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "fritz", st: Some("urn:schemas-upnp-org:device:fritzbox:1"), nt: None, device_type: None, manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "fritzbox", st: Some("urn:schemas-upnp-org:device:fritzbox:1"), nt: None, device_type: None, manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
+    SsdpMatcher { domain: "frontier_silicon", st: Some("urn:schemas-frontier-silicon-com:invalid:fsapi:1"), nt: None, device_type: None, manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "frontier_silicon", st: Some("urn:schemas-frontier-silicon-com:undok:fsapi:1"), nt: None, device_type: None, manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "harman_luxury", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:1"), manufacturer: Some("harman luxury audio"), manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "harman_luxury", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:2"), manufacturer: Some("harman luxury audio"), manufacturer_url: None, model_name: None, model_description: None },
@@ -621,6 +751,8 @@ static SSDP_MATCHERS: &[SsdpMatcher] = &[
     SsdpMatcher { domain: "keenetic_ndms2", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:internetgatewaydevice:1"), manufacturer: Some("keenetic ltd."), manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "keenetic_ndms2", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:internetgatewaydevice:1"), manufacturer: Some("zyxel communications corp."), manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "lametric", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:lametric:1"), manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
+    SsdpMatcher { domain: "libresync", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:1"), manufacturer: Some("librewireless"), manufacturer_url: None, model_name: None, model_description: None },
+    SsdpMatcher { domain: "libresync", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:1"), manufacturer: None, manufacturer_url: None, model_name: None, model_description: Some("libresyncdmr") },
     SsdpMatcher { domain: "lyngdorf", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:2"), manufacturer: Some("lyngdorf"), manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "lyngdorf", st: None, nt: None, device_type: Some("urn:schemas-upnp-org:device:mediarenderer:2"), manufacturer: Some("steinway lyngdorf"), manufacturer_url: None, model_name: None, model_description: None },
     SsdpMatcher { domain: "nanoleaf", st: Some("inanoleaf:nl81"), nt: None, device_type: None, manufacturer: None, manufacturer_url: None, model_name: None, model_description: None },
@@ -706,9 +838,6 @@ static DHCP_MAC_PREFIXES: &[MacPrefix] = &[
     MacPrefix { nibbles: "34E6E6", domain: "lg_thinq" },
     MacPrefix { nibbles: "34EA34", domain: "broadlink" },
     MacPrefix { nibbles: "381F8D", domain: "tuya" },
-    MacPrefix { nibbles: "38AF29", domain: "imou" },
-    MacPrefix { nibbles: "3CE36B", domain: "imou" },
-    MacPrefix { nibbles: "3CEF8C", domain: "imou" },
     MacPrefix { nibbles: "444F8E", domain: "wiz" },
     MacPrefix { nibbles: "4844F7", domain: "samsungtv" },
     MacPrefix { nibbles: "508A06", domain: "tuya" },
@@ -732,6 +861,7 @@ static DHCP_MAC_PREFIXES: &[MacPrefix] = &[
     MacPrefix { nibbles: "8060B7", domain: "playstation_network" },
     MacPrefix { nibbles: "84E342", domain: "tuya" },
     MacPrefix { nibbles: "84E657", domain: "playstation_network" },
+    MacPrefix { nibbles: "88E712", domain: "whirlpool" },
     MacPrefix { nibbles: "8CC8CD", domain: "samsungtv" },
     MacPrefix { nibbles: "8CEA48", domain: "samsungtv" },
     MacPrefix { nibbles: "906A94", domain: "imou" },
@@ -739,7 +869,6 @@ static DHCP_MAC_PREFIXES: &[MacPrefix] = &[
     MacPrefix { nibbles: "9C37CB", domain: "playstation_network" },
     MacPrefix { nibbles: "9CADEF", domain: "obihai" },
     MacPrefix { nibbles: "A043B0", domain: "broadlink" },
-    MacPrefix { nibbles: "A0BD1D", domain: "imou" },
     MacPrefix { nibbles: "A47EFA", domain: "withings" },
     MacPrefix { nibbles: "A83162", domain: "imou" },
     MacPrefix { nibbles: "A8474A", domain: "playstation_network" },
@@ -749,7 +878,6 @@ static DHCP_MAC_PREFIXES: &[MacPrefix] = &[
     MacPrefix { nibbles: "B04A39", domain: "roborock" },
     MacPrefix { nibbles: "B40AD8", domain: "playstation_network" },
     MacPrefix { nibbles: "B4430D", domain: "broadlink" },
-    MacPrefix { nibbles: "B44C3B", domain: "imou" },
     MacPrefix { nibbles: "B4FBE4", domain: "unifi_discovery" },
     MacPrefix { nibbles: "B87424", domain: "vicare" },
     MacPrefix { nibbles: "BC60A7", domain: "playstation_network" },
@@ -774,26 +902,279 @@ static DHCP_MAC_PREFIXES: &[MacPrefix] = &[
     MacPrefix { nibbles: "F8461C", domain: "playstation_network" },
     MacPrefix { nibbles: "F8D0AC", domain: "playstation_network" },
     MacPrefix { nibbles: "FC0FE6", domain: "playstation_network" },
-    MacPrefix { nibbles: "FCB69D", domain: "imou" },
+];
+
+/// DHCP hostname matchers, sorted by hostname glob.
+#[rustfmt::skip]
+pub static DHCP_HOSTNAME_MATCHERS: &[DhcpHostnameMatcher] = &[
+    DhcpHostnameMatcher { hostname: "(balay|bosch|neff|siemens)-*", mac_prefix: Some("68A40E"), domain: "home_connect" },
+    DhcpHostnameMatcher { hostname: "(bosch|neff|siemens)-*", mac_prefix: Some("38B4D3"), domain: "home_connect" },
+    DhcpHostnameMatcher { hostname: "1118431-*", mac_prefix: None, domain: "powerwall" },
+    DhcpHostnameMatcher { hostname: "1232100-*", mac_prefix: None, domain: "powerwall" },
+    DhcpHostnameMatcher { hostname: "[ba][lk]*", mac_prefix: Some("18B905"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "[ba][lk]*", mac_prefix: Some("249494"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "[ba][lk]*", mac_prefix: Some("7CB94C"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "[ba][lk]*", mac_prefix: Some("B4E842"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "[hba][flk]*", mac_prefix: Some("ACCF23"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "[hba][flk]*", mac_prefix: Some("F0FE6B"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "aidot", mac_prefix: None, domain: "aidot" },
+    DhcpHostnameMatcher { hostname: "airobot-thermostat-*", mac_prefix: None, domain: "airobot" },
+    DhcpHostnameMatcher { hostname: "airsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "airthings-hub", mac_prefix: Some("70B3D52A0"), domain: "airthings" },
+    DhcpHostnameMatcher { hostname: "airthings-hub", mac_prefix: Some("D0141190"), domain: "airthings" },
+    DhcpHostnameMatcher { hostname: "airthings-view", mac_prefix: None, domain: "airthings" },
+    DhcpHostnameMatcher { hostname: "august*", mac_prefix: Some("E076D0"), domain: "august" },
+    DhcpHostnameMatcher { hostname: "axis-00408c*", mac_prefix: Some("00408C"), domain: "axis" },
+    DhcpHostnameMatcher { hostname: "axis-accc8e*", mac_prefix: Some("ACCC8E"), domain: "axis" },
+    DhcpHostnameMatcher { hostname: "axis-b8a44f*", mac_prefix: Some("B8A44F"), domain: "axis" },
+    DhcpHostnameMatcher { hostname: "axis-e82725*", mac_prefix: Some("E82725"), domain: "axis" },
+    DhcpHostnameMatcher { hostname: "balay-*", mac_prefix: Some("C8D778"), domain: "home_connect" },
+    DhcpHostnameMatcher { hostname: "blink*", mac_prefix: Some("00037F"), domain: "blink" },
+    DhcpHostnameMatcher { hostname: "blink*", mac_prefix: Some("20A171"), domain: "blink" },
+    DhcpHostnameMatcher { hostname: "blink*", mac_prefix: Some("B85F98"), domain: "blink" },
+    DhcpHostnameMatcher { hostname: "bond-*", mac_prefix: Some("3C6A2C1"), domain: "bond" },
+    DhcpHostnameMatcher { hostname: "bond-*", mac_prefix: Some("F44E38"), domain: "bond" },
+    DhcpHostnameMatcher { hostname: "brel_*", mac_prefix: None, domain: "motion_blinds" },
+    DhcpHostnameMatcher { hostname: "co2sensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "connbox*", mac_prefix: Some("40F3857"), domain: "palazzetti" },
+    DhcpHostnameMatcher { hostname: "connect", mac_prefix: Some("2C9FFB"), domain: "august" },
+    DhcpHostnameMatcher { hostname: "connect", mac_prefix: Some("789C85"), domain: "august" },
+    DhcpHostnameMatcher { hostname: "connect", mac_prefix: Some("B8B7F1"), domain: "august" },
+    DhcpHostnameMatcher { hostname: "connect", mac_prefix: Some("D86162"), domain: "august" },
+    DhcpHostnameMatcher { hostname: "connector_*", mac_prefix: None, domain: "motion_blinds" },
+    DhcpHostnameMatcher { hostname: "dacbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "darco_ero_32ws_0*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "dimmerbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "doorbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "doorunitbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "drutexsmart*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "dsp-w215", mac_prefix: None, domain: "dlink" },
+    DhcpHostnameMatcher { hostname: "duco_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]", mac_prefix: None, domain: "duco" },
+    DhcpHostnameMatcher { hostname: "e[sp]*", mac_prefix: Some("003192"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "e[sp]*", mac_prefix: Some("1C61B4"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "e[sp]*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "e[sp]*", mac_prefix: Some("54AF97"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "e[sp]*", mac_prefix: Some("E848B8"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "eisy*", mac_prefix: Some("0021B9"), domain: "isy994" },
+    DhcpHostnameMatcher { hostname: "elrssid*", mac_prefix: None, domain: "electrasmart" },
+    DhcpHostnameMatcher { hostname: "emonitor*", mac_prefix: Some("0090C2"), domain: "emonitor" },
+    DhcpHostnameMatcher { hostname: "eneco-*", mac_prefix: Some("74C63B"), domain: "toon" },
+    DhcpHostnameMatcher { hostname: "energiemonitor-*", mac_prefix: None, domain: "earn_e_p1" },
+    DhcpHostnameMatcher { hostname: "energymeter*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "floodsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "flume-gw-*", mac_prefix: None, domain: "flume" },
+    DhcpHostnameMatcher { hostname: "fyta*", mac_prefix: None, domain: "fyta" },
+    DhcpHostnameMatcher { hostname: "gatebox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "gateway*", mac_prefix: Some("F8811A"), domain: "overkiz" },
+    DhcpHostnameMatcher { hostname: "gdocntl-*", mac_prefix: None, domain: "aladdin_connect" },
+    DhcpHostnameMatcher { hostname: "gs[0-9][0-9][0-9][0-9][0-9][0-9]", mac_prefix: None, domain: "lamarzocco" },
+    DhcpHostnameMatcher { hostname: "guardian*", mac_prefix: Some("30AEA4"), domain: "guardian" },
+    DhcpHostnameMatcher { hostname: "gvc*", mac_prefix: Some("30AEA4"), domain: "guardian" },
+    DhcpHostnameMatcher { hostname: "gvc*", mac_prefix: Some("B4E62D"), domain: "guardian" },
+    DhcpHostnameMatcher { hostname: "h1*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "harborc-*", mac_prefix: None, domain: "harbor" },
+    DhcpHostnameMatcher { hostname: "hf-lpb100-zj*", mac_prefix: None, domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("1C3BF3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("50C7BF"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("68FF7B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("704F57"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("98DAC4"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("9C5322"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("B09575"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("B4B024"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("C006C3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hs*", mac_prefix: Some("CC32E5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "hub*", mac_prefix: Some("24FD5B"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "hub*", mac_prefix: Some("286D97"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "hub*", mac_prefix: Some("7C8306"), domain: "nobo_hub" },
+    DhcpHostnameMatcher { hostname: "hub*", mac_prefix: Some("D052A8"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "humiditysensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "hunter*", mac_prefix: Some("002674"), domain: "hunterdouglas_powerview" },
+    DhcpHostnameMatcher { hostname: "iaqualink-*", mac_prefix: None, domain: "iaqualink" },
+    DhcpHostnameMatcher { hostname: "inputsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "irobot-*", mac_prefix: Some("501479"), domain: "roomba" },
+    DhcpHostnameMatcher { hostname: "ismartgate*", mac_prefix: None, domain: "gogogate2" },
+    DhcpHostnameMatcher { hostname: "isy*", mac_prefix: Some("0021B9"), domain: "isy994" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("003192"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("005F67"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("1027F5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("1C3BF3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("1C61B4"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("3460F9"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("403F8C"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("5091E3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("50C7BF"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("54AF97"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("60A4B7"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("68FF7B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("6C5AB0"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("74DA88"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("788CB5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("909A4A"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("98DAC4"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("9C5322"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("AC15A2"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("B09575"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("B0A7B9"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("C006C3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("C0C9E3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("CC32E5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("D80D17"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("D84732"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "k[lps]*", mac_prefix: Some("E848B8"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "kessel*", mac_prefix: Some("0024BD"), domain: "guntamatic" },
+    DhcpHostnameMatcher { hostname: "kh1*", mac_prefix: Some("F0A731"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "knc*", mac_prefix: None, domain: "knocki" },
+    DhcpHostnameMatcher { hostname: "kohlergen*", mac_prefix: Some("00146F"), domain: "rehlko" },
+    DhcpHostnameMatcher { hostname: "kommspot", mac_prefix: None, domain: "pooldose" },
+    DhcpHostnameMatcher { hostname: "ks2*", mac_prefix: Some("F0A731"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l9*", mac_prefix: Some("3460F9"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l9*", mac_prefix: Some("A842A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l9*", mac_prefix: Some("F0A731"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l[59]*", mac_prefix: Some("14EBB6"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l[59]*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l[59]*", mac_prefix: Some("54AF97"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l[59]*", mac_prefix: Some("5C628B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "l[59]*", mac_prefix: Some("5CE931"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "lb*", mac_prefix: Some("1C3BF3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "lb*", mac_prefix: Some("50C7BF"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "lb*", mac_prefix: Some("68FF7B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "lb*", mac_prefix: Some("98DAC4"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "lb*", mac_prefix: Some("B09575"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "levoit-*", mac_prefix: None, domain: "vesync" },
+    DhcpHostnameMatcher { hostname: "litter-robot4", mac_prefix: None, domain: "litterrobot" },
+    DhcpHostnameMatcher { hostname: "lm[0-9][0-9][0-9][0-9][0-9][0-9]", mac_prefix: None, domain: "lamarzocco" },
+    DhcpHostnameMatcher { hostname: "luxsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "lwip*", mac_prefix: Some("8CCE4E"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "lyric-*", mac_prefix: Some("00D02D"), domain: "lyric" },
+    DhcpHostnameMatcher { hostname: "lyric-*", mac_prefix: Some("48A2E6"), domain: "lyric" },
+    DhcpHostnameMatcher { hostname: "lyric-*", mac_prefix: Some("B82CA0"), domain: "lyric" },
+    DhcpHostnameMatcher { hostname: "motion_*", mac_prefix: None, domain: "motion_blinds" },
+    DhcpHostnameMatcher { hostname: "mr[0-9][0-9][0-9][0-9][0-9][0-9]", mac_prefix: None, domain: "lamarzocco" },
+    DhcpHostnameMatcher { hostname: "my[45]50*", mac_prefix: Some("001E0C"), domain: "steamist" },
+    DhcpHostnameMatcher { hostname: "mystrom-*", mac_prefix: None, domain: "mystrom" },
+    DhcpHostnameMatcher { hostname: "neo-*", mac_prefix: Some("FC0FE7"), domain: "actron_air" },
+    DhcpHostnameMatcher { hostname: "nuheat", mac_prefix: Some("002338"), domain: "nuheat" },
+    DhcpHostnameMatcher { hostname: "nuki_bridge_*", mac_prefix: None, domain: "nuki" },
+    DhcpHostnameMatcher { hostname: "opensensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("30DE4B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("3460F9"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("482254"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("5091E3"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("74DA88"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("A842A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("CC32E5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p1*", mac_prefix: Some("F0A731"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "p3*", mac_prefix: Some("788CB5"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "pentair*", mac_prefix: Some("00C033"), domain: "screenlogic" },
+    DhcpHostnameMatcher { hostname: "pergoladc*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "pixelbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "polisy*", mac_prefix: Some("000DB9"), domain: "isy994" },
+    DhcpHostnameMatcher { hostname: "ps3", mac_prefix: None, domain: "playstation_network" },
+    DhcpHostnameMatcher { hostname: "ps4-*", mac_prefix: None, domain: "playstation_network" },
+    DhcpHostnameMatcher { hostname: "ps5-*", mac_prefix: None, domain: "playstation_network" },
+    DhcpHostnameMatcher { hostname: "rachio-*", mac_prefix: Some("009D6B"), domain: "rachio" },
+    DhcpHostnameMatcher { hostname: "rachio-*", mac_prefix: Some("74C63B"), domain: "rachio" },
+    DhcpHostnameMatcher { hostname: "rachio-*", mac_prefix: Some("F0038C"), domain: "rachio" },
+    DhcpHostnameMatcher { hostname: "rainsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "reolink*", mac_prefix: None, domain: "reolink" },
+    DhcpHostnameMatcher { hostname: "rfgateway", mac_prefix: Some("0004A3"), domain: "incomfort" },
+    DhcpHostnameMatcher { hostname: "rico*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "ring*", mac_prefix: Some("0CAE7D"), domain: "ring" },
+    DhcpHostnameMatcher { hostname: "ring*", mac_prefix: Some("2CAB33"), domain: "ring" },
+    DhcpHostnameMatcher { hostname: "ring*", mac_prefix: Some("341513"), domain: "ring" },
+    DhcpHostnameMatcher { hostname: "ring*", mac_prefix: Some("94E36D"), domain: "ring" },
+    DhcpHostnameMatcher { hostname: "ring*", mac_prefix: Some("9C7613"), domain: "ring" },
+    DhcpHostnameMatcher { hostname: "roborock-*", mac_prefix: None, domain: "roborock" },
+    DhcpHostnameMatcher { hostname: "rollergate*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "roomba-*", mac_prefix: Some("204EF6"), domain: "roomba" },
+    DhcpHostnameMatcher { hostname: "roomba-*", mac_prefix: Some("80A589"), domain: "roomba" },
+    DhcpHostnameMatcher { hostname: "roomba-*", mac_prefix: Some("DCF505"), domain: "roomba" },
+    DhcpHostnameMatcher { hostname: "ruuvigateway*", mac_prefix: None, domain: "ruuvi_gateway" },
+    DhcpHostnameMatcher { hostname: "s5*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "s5*", mac_prefix: Some("482254"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "sabaj-k-smrt*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "samsung-*", mac_prefix: None, domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "saunabox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "seltsmartscreen*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "seltvenetianblind*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "sense-*", mac_prefix: Some("009D6B"), domain: "sense" },
+    DhcpHostnameMatcher { hostname: "sense-*", mac_prefix: Some("A4D578"), domain: "sense" },
+    DhcpHostnameMatcher { hostname: "sense-*", mac_prefix: Some("DCEFCA"), domain: "sense" },
+    DhcpHostnameMatcher { hostname: "sensibo*", mac_prefix: None, domain: "sensibo" },
+    DhcpHostnameMatcher { hostname: "servicewelt*", mac_prefix: None, domain: "stiebel_eltron" },
+    DhcpHostnameMatcher { hostname: "shutterbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "simongo*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "simplisafe*", mac_prefix: Some("30AEA4"), domain: "simplisafe" },
+    DhcpHostnameMatcher { hostname: "sma*", mac_prefix: Some("0015BB"), domain: "sma" },
+    DhcpHostnameMatcher { hostname: "smartawning*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "smarthub", mac_prefix: Some("683A48"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "smartrollergate*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "smartshade*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "smartshutter*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "smartthings*", mac_prefix: Some("24FD5B"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "somfy_*", mac_prefix: Some("B8B7F1"), domain: "somfy_mylink" },
+    DhcpHostnameMatcher { hostname: "squeezebox*", mac_prefix: Some("000420"), domain: "squeezebox" },
+    DhcpHostnameMatcher { hostname: "st*", mac_prefix: Some("24FD5B"), domain: "smartthings" },
+    DhcpHostnameMatcher { hostname: "sta*", mac_prefix: Some("C82E47"), domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "sugarwifi", mac_prefix: None, domain: "vistapool" },
+    DhcpHostnameMatcher { hostname: "swingatecontroller*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "switchbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "tado*", mac_prefix: None, domain: "tado" },
+    DhcpHostnameMatcher { hostname: "target", mac_prefix: Some("002702"), domain: "solaredge" },
+    DhcpHostnameMatcher { hostname: "tempsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "teslapw_*", mac_prefix: None, domain: "powerwall" },
+    DhcpHostnameMatcher { hostname: "teslawallconnector_*", mac_prefix: Some("4CFCAA"), domain: "tesla_wall_connector" },
+    DhcpHostnameMatcher { hostname: "teslawallconnector_*", mac_prefix: Some("98ED5C"), domain: "tesla_wall_connector" },
+    DhcpHostnameMatcher { hostname: "teslawallconnector_*", mac_prefix: Some("DC44271"), domain: "tesla_wall_connector" },
+    DhcpHostnameMatcher { hostname: "thermobox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "thermostat*", mac_prefix: Some("5CDAD4"), domain: "radiotherm" },
+    DhcpHostnameMatcher { hostname: "tizen*", mac_prefix: None, domain: "samsungtv" },
+    DhcpHostnameMatcher { hostname: "tp*", mac_prefix: Some("3C52A1"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "tp*", mac_prefix: Some("5C628B"), domain: "tplink" },
+    DhcpHostnameMatcher { hostname: "trmnl-*", mac_prefix: None, domain: "trmnl" },
+    DhcpHostnameMatcher { hostname: "twinkly-*", mac_prefix: None, domain: "twinkly" },
+    DhcpHostnameMatcher { hostname: "twinkly_*", mac_prefix: None, domain: "twinkly" },
+    DhcpHostnameMatcher { hostname: "usr-tcp232-ed2", mac_prefix: None, domain: "tolo" },
+    DhcpHostnameMatcher { hostname: "velux_klf*", mac_prefix: Some("646184"), domain: "velux" },
+    DhcpHostnameMatcher { hostname: "whiskerrobots", mac_prefix: None, domain: "litterrobot" },
+    DhcpHostnameMatcher { hostname: "windowopener*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "windsensor*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "wiz_*", mac_prefix: None, domain: "wiz" },
+    DhcpHostnameMatcher { hostname: "wlightbox*", mac_prefix: None, domain: "blebox" },
+    DhcpHostnameMatcher { hostname: "xbox*", mac_prefix: None, domain: "xbox" },
+    DhcpHostnameMatcher { hostname: "xl857-*", mac_prefix: Some("000231"), domain: "nexia" },
+    DhcpHostnameMatcher { hostname: "yale-connect-plus", mac_prefix: Some("00177A"), domain: "yale" },
+    DhcpHostnameMatcher { hostname: "yeelink-*", mac_prefix: None, domain: "yeelight" },
+    DhcpHostnameMatcher { hostname: "yeti*", mac_prefix: None, domain: "goalzero" },
+    DhcpHostnameMatcher { hostname: "yoto-*", mac_prefix: None, domain: "yoto" },
+    DhcpHostnameMatcher { hostname: "zengge", mac_prefix: None, domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "zengge_[0-9a-f][0-9a-f]_*", mac_prefix: None, domain: "flux_led" },
+    DhcpHostnameMatcher { hostname: "zentrios-*", mac_prefix: None, domain: "intellifire" },
 ];
 
 /// HA integration domain -> `DeviceType`, sorted by domain. Ours, not upstream's.
 #[rustfmt::skip]
 static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("abode", DeviceType::Hub),
+    ("actron_air", DeviceType::Thermostat),
     ("airgradient", DeviceType::Sensor),
     ("airq", DeviceType::Sensor),
+    ("airthings", DeviceType::Sensor),
     ("airzone", DeviceType::Thermostat),
     ("altruist", DeviceType::Sensor),
     ("androidtv_remote", DeviceType::MediaPlayer),
     ("apple_tv", DeviceType::MediaPlayer),
     ("arcam_fmj", DeviceType::MediaPlayer),
+    ("august", DeviceType::SmartLock),
     ("awair", DeviceType::Sensor),
     ("axis", DeviceType::Camera),
     ("baf", DeviceType::IoT),
     ("balboa", DeviceType::Appliance),
     ("bang_olufsen", DeviceType::Speaker),
     ("blebox", DeviceType::IoT),
+    ("blink", DeviceType::Camera),
     ("bluesound", DeviceType::Speaker),
     ("bond", DeviceType::Hub),
     ("bosch_alarm", DeviceType::Hub),
@@ -820,10 +1201,12 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("eheimdigital", DeviceType::Appliance),
     ("elgato", DeviceType::IoT),
     ("elkm1", DeviceType::Hub),
+    ("emonitor", DeviceType::Sensor),
     ("energieleser", DeviceType::Sensor),
     ("enphase_envoy", DeviceType::Inverter),
     ("escea", DeviceType::Appliance),
     ("esphome", DeviceType::IoT),
+    ("flux_led", DeviceType::IoT),
     ("forked_daapd", DeviceType::MediaPlayer),
     ("freebox", DeviceType::Router),
     ("fritz", DeviceType::Router),
@@ -832,6 +1215,7 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("frontier_silicon", DeviceType::MediaPlayer),
     ("fumis", DeviceType::Appliance),
     ("gogogate2", DeviceType::SmartLock),
+    ("guntamatic", DeviceType::Appliance),
     ("harman_luxury", DeviceType::Speaker),
     ("harmony", DeviceType::Hub),
     ("hdfury", DeviceType::MediaPlayer),
@@ -844,12 +1228,14 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("homekit_controller", DeviceType::Hub),
     ("homevolt", DeviceType::Inverter),
     ("hotspring", DeviceType::Appliance),
+    ("hp_printer", DeviceType::Printer),
     ("huawei_lte", DeviceType::Router),
     ("hue", DeviceType::Hub),
     ("hunterdouglas_powerview", DeviceType::IoT),
     ("hyperion", DeviceType::MediaPlayer),
     ("imeon_inverter", DeviceType::Inverter),
     ("imou", DeviceType::Camera),
+    ("incomfort", DeviceType::Thermostat),
     ("indevolt", DeviceType::Inverter),
     ("insteon", DeviceType::Hub),
     ("iometer", DeviceType::Sensor),
@@ -870,6 +1256,7 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("lunatone", DeviceType::IoT),
     ("lutron_caseta", DeviceType::Hub),
     ("lyngdorf", DeviceType::MediaPlayer),
+    ("lyric", DeviceType::Thermostat),
     ("miele", DeviceType::Appliance),
     ("modern_forms", DeviceType::IoT),
     ("music_assistant", DeviceType::MediaPlayer),
@@ -877,13 +1264,17 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("nam", DeviceType::Sensor),
     ("nanoleaf", DeviceType::IoT),
     ("netgear", DeviceType::Router),
+    ("nexia", DeviceType::Thermostat),
+    ("nobo_hub", DeviceType::Thermostat),
     ("nrgkick", DeviceType::EvCharger),
+    ("nuheat", DeviceType::Thermostat),
     ("octoprint", DeviceType::Printer3d),
     ("onewire", DeviceType::Sensor),
     ("onkyo", DeviceType::MediaPlayer),
     ("openevse", DeviceType::EvCharger),
     ("openhome", DeviceType::MediaPlayer),
     ("overkiz", DeviceType::Hub),
+    ("palazzetti", DeviceType::Appliance),
     ("peblar", DeviceType::EvCharger),
     ("philips_js", DeviceType::SmartTv),
     ("playstation_network", DeviceType::GameConsole),
@@ -897,6 +1288,7 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("qnap_qsw", DeviceType::Switch),
     ("rabbitair", DeviceType::Appliance),
     ("rachio", DeviceType::IoT),
+    ("radiotherm", DeviceType::Thermostat),
     ("rainforest_eagle", DeviceType::Sensor),
     ("rainmachine", DeviceType::IoT),
     ("reolink", DeviceType::Camera),
@@ -906,17 +1298,26 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("roomba", DeviceType::Vacuum),
     ("russound_rio", DeviceType::Speaker),
     ("samsungtv", DeviceType::SmartTv),
+    ("screenlogic", DeviceType::Appliance),
+    ("sense", DeviceType::Sensor),
     ("sensibo", DeviceType::Thermostat),
     ("shelly", DeviceType::SmartPlug),
+    ("simplisafe", DeviceType::Hub),
     ("sleepiq", DeviceType::Sensor),
     ("slide_local", DeviceType::IoT),
+    ("sma", DeviceType::Inverter),
     ("smappee", DeviceType::Sensor),
+    ("smartthings", DeviceType::Hub),
     ("smlight", DeviceType::Hub),
+    ("solaredge", DeviceType::Inverter),
     ("solaredge_modbus", DeviceType::Inverter),
     ("solarman", DeviceType::Inverter),
+    ("somfy_mylink", DeviceType::Hub),
     ("songpal", DeviceType::Speaker),
     ("sonos", DeviceType::Speaker),
     ("soundtouch", DeviceType::Speaker),
+    ("squeezebox", DeviceType::MediaPlayer),
+    ("steamist", DeviceType::Appliance),
     ("syncthru", DeviceType::Printer),
     ("synology_dsm", DeviceType::Nas),
     ("system_bridge", DeviceType::Desktop),
@@ -924,6 +1325,8 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("tailwind", DeviceType::SmartLock),
     ("technove", DeviceType::EvCharger),
     ("teltonika", DeviceType::Router),
+    ("tesla_wall_connector", DeviceType::EvCharger),
+    ("toon", DeviceType::Thermostat),
     ("tradfri", DeviceType::Hub),
     ("tuya", DeviceType::IoT),
     ("vegehub", DeviceType::Sensor),
@@ -944,6 +1347,7 @@ static DOMAIN_DEVICE_TYPES: &[(&str, DeviceType)] = &[
     ("xbox", DeviceType::GameConsole),
     ("xiaomi_aqara", DeviceType::IoT),
     ("xiaomi_miio", DeviceType::IoT),
+    ("yale", DeviceType::SmartLock),
     ("yamaha_musiccast", DeviceType::MediaPlayer),
     ("yeelight", DeviceType::IoT),
     ("zha", DeviceType::Hub),
