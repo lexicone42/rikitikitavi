@@ -7,8 +7,10 @@
 //! accepted only when its host is the IP that sent the reply, and the URL then
 //! fetched is rebuilt from that IP.
 //!
-//! Version checks, both reported at Probable: CVE-2020-5741 (Plex before
-//! 1.19.3, CISA KEV) and CVE-2025-34158 (1.41.7.x-1.42.0.x, fixed 1.42.1).
+//! Plex version check: before 1.43.3.10861 is the `Plex2Shell` chain
+//! (CVE-2026-96652/-96654/-96655/-96656, CISA KEV 2026-10-20). The same finding
+//! also lists CVE-2025-34158 (1.41.7.x-1.42.0.x) and CVE-2020-5741 (before
+//! 1.19.3, CISA KEV) when the version is in their ranges.
 
 use async_trait::async_trait;
 use reqwest::redirect::Policy;
@@ -56,6 +58,15 @@ const DISCOVERY_WINDOW: Duration = Duration::from_secs(2);
 /// Replies accepted from the discovery socket.
 const MAX_DISCOVERY_REPLIES: usize = 64;
 
+/// Release that fixes the `Plex2Shell` chain.
+const PLEX2SHELL_FIXED: [u32; 4] = [1, 43, 3, 10861];
+/// `Plex2Shell` CVEs, all in CISA KEV since 2026-10-20.
+const PLEX2SHELL_CVES: [&str; 4] = [
+    "CVE-2026-96652",
+    "CVE-2026-96654",
+    "CVE-2026-96655",
+    "CVE-2026-96656",
+];
 /// `Plex Media Server` before this release: CVE-2020-5741 (CISA KEV).
 const PLEX_KEV_FIXED: [u32; 3] = [1, 19, 3];
 /// First release in the CVE-2025-34158 range.
@@ -126,14 +137,12 @@ fn version_cmp(a: &[u32], b: &[u32]) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-/// Which published Plex issue a version falls under.
+/// Plex version status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlexVerdict {
-    /// Before 1.19.3 — CVE-2020-5741, in CISA KEV.
-    KevRce,
-    /// 1.41.7.x-1.42.0.x — CVE-2025-34158.
-    CredentialExposure,
-    /// Outside both ranges.
+    /// Before 1.43.3.10861; [`plex_cves`] gives the full CVE list.
+    Plex2Shell,
+    /// At or above 1.43.3.10861.
     Current,
     /// No version was readable.
     Unknown,
@@ -141,18 +150,28 @@ enum PlexVerdict {
 
 /// Classify a parsed Plex version.
 fn classify_plex(version: Option<&[u32]>) -> PlexVerdict {
-    let Some(version) = version else {
-        return PlexVerdict::Unknown;
-    };
-    if version_cmp(version, &PLEX_KEV_FIXED).is_lt() {
-        return PlexVerdict::KevRce;
+    match version {
+        None => PlexVerdict::Unknown,
+        Some(v) if version_cmp(v, &PLEX2SHELL_FIXED).is_lt() => PlexVerdict::Plex2Shell,
+        Some(_) => PlexVerdict::Current,
+    }
+}
+
+/// Every published CVE whose affected range contains `version`.
+fn plex_cves(version: &[u32]) -> Vec<&'static str> {
+    let mut cves = Vec::new();
+    if version_cmp(version, &PLEX2SHELL_FIXED).is_lt() {
+        cves.extend(PLEX2SHELL_CVES);
     }
     if version_cmp(version, &PLEX_2025_FIRST).is_ge()
         && version_cmp(version, &PLEX_2025_FIXED).is_lt()
     {
-        return PlexVerdict::CredentialExposure;
+        cves.push("CVE-2025-34158");
     }
-    PlexVerdict::Current
+    if version_cmp(version, &PLEX_KEV_FIXED).is_lt() {
+        cves.push("CVE-2020-5741");
+    }
+    cves
 }
 
 // ── Plex response parsing ───────────────────────────────────────────────────
@@ -301,8 +320,12 @@ fn discovery_target(from: IpAddr, address: &str) -> Option<(u16, String)> {
 
 // ── Findings ────────────────────────────────────────────────────────────────
 
+/// Plex forum security notice for 1.43.2 and earlier.
+const PLEX2SHELL_NOTICE: &str = "https://forums.plex.tv/t/important-security-update-for-plex-media-server-v1-43-2-and-earlier/942319";
+
 fn plex_references() -> Vec<String> {
     refs![
+        PLEX2SHELL_NOTICE,
         "https://cveawg.mitre.org/api/cve/CVE-2025-34158",
         "https://nvd.nist.gov/vuln/detail/CVE-2020-5741",
         "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
@@ -320,14 +343,33 @@ fn plex_remediation() -> Remediation {
             "Turn off manual port forwarding and UPnP for TCP 32400 unless remote access \
              is genuinely needed; Plex's own Remote Access relay does not require it."
                 .to_owned(),
-            "Review Settings > Users for shared accounts that no longer need access — the \
-             2025 issue is exploitable by any signed-in user of the server."
-                .to_owned(),
+            "Review Settings > Users for shared accounts that no longer need access.".to_owned(),
             "Enable 'Require authentication on local network' so LAN clients are not \
              granted admin-equivalent access implicitly."
                 .to_owned(),
         ],
         effort: Some("15 minutes".to_owned()),
+    }
+}
+
+fn plex2shell_remediation() -> Remediation {
+    Remediation {
+        description: "Update Plex Media Server to 1.43.3.10861 or later.".to_owned(),
+        steps: vec![
+            "Update Plex Media Server to 1.43.3.10861 or later from Settings > General.".to_owned(),
+            "A NAS package centre can lag behind Plex releases: if it does not offer \
+             1.43.3.10861 yet, download the NAS package from the Plex downloads page and \
+             install it manually following the NAS vendor's procedure."
+                .to_owned(),
+            "Plex advises treating a server that was reachable from the internet below \
+             1.43.3.10861 as possibly compromised: check the host for unexpected processes \
+             and files, and rotate the Plex account password."
+                .to_owned(),
+            "Turn off manual port forwarding and UPnP for TCP 32400 unless remote access \
+             is genuinely needed."
+                .to_owned(),
+        ],
+        effort: Some("15 minutes (longer for a manual NAS install)".to_owned()),
     }
 }
 
@@ -357,37 +399,24 @@ fn plex_finding(
     let verdict = classify_plex(parsed.as_deref());
     let reported = identity.version.as_deref().unwrap_or("unknown");
 
-    let (title, description, severity, confidence) = match verdict {
-        PlexVerdict::KevRce => (
-            format!("Plex Media Server below 1.19.3 on {ip}:{port}"),
-            format!(
-                "The Plex Media Server at {ip}:{port} reports version {reported}, which is \
-                 before the 1.19.3 release that fixed CVE-2020-5741. That issue lets someone \
-                 who holds the server's own Plex account run code on the host through the \
-                 Camera Upload path, and CISA lists it as exploited in the wild. The version \
-                 is read from the unauthenticated /identity endpoint, so this is a banner \
-                 match rather than a demonstration. Update the server."
-            ),
-            Severity::High,
-            Confidence::Probable,
-        ),
-        PlexVerdict::CredentialExposure => (
-            format!("Plex Media Server exposes owner credentials on {ip}:{port}"),
-            format!(
-                "The Plex Media Server at {ip}:{port} reports version {reported}, inside the \
-                 1.41.7.x-1.42.0.x range affected by CVE-2025-34158 and before the 1.42.1 \
-                 fix. In that range an authenticated low-privilege user of the server — any \
-                 account it is shared with — can read the owner's account credentials from \
-                 the /myplex/account endpoint. This is not unauthenticated LAN takeover: it \
-                 needs a signed-in user. This scan read only /identity and never requested \
-                 the affected endpoint. Update to 1.42.1 or later."
-            ),
-            Severity::Medium,
-            Confidence::Probable,
-        ),
-        PlexVerdict::Current | PlexVerdict::Unknown => (
-            format!("Plex Media Server reachable on {ip}:{port}"),
-            format!(
+    let finding = match verdict {
+        PlexVerdict::Plex2Shell => {
+            let cves = parsed.as_deref().map(plex_cves).unwrap_or_default();
+            Finding::new(
+                "media_server",
+                &format!("Plex Media Server below 1.43.3.10861 (Plex2Shell) on {ip}:{port}"),
+                &plex2shell_description(ip, port, reported, &cves),
+                Severity::High,
+            )
+            .with_confidence(Confidence::Confirmed)
+            .with_cwe("CWE-918")
+            .with_cve_ids(cves.into_iter().map(ToOwned::to_owned).collect())
+            .with_remediation(plex2shell_remediation())
+        }
+        PlexVerdict::Current | PlexVerdict::Unknown => Finding::new(
+            "media_server",
+            &format!("Plex Media Server reachable on {ip}:{port}"),
+            &format!(
                 "The host at {ip}:{port} runs Plex Media Server (reported version \
                  {reported}). Its /identity endpoint answers unauthenticated requests with \
                  the server version and machine identifier, which is normal for Plex but \
@@ -396,33 +425,52 @@ fn plex_finding(
                  the server updated and confirm TCP 32400 is not forwarded from the internet."
             ),
             Severity::Info,
-            if verdict == PlexVerdict::Unknown {
-                Confidence::Inferred
-            } else {
-                Confidence::Confirmed
-            },
-        ),
+        )
+        .with_confidence(if verdict == PlexVerdict::Unknown {
+            Confidence::Inferred
+        } else {
+            Confidence::Confirmed
+        })
+        .with_remediation(plex_remediation()),
     };
 
-    let finding = Finding::new("media_server", &title, &description, severity)
-        .with_confidence(confidence)
+    finding
         .with_ip(ip)
         .with_port(port)
         .with_service("Plex Media Server")
         .with_evidence(plex_evidence(identity, url))
-        .with_remediation(plex_remediation())
         .with_references(plex_references())
-        .with_device_hint(media_server_hint(current_type, "plex_media_server"));
+        .with_device_hint(media_server_hint(current_type, "plex_media_server"))
+}
 
-    match verdict {
-        PlexVerdict::KevRce => finding
-            .with_cwe("CWE-502")
-            .with_cve_ids(vec!["CVE-2020-5741".to_owned()]),
-        PlexVerdict::CredentialExposure => finding
-            .with_cwe("CWE-669")
-            .with_cve_ids(vec!["CVE-2025-34158".to_owned()]),
-        PlexVerdict::Current | PlexVerdict::Unknown => finding,
+fn plex2shell_description(ip: IpAddr, port: u16, reported: &str, cves: &[&str]) -> String {
+    let mut text = format!(
+        "The Plex Media Server at {ip}:{port} reports version {reported}, below \
+         1.43.3.10861. Releases before that one carry the Plex2Shell chain \
+         (CVE-2026-96652, CVE-2026-96654, CVE-2026-96655, CVE-2026-96656), which CISA \
+         added to its Known Exploited Vulnerabilities catalog on 2026-10-20. Chained, the \
+         four issues let an unauthenticated attacker who can reach the server port run \
+         code with the privileges of the server process."
+    );
+    if cves.contains(&"CVE-2025-34158") {
+        text.push_str(
+            " This version is also in the 1.41.7.x-1.42.0.x range of CVE-2025-34158, where \
+             an authenticated low-privilege user of the server can read the owner's account \
+             credentials from /myplex/account; this scan never requested that endpoint.",
+        );
     }
+    if cves.contains(&"CVE-2020-5741") {
+        text.push_str(
+            " It is also before 1.19.3 and so carries CVE-2020-5741 (CISA KEV): code \
+             execution through Camera Upload for anyone holding the server owner's Plex \
+             account.",
+        );
+    }
+    text.push_str(
+        " The version is read from the unauthenticated /identity endpoint. Update to \
+         1.43.3.10861 or later.",
+    );
+    text
 }
 
 fn jellyfin_references() -> Vec<String> {
@@ -847,29 +895,42 @@ mod tests {
     // ── Plex classification ─────────────────────────────────────────
 
     #[test]
-    fn plex_below_the_kev_floor_is_kev_rce() {
-        assert_eq!(classify_plex(Some(&[1, 19, 2])), PlexVerdict::KevRce);
-        assert_eq!(classify_plex(Some(&[0, 9, 9])), PlexVerdict::KevRce);
+    fn plex2shell_floor_boundaries() {
+        assert_eq!(
+            classify_plex(Some(&[1, 43, 3, 10860])),
+            PlexVerdict::Plex2Shell
+        );
+        assert_eq!(classify_plex(Some(&[1, 43, 3])), PlexVerdict::Plex2Shell);
+        assert_eq!(
+            classify_plex(Some(&[1, 43, 2, 99999])),
+            PlexVerdict::Plex2Shell
+        );
+        assert_eq!(classify_plex(Some(&[0, 9, 9])), PlexVerdict::Plex2Shell);
+        assert_eq!(
+            classify_plex(Some(&[1, 43, 3, 10861])),
+            PlexVerdict::Current
+        );
+        assert_eq!(classify_plex(Some(&[1, 43, 4])), PlexVerdict::Current);
+        assert_eq!(classify_plex(Some(&[1, 44])), PlexVerdict::Current);
     }
 
     #[test]
-    fn plex_at_the_kev_fix_is_not_flagged() {
-        assert_eq!(classify_plex(Some(&[1, 19, 3])), PlexVerdict::Current);
-    }
-
-    #[test]
-    fn plex_2025_range_boundaries() {
-        assert_eq!(classify_plex(Some(&[1, 41, 6, 9999])), PlexVerdict::Current);
-        assert_eq!(
-            classify_plex(Some(&[1, 41, 7, 1])),
-            PlexVerdict::CredentialExposure
-        );
-        assert_eq!(
-            classify_plex(Some(&[1, 42, 0, 9999])),
-            PlexVerdict::CredentialExposure
-        );
-        assert_eq!(classify_plex(Some(&[1, 42, 1])), PlexVerdict::Current);
-        assert_eq!(classify_plex(Some(&[1, 43, 0])), PlexVerdict::Current);
+    fn plex_cves_lists_every_applicable_range() {
+        let chain = PLEX2SHELL_CVES.to_vec();
+        let with = |extra: &'static str| {
+            let mut v = chain.clone();
+            v.push(extra);
+            v
+        };
+        assert_eq!(plex_cves(&[1, 19, 2]), with("CVE-2020-5741"));
+        assert_eq!(plex_cves(&[0, 9, 9]), with("CVE-2020-5741"));
+        assert_eq!(plex_cves(&[1, 19, 3]), chain);
+        assert_eq!(plex_cves(&[1, 41, 6, 9999]), chain);
+        assert_eq!(plex_cves(&[1, 41, 7, 1]), with("CVE-2025-34158"));
+        assert_eq!(plex_cves(&[1, 42, 0, 9999]), with("CVE-2025-34158"));
+        assert_eq!(plex_cves(&[1, 42, 1]), chain);
+        assert_eq!(plex_cves(&[1, 43, 2, 10000]), chain);
+        assert!(plex_cves(&[1, 43, 3, 10861]).is_empty());
     }
 
     #[test]
@@ -1068,8 +1129,34 @@ mod tests {
 
     // ── Findings ────────────────────────────────────────────────────
 
+    fn owned(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|&id| id.to_owned()).collect()
+    }
+
     #[test]
-    fn kev_plex_finding_carries_the_kev_cve() {
+    fn plex2shell_finding_is_high_confirmed_with_the_chain() {
+        let finding = plex_finding(
+            ip(),
+            PLEX_PORT,
+            &plex_with("1.43.2.10500-abcdef"),
+            "u",
+            DeviceType::Unknown,
+        );
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.confidence, Confidence::Confirmed);
+        assert_eq!(finding.cve_ids, owned(&PLEX2SHELL_CVES));
+        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-918"));
+        assert!(finding.description.contains("unauthenticated attacker"));
+        assert!(!finding.description.contains("CVE-2025-34158"));
+        assert!(!finding.description.contains("CVE-2020-5741"));
+        let remediation = finding.remediation.expect("remediation");
+        assert!(remediation.description.contains("1.43.3.10861"));
+        assert!(remediation.steps.iter().any(|s| s.contains("NAS")));
+        assert!(finding.references.iter().any(|r| r == PLEX2SHELL_NOTICE));
+    }
+
+    #[test]
+    fn kev_2020_range_adds_its_cve_to_the_chain() {
         let finding = plex_finding(
             ip(),
             PLEX_PORT,
@@ -1078,12 +1165,15 @@ mod tests {
             DeviceType::Unknown,
         );
         assert_eq!(finding.severity, Severity::High);
-        assert_eq!(finding.confidence, Confidence::Probable);
-        assert_eq!(finding.cve_ids, vec!["CVE-2020-5741".to_owned()]);
+        assert_eq!(finding.confidence, Confidence::Confirmed);
+        let mut expected = PLEX2SHELL_CVES.to_vec();
+        expected.push("CVE-2020-5741");
+        assert_eq!(finding.cve_ids, owned(&expected));
+        assert!(finding.description.contains("Camera Upload"));
     }
 
     #[test]
-    fn credential_exposure_finding_is_medium_and_names_its_precondition() {
+    fn credential_exposure_range_adds_its_cve_and_names_its_precondition() {
         let finding = plex_finding(
             ip(),
             PLEX_PORT,
@@ -1091,8 +1181,10 @@ mod tests {
             "u",
             DeviceType::Unknown,
         );
-        assert_eq!(finding.severity, Severity::Medium);
-        assert_eq!(finding.cve_ids, vec!["CVE-2025-34158".to_owned()]);
+        assert_eq!(finding.severity, Severity::High);
+        let mut expected = PLEX2SHELL_CVES.to_vec();
+        expected.push("CVE-2025-34158");
+        assert_eq!(finding.cve_ids, owned(&expected));
         assert!(
             finding
                 .description
@@ -1106,13 +1198,21 @@ mod tests {
         let finding = plex_finding(
             ip(),
             PLEX_PORT,
-            &plex_with("1.42.1.10060"),
+            &plex_with("1.43.3.10861-4bd6e9b9d"),
             "u",
             DeviceType::Unknown,
         );
         assert_eq!(finding.severity, Severity::Info);
         assert!(finding.cve_ids.is_empty());
+        assert!(finding.cwe_id.is_none());
         assert_eq!(finding.confidence, Confidence::Confirmed);
+        assert!(
+            !finding
+                .remediation
+                .expect("remediation")
+                .description
+                .contains("1.43.3.10861")
+        );
     }
 
     #[test]
@@ -1234,7 +1334,11 @@ mod tests {
     #[test]
     fn reference_lists_name_the_advisories() {
         let plex = plex_references();
-        assert_eq!(plex.len(), 4);
+        assert_eq!(plex.len(), 5);
+        assert!(
+            plex.iter()
+                .any(|r| r.contains("forums.plex.tv/t/important"))
+        );
         assert!(plex.iter().any(|r| r.contains("CVE-2020-5741")));
         assert!(plex.iter().any(|r| r.contains("CVE-2025-34158")));
         assert!(plex.iter().any(|r| r.contains("cisa.gov")));
@@ -1464,22 +1568,38 @@ mod tests {
 
         // ── classify_plex boundary monotonicity (survey #6) ─────────
 
-        /// The KevRce verdict is downward-closed: if a version is flagged, every
-        /// lower version is too.
+        /// Plex2Shell and CVE-2020-5741 are downward-closed: if a version is
+        /// flagged, every lower version is too.
         #[test]
-        fn prop_classify_plex_kev_is_downward_closed(
+        fn prop_classify_plex_floors_are_downward_closed(
             a in proptest::collection::vec(0u32..45, 1..4),
             b in proptest::collection::vec(0u32..45, 1..4),
         ) {
-            if version_cmp(&a, &b).is_le() && classify_plex(Some(&b)) == PlexVerdict::KevRce {
-                prop_assert_eq!(classify_plex(Some(&a)), PlexVerdict::KevRce);
+            if version_cmp(&a, &b).is_le() {
+                if classify_plex(Some(&b)) == PlexVerdict::Plex2Shell {
+                    prop_assert_eq!(classify_plex(Some(&a)), PlexVerdict::Plex2Shell);
+                }
+                if plex_cves(&b).contains(&"CVE-2020-5741") {
+                    prop_assert!(plex_cves(&a).contains(&"CVE-2020-5741"));
+                }
             }
         }
 
-        /// The CredentialExposure verdict covers a contiguous version interval:
-        /// a version between two flagged versions is flagged too.
+        /// The CVE list is non-empty exactly for the Plex2Shell verdict.
         #[test]
-        fn prop_classify_plex_credexposure_is_an_interval(
+        fn prop_plex_cves_agree_with_the_verdict(
+            v in proptest::collection::vec(0u32..12_000, 1..5),
+        ) {
+            prop_assert_eq!(
+                plex_cves(&v).is_empty(),
+                classify_plex(Some(&v)) == PlexVerdict::Current
+            );
+        }
+
+        /// CVE-2025-34158 covers a contiguous version interval: a version
+        /// between two flagged versions is flagged too.
+        #[test]
+        fn prop_plex_cve_2025_is_an_interval(
             x in proptest::collection::vec(0u32..45, 1..4),
             y in proptest::collection::vec(0u32..45, 1..4),
             z in proptest::collection::vec(0u32..45, 1..4),
@@ -1494,10 +1614,9 @@ mod tests {
             if version_cmp(&lo, &mid).is_gt() {
                 std::mem::swap(&mut lo, &mut mid);
             }
-            if classify_plex(Some(&lo)) == PlexVerdict::CredentialExposure
-                && classify_plex(Some(&hi)) == PlexVerdict::CredentialExposure
-            {
-                prop_assert_eq!(classify_plex(Some(&mid)), PlexVerdict::CredentialExposure);
+            let flagged = |v: &[u32]| plex_cves(v).contains(&"CVE-2025-34158");
+            if flagged(&lo) && flagged(&hi) {
+                prop_assert!(flagged(&mid));
             }
         }
     }

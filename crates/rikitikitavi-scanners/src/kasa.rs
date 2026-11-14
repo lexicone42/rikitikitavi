@@ -421,6 +421,239 @@ fn parse_sysinfo(text: &str) -> Option<Sysinfo> {
     })
 }
 
+// ── Fixed-firmware table ────────────────────────────────────────────────────
+
+/// Improper authentication and account-information exposure (FAQ 5342).
+const CVE_AUTH: &str = "CVE-2026-108473";
+/// Insufficient cryptographic protection of local control messages (FAQ 5267).
+const CVE_CRYPTO: &str = "CVE-2026-76784";
+
+const FAQ_5342: &str = "https://www.omadanetworks.com/us/support/faq/5342/";
+const FAQ_5267: &str = "https://www.omadanetworks.com/us/support/faq/5267/";
+const FAQ_4416: &str = "https://www.tp-link.com/support/faq/4416";
+/// GPL-3.0; linked only.
+const PYTHON_KASA_SUPPORTED: &str =
+    "https://github.com/python-kasa/python-kasa/blob/master/SUPPORTED.md";
+
+/// `(major, minor, patch, build)`.
+type FwVersion = (u32, u32, u32, u32);
+
+/// One advisory row. `hw_ver` is in `get_sysinfo` form (FAQ `V5` is `5.0`);
+/// `None` when the advisory names the model without a hardware version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedFirmware {
+    model: &'static str,
+    hw_ver: Option<&'static str>,
+    fixed: &'static str,
+    cve: &'static str,
+}
+
+const fn auth(model: &'static str, hw_ver: &'static str, fixed: &'static str) -> FixedFirmware {
+    FixedFirmware {
+        model,
+        hw_ver: Some(hw_ver),
+        fixed,
+        cve: CVE_AUTH,
+    }
+}
+
+const fn crypto(
+    model: &'static str,
+    hw_ver: Option<&'static str>,
+    fixed: &'static str,
+) -> FixedFirmware {
+    FixedFirmware {
+        model,
+        hw_ver,
+        fixed,
+        cve: CVE_CRYPTO,
+    }
+}
+
+/// FAQ 5342 (updated 2026-10-14) and FAQ 5267 (updated 2026-08-26). Model names
+/// are normalised: `KS230 KIT` is `KS230`, `ES20M & KS220M` is two rows,
+/// `HS103P3/HS103P4` is `HS103`, `KP125MP2/KP125MP4` is `KP125M`, and
+/// `HS220-LA(US) / HS220-BL(US)` is `HS220`.
+const FIXED_FIRMWARE: &[FixedFirmware] = &[
+    auth("HS103", "5.0", "1.1.3 Build 250908 Rel.112508"),
+    auth("EP10", "1.0", "1.1.1 Build 250908 Rel.112508"),
+    auth("EP40", "1.0", "1.1.0 Build 250225 Rel.171723"),
+    auth("HS200", "5.0", "1.1.2 Build 241220 Rel.165559"),
+    auth("KP401", "1.0", "1.1.2 Build 241223 Rel.094434"),
+    auth("KS230", "2.0", "1.1.4 Build 241223 Rel.105830"),
+    auth("KP405", "1.0", "1.1.0 Build 250225 Rel.174632"),
+    auth("HS220", "3.0", "1.1.4 Build 241220 Rel.171050"),
+    auth("KP115", "1.0", "1.1.1 Build 250908 Rel.112945"),
+    auth("HS210", "3.0", "1.1.0 Build 250225 Rel.163425"),
+    auth("HS300", "2.0", "1.1.2 Build 241220 Rel.171333"),
+    auth("KP200", "3.0", "1.1.0 Build 250225 Rel.171724"),
+    auth("KP303", "2.0", "1.1.2 Build 241220 Rel.173321"),
+    auth("KS200", "1.0", "1.1.2 Build 241223 Rel.103857"),
+    auth("EP40A", "1.0", "1.1.1 Build 250908 Rel.112526"),
+    auth("KS220", "1.0", "1.1.3 Build 241223 Rel.105515"),
+    auth("KS200M", "1.0", "1.1.4 Build 241223 Rel.104700"),
+    auth("ES20M", "1.0", "1.1.6 Build 250522 Rel.210254"),
+    auth("KS220M", "1.0", "1.1.6 Build 250522 Rel.210254"),
+    auth("KP400", "3.0", "1.1.0 Build 250225 Rel.171723"),
+    auth("KL125", "4.0", "1.1.1 Build 260710 Rel.082646"),
+    auth("KL135", "2.0", "1.1.1 Build 260710 Rel.082646"),
+    auth("KL110", "4.0", "1.1.1 Build 260710 Rel.082646"),
+    auth("KL420L5", "1.0", "1.4.2 Build 260605 Rel.035033"),
+    crypto("HS103", None, "1.1.3 Build 250908 Rel.112508"),
+    crypto("EP10", None, "1.1.1 Build 250908 Rel.112508"),
+    crypto("EP25", Some("2.0"), "1.0.3 Build 240529 Rel.145252"),
+    crypto("HS300", Some("2.0"), "1.1.2 Build 241220 Rel.171333"),
+    crypto("KP303", Some("2.0"), "1.1.2 Build 241220 Rel.173321"),
+    crypto("EP40A", None, "1.1.1 Build 250908 Rel.112526"),
+    crypto("KP125M", None, "1.2.5 Build 241213 Rel.172504"),
+    crypto("KP115", None, "1.1.1 Build 250908 Rel.112945"),
+    crypto("KS225", None, "1.1.1 Build 240626 Rel.175125"),
+    crypto("EP40M", None, "1.1.0 Build 240415 Rel.171219"),
+    crypto("KS205", None, "1.1.1 Build 240724 Rel.105920"),
+    crypto("KS240", None, "1.0.6 Build 240122 Rel.160100"),
+    crypto("ES20M", None, "1.1.6 Build 250522 Rel.210254"),
+    crypto("KS220M", None, "1.1.6 Build 250522 Rel.210254"),
+    crypto("KP200", Some("3.0"), "1.1.0 Build 250225 Rel.171724"),
+    crypto("HS200", Some("5.26"), "1.0.3 Build 240723 Rel.192622"),
+    crypto("HS220", Some("6.6"), "1.0.3 Build 240723 Rel.192630"),
+    crypto("HS220", Some("3.26"), "1.1.1 Build 240802 Rel.094131"),
+    crypto("HS220", Some("4.6"), "1.1.1 Build 240802 Rel.094142"),
+    crypto("KL125", None, "1.1.1 Build 260710 Rel.082646"),
+];
+
+/// Multi-pack SKUs in the advisories and the model the device reports.
+const PACK_ALIASES: &[(&str, &str)] = &[
+    ("HS103P3", "HS103"),
+    ("HS103P4", "HS103"),
+    ("KP125MP2", "KP125M"),
+    ("KP125MP4", "KP125M"),
+];
+
+/// Upper-case base model: region (`(US)`), colour (`-LA`) and `KIT` suffixes
+/// dropped, pack SKUs mapped to the single unit.
+fn normalise_model(raw: &str) -> String {
+    let upper = raw.trim().to_ascii_uppercase();
+    let base = upper.split(['(', ' ', '-']).next().unwrap_or_default();
+    PACK_ALIASES
+        .iter()
+        .find(|(pack, _)| *pack == base)
+        .map_or(base, |(_, model)| model)
+        .to_owned()
+}
+
+/// `get_sysinfo` form: `V5` and `5` become `5.0`; `5.26` is unchanged.
+fn normalise_hw(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let bare = trimmed.strip_prefix(['V', 'v']).unwrap_or(trimmed);
+    if bare.contains('.') {
+        bare.to_owned()
+    } else {
+        format!("{bare}.0")
+    }
+}
+
+/// Parse `1.0.8 Build 230804 Rel.172306`. `Rel.` is ignored.
+fn parse_sw_ver(raw: &str) -> Option<FwVersion> {
+    let mut tokens = raw.split_whitespace();
+    let mut parts = tokens.next()?.split('.').map(|p| p.parse::<u32>().ok());
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    let patch = parts.next()??;
+    if parts.next().is_some() || !tokens.next()?.eq_ignore_ascii_case("build") {
+        return None;
+    }
+    let build = tokens.next()?.parse().ok()?;
+    Some((major, minor, patch, build))
+}
+
+/// `Some(true)` for a hardware-version match, `Some(false)` for a model-only
+/// match, `None` when the row does not apply.
+///
+/// A model-only row applies to the hardware versions of keyed rows for the same
+/// model; with no keyed row it applies to every hardware version.
+fn row_match(row: &FixedFirmware, model: &str, hw: Option<&str>) -> Option<bool> {
+    if row.model != model {
+        return None;
+    }
+    if let Some(row_hw) = row.hw_ver {
+        return (Some(row_hw) == hw).then_some(true);
+    }
+    let mut keyed = FIXED_FIRMWARE
+        .iter()
+        .filter(|r| r.model == model)
+        .filter_map(|r| r.hw_ver)
+        .peekable();
+    if keyed.peek().is_none() {
+        return Some(false);
+    }
+    keyed.any(|h| Some(h) == hw).then_some(true)
+}
+
+/// Firmware status against [`FIXED_FIRMWARE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FirmwareVerdict {
+    /// No row applies, or `sw_ver` did not parse.
+    Unknown,
+    /// At or above the fix of every applicable row.
+    Fixed,
+    /// Below the fix of at least one applicable row.
+    Vulnerable {
+        cves: Vec<&'static str>,
+        /// Highest fixed release among the rows that flagged the device.
+        fixed: &'static str,
+        /// At least one flagging row matched the hardware version.
+        hw_matched: bool,
+    },
+}
+
+fn classify_firmware(
+    model: Option<&str>,
+    hw_ver: Option<&str>,
+    sw_ver: Option<&str>,
+) -> FirmwareVerdict {
+    let Some(model) = model.map(normalise_model) else {
+        return FirmwareVerdict::Unknown;
+    };
+    let hw = hw_ver.map(normalise_hw);
+    let rows: Vec<(&FixedFirmware, bool)> = FIXED_FIRMWARE
+        .iter()
+        .filter_map(|row| row_match(row, &model, hw.as_deref()).map(|exact| (row, exact)))
+        .collect();
+    let Some(installed) = sw_ver.and_then(parse_sw_ver) else {
+        return FirmwareVerdict::Unknown;
+    };
+    if rows.is_empty() {
+        return FirmwareVerdict::Unknown;
+    }
+
+    let mut cves = Vec::new();
+    let mut highest: Option<(FwVersion, &'static str)> = None;
+    let mut hw_matched = false;
+    for (row, exact) in rows {
+        let Some(target) = parse_sw_ver(row.fixed) else {
+            continue;
+        };
+        if installed >= target {
+            continue;
+        }
+        if !cves.contains(&row.cve) {
+            cves.push(row.cve);
+        }
+        hw_matched |= exact;
+        if highest.is_none_or(|(v, _)| target > v) {
+            highest = Some((target, row.fixed));
+        }
+    }
+    match highest {
+        None => FirmwareVerdict::Fixed,
+        Some((_, fixed)) => FirmwareVerdict::Vulnerable {
+            cves,
+            fixed,
+            hw_matched,
+        },
+    }
+}
+
 // ── Probe ───────────────────────────────────────────────────────────────────
 
 /// Send one `get_sysinfo` and return the decrypted response body.
@@ -463,13 +696,25 @@ async fn probe_sysinfo(ip: IpAddr, port: u16) -> Option<String> {
 
 // ── Findings ────────────────────────────────────────────────────────────────
 
-fn segmentation_remediation(switches_mains: bool) -> Remediation {
+/// Update, verify, then segment. `fixed` names the release to install when known.
+fn segmentation_remediation(switches_mains: bool, fixed: Option<&str>) -> Remediation {
+    let update = fixed.map_or_else(
+        || "Update the firmware from the Kasa app.".to_owned(),
+        |release| format!("Update the firmware from the Kasa app to {release} or later."),
+    );
     let mut steps = vec![
-        "Move Kasa devices onto an IoT VLAN / guest SSID that cannot reach \
-         workstations, servers or management interfaces."
+        update,
+        "Re-scan to verify. Some updates add authentication to the local protocol \
+         (HS100 (UK) hardware 4.1 on firmware 1.1.0); others leave TCP 9999 open."
             .to_owned(),
-        "Block inbound TCP/9999 from every host that is not the controller you \
-         intend to allow (a firewall rule on the IoT VLAN, not on the device)."
+        "If TCP 9999 still answers, move the device onto an IoT VLAN / guest SSID \
+         that cannot reach workstations, servers or management interfaces, and allow \
+         TCP 9999 only from the controller that needs it (a firewall rule on the \
+         VLAN, not on the device)."
+            .to_owned(),
+        "Leave Me > Settings > Third-Party Compatibility off unless a local \
+         controller such as Home Assistant needs it; TP-Link states it may reduce \
+         the security protections (FAQ 4416)."
             .to_owned(),
         "Never port-forward 9999; confirm the router's UPnP/NAT-PMP table has no \
          mapping for it."
@@ -487,12 +732,138 @@ fn segmentation_remediation(switches_mains: bool) -> Remediation {
         );
     }
     Remediation {
-        description: "This hardware generation has no authentication to enable; a \
-                      firmware update does not add one. Contain it with network \
-                      segmentation."
+        description: "Update the firmware, re-scan to check whether TCP 9999 still \
+                      answers without credentials, and segment the device if it does."
             .to_owned(),
         steps,
-        effort: Some("30 minutes (network change)".to_owned()),
+        effort: Some("30 minutes (firmware update, network change)".to_owned()),
+    }
+}
+
+fn device_hint(info: &Sysinfo) -> DeviceHint {
+    let mut hint = DeviceHint::new()
+        .with_vendor("TP-Link")
+        .with_device_type(DeviceType::IoT);
+    if let Some(model) = &info.model {
+        hint = hint.with_model(model.clone());
+    }
+    if let Some(alias) = &info.alias {
+        hint = hint.with_hostname(alias.clone());
+    }
+    hint
+}
+
+fn sysinfo_evidence(info: &Sysinfo) -> String {
+    format!(
+        "get_sysinfo decoded: model={} sw_ver={} hw_ver={} type={} alias={}",
+        info.model.as_deref().unwrap_or("?"),
+        info.sw_ver.as_deref().unwrap_or("unknown"),
+        info.hw_ver.as_deref().unwrap_or("unknown"),
+        info.dev_type.as_deref().unwrap_or("?"),
+        info.alias.as_deref().unwrap_or("(no alias)"),
+    )
+}
+
+/// CVE finding when the firmware is below an advisory fix, otherwise the
+/// generic unauthenticated-control finding.
+fn device_finding(ip: IpAddr, port: u16, info: &Sysinfo) -> Finding {
+    match classify_firmware(
+        info.model.as_deref(),
+        info.hw_ver.as_deref(),
+        info.sw_ver.as_deref(),
+    ) {
+        FirmwareVerdict::Vulnerable {
+            cves,
+            fixed,
+            hw_matched,
+        } => cve_finding(ip, port, info, &cves, fixed, hw_matched),
+        FirmwareVerdict::Fixed | FirmwareVerdict::Unknown => control_finding(ip, port, info),
+    }
+}
+
+const CVE_SUMMARIES: &[(&str, &str)] = &[
+    (
+        CVE_AUTH,
+        "CVE-2026-108473 (TP-Link FAQ 5342): improper authentication in the local \
+         device-management protocol lets an unauthenticated adjacent attacker change \
+         device state or management settings, and account information can be exposed.",
+    ),
+    (
+        CVE_CRYPTO,
+        "CVE-2026-76784 (TP-Link FAQ 5267): insufficient cryptographic protection of \
+         the local protocol lets an adjacent attacker intercept, replay or forge \
+         control messages.",
+    ),
+];
+
+fn cve_summary(cve: &str) -> &'static str {
+    CVE_SUMMARIES
+        .iter()
+        .find(|(id, _)| *id == cve)
+        .map_or("", |(_, text)| text)
+}
+
+fn cve_finding(
+    ip: IpAddr,
+    port: u16,
+    info: &Sysinfo,
+    cves: &[&'static str],
+    fixed: &str,
+    hw_matched: bool,
+) -> Finding {
+    let label = info.label();
+    let firmware = info.sw_ver.as_deref().unwrap_or("unknown");
+    let hardware = info.hw_ver.as_deref().unwrap_or("unknown");
+    let summaries: Vec<&str> = cves.iter().map(|cve| cve_summary(cve)).collect();
+    let match_note = if hw_matched {
+        "TP-Link lists this model and hardware version with that fixed release."
+    } else {
+        "TP-Link lists this model without a hardware version, so the match is on the \
+         model only."
+    };
+    let has_auth = cves.contains(&CVE_AUTH);
+
+    let mut references = Vec::new();
+    if has_auth {
+        references.push(FAQ_5342.to_owned());
+    }
+    if cves.contains(&CVE_CRYPTO) {
+        references.push(FAQ_5267.to_owned());
+    }
+    references.extend(refs![
+        FAQ_4416,
+        "https://github.com/softScheck/tplink-smartplug",
+    ]);
+
+    let finding = Finding::new(
+        "kasa",
+        &format!("TP-Link Kasa firmware below the vendor-listed fixed release on {ip}:{port}"),
+        &format!(
+            "{label} at {ip}:{port} answered `system.get_sysinfo` with no credentials and \
+             reports hardware {hardware}, firmware {firmware}, which is below {fixed}. \
+             {match_note} {}",
+            summaries.join(" ")
+        ),
+        Severity::High,
+    )
+    .with_confidence(if hw_matched {
+        Confidence::Confirmed
+    } else {
+        Confidence::Probable
+    })
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("kasa")
+    .with_cwe(if has_auth { "CWE-287" } else { "CWE-327" })
+    .with_cve_ids(cves.iter().map(|&cve| cve.to_owned()).collect())
+    .with_remediation(segmentation_remediation(info.switches_mains, Some(fixed)))
+    .with_device_hint(device_hint(info))
+    .with_evidence(format!("{}; fixed={fixed}", sysinfo_evidence(info)))
+    .with_references(references);
+
+    match &info.mac {
+        Some(mac) => finding.with_mac(mac.as_str()),
+        None => finding,
     }
 }
 
@@ -506,16 +877,6 @@ fn control_finding(ip: IpAddr, port: u16, info: &Sysinfo) -> Finding {
     let alias = info.alias.as_deref().unwrap_or("(no alias)");
     let firmware = info.sw_ver.as_deref().unwrap_or("unknown");
     let hardware = info.hw_ver.as_deref().unwrap_or("unknown");
-
-    let mut hint = DeviceHint::new()
-        .with_vendor("TP-Link")
-        .with_device_type(DeviceType::IoT);
-    if let Some(model) = &info.model {
-        hint = hint.with_model(model.clone());
-    }
-    if let Some(alias) = &info.alias {
-        hint = hint.with_hostname(alias.clone());
-    }
 
     let finding = Finding::new(
         "kasa",
@@ -538,19 +899,14 @@ fn control_finding(ip: IpAddr, port: u16, info: &Sysinfo) -> Finding {
     .with_port(port)
     .with_service("kasa")
     .with_cwe("CWE-306")
-    .with_remediation(segmentation_remediation(info.switches_mains))
-    .with_device_hint(hint)
-    .with_evidence(format!(
-        "get_sysinfo decoded: model={} sw_ver={} hw_ver={} type={} alias={}",
-        info.model.as_deref().unwrap_or("?"),
-        firmware,
-        hardware,
-        info.dev_type.as_deref().unwrap_or("?"),
-        alias,
-    ))
+    .with_remediation(segmentation_remediation(info.switches_mains, None))
+    .with_device_hint(device_hint(info))
+    .with_evidence(sysinfo_evidence(info))
     .with_references(refs![
         "https://github.com/softScheck/tplink-smartplug",
         "https://cwe.mitre.org/data/definitions/306.html",
+        FAQ_4416,
+        PYTHON_KASA_SUPPORTED,
     ]);
 
     match &info.mac {
@@ -649,7 +1005,7 @@ impl Scanner for KasaScanner {
             if let Some((lat, lon)) = info.location {
                 findings.push(geolocation_finding(ip, KASA_PORT, lat, lon));
             }
-            findings.push(control_finding(ip, KASA_PORT, &info));
+            findings.push(device_finding(ip, KASA_PORT, &info));
         }
 
         tracing::info!(findings_count = findings.len(), "Kasa scan complete");
@@ -985,9 +1341,370 @@ mod tests {
         );
     }
 
+    // ── Fixed-firmware table ────────────────────────────────────────
+
+    fn sysinfo_for(model: &str, hw: &str, sw: &str) -> Sysinfo {
+        parse_sysinfo(&format!(
+            r#"{{"system":{{"get_sysinfo":{{"model":"{model}","hw_ver":"{hw}",
+               "sw_ver":"{sw}","relay_state":1,"mac":"50:C7:BF:11:22:33"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_sw_ver_reads_the_kasa_shape() {
+        assert_eq!(
+            parse_sw_ver("1.0.8 Build 230804 Rel.172306"),
+            Some((1, 0, 8, 230_804))
+        );
+        assert_eq!(parse_sw_ver("1.1.3 build 250908"), Some((1, 1, 3, 250_908)));
+        assert_eq!(
+            parse_sw_ver("  1.2.5   Build 171213  "),
+            Some((1, 2, 5, 171_213))
+        );
+    }
+
+    #[test]
+    fn parse_sw_ver_rejects_other_shapes() {
+        for bad in [
+            "",
+            "1.0.8",
+            "1.0 Build 230804",
+            "1.0.8.1 Build 230804",
+            "1.0.8 Rel 230804",
+            "1.0.8 Build",
+            "1.0.x Build 230804",
+            "1.0.8 Build 2308x4",
+            "99999999999.0.0 Build 1",
+        ] {
+            assert_eq!(parse_sw_ver(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn every_table_row_parses_and_is_normalised() {
+        for row in FIXED_FIRMWARE {
+            assert!(parse_sw_ver(row.fixed).is_some(), "{row:?}");
+            assert_eq!(normalise_model(row.model), row.model, "{row:?}");
+            if let Some(hw) = row.hw_ver {
+                assert_eq!(normalise_hw(hw), hw, "{row:?}");
+            }
+            assert!(row.cve == CVE_AUTH || row.cve == CVE_CRYPTO);
+            assert!(!cve_summary(row.cve).is_empty());
+        }
+    }
+
+    #[test]
+    fn table_keys_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for row in FIXED_FIRMWARE {
+            assert!(seen.insert((row.model, row.hw_ver, row.cve)), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn table_row_counts_match_the_advisories() {
+        let count = |cve| FIXED_FIRMWARE.iter().filter(|r| r.cve == cve).count();
+        // FAQ 5342: 23 rows, `ES20M & KS220M` split in two.
+        assert_eq!(count(CVE_AUTH), 24);
+        // FAQ 5267: 20 rows.
+        assert_eq!(count(CVE_CRYPTO), 20);
+        assert!(
+            FIXED_FIRMWARE
+                .iter()
+                .filter(|r| r.cve == CVE_AUTH)
+                .all(|r| r.hw_ver.is_some())
+        );
+    }
+
+    #[test]
+    fn model_names_are_normalised() {
+        assert_eq!(normalise_model("HS103(US)"), "HS103");
+        assert_eq!(normalise_model("hs200(us)"), "HS200");
+        assert_eq!(normalise_model("KS230 KIT"), "KS230");
+        assert_eq!(normalise_model("HS103P3"), "HS103");
+        assert_eq!(normalise_model("HS103P4"), "HS103");
+        assert_eq!(normalise_model("KP125MP2"), "KP125M");
+        assert_eq!(normalise_model("KP125MP4(US)"), "KP125M");
+        assert_eq!(normalise_model("HS220-LA(US)"), "HS220");
+        assert_eq!(normalise_model(" KL420L5(US) "), "KL420L5");
+        assert_eq!(normalise_model(""), "");
+    }
+
+    #[test]
+    fn hardware_versions_are_normalised() {
+        assert_eq!(normalise_hw("V5"), "5.0");
+        assert_eq!(normalise_hw("5"), "5.0");
+        assert_eq!(normalise_hw("5.0"), "5.0");
+        assert_eq!(normalise_hw("V5.26"), "5.26");
+        assert_eq!(normalise_hw(" v3.0 "), "3.0");
+    }
+
+    #[test]
+    fn hs200_v5_and_v5_26_are_separate_firmware_lines() {
+        // V5 fixed in 1.1.2 B241220; V5.26 fixed in 1.0.3 B240723.
+        assert_eq!(
+            classify_firmware(Some("HS200(US)"), Some("5.26"), Some("1.0.3 Build 240723")),
+            FirmwareVerdict::Fixed
+        );
+        assert_eq!(
+            classify_firmware(Some("HS200(US)"), Some("5.0"), Some("1.0.3 Build 240723")),
+            FirmwareVerdict::Vulnerable {
+                cves: vec![CVE_AUTH],
+                fixed: "1.1.2 Build 241220 Rel.165559",
+                hw_matched: true,
+            }
+        );
+        assert_eq!(
+            classify_firmware(Some("HS200(US)"), Some("5.26"), Some("1.0.2 Build 240101")),
+            FirmwareVerdict::Vulnerable {
+                cves: vec![CVE_CRYPTO],
+                fixed: "1.0.3 Build 240723 Rel.192622",
+                hw_matched: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_in_both_advisories_lists_both_cves() {
+        assert_eq!(
+            classify_firmware(
+                Some("HS300(US)"),
+                Some("2.0"),
+                Some("1.0.12 Build 220121 Rel.175814")
+            ),
+            FirmwareVerdict::Vulnerable {
+                cves: vec![CVE_AUTH, CVE_CRYPTO],
+                fixed: "1.1.2 Build 241220 Rel.171333",
+                hw_matched: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_only_row_follows_its_faq_5342_counterpart() {
+        // HS103: FAQ 5342 keys V5; FAQ 5267 names the model only.
+        assert_eq!(
+            classify_firmware(Some("HS103(US)"), Some("5.0"), Some("1.0.8 Build 230804")),
+            FirmwareVerdict::Vulnerable {
+                cves: vec![CVE_AUTH, CVE_CRYPTO],
+                fixed: "1.1.3 Build 250908 Rel.112508",
+                hw_matched: true,
+            }
+        );
+        // Another hardware version is outside both rows.
+        assert_eq!(
+            classify_firmware(Some("HS103(US)"), Some("4.0"), Some("1.0.8 Build 230804")),
+            FirmwareVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn a_model_only_row_without_a_counterpart_is_a_model_match() {
+        assert_eq!(
+            classify_firmware(Some("KP125M(US)"), Some("1.0"), Some("1.2.3 Build 240624")),
+            FirmwareVerdict::Vulnerable {
+                cves: vec![CVE_CRYPTO],
+                fixed: "1.2.5 Build 241213 Rel.172504",
+                hw_matched: false,
+            }
+        );
+        assert_eq!(
+            classify_firmware(Some("KS240(US)"), None, Some("1.0.6 Build 240122")),
+            FirmwareVerdict::Fixed
+        );
+    }
+
+    #[test]
+    fn at_or_above_the_fixed_build_is_fixed() {
+        for sw in [
+            "1.1.3 Build 250908 Rel.112508",
+            "1.1.3 Build 250908 Rel.000000",
+            "1.1.4 Build 250101",
+            "2.0.0 Build 100101",
+        ] {
+            assert_eq!(
+                classify_firmware(Some("HS103(US)"), Some("5.0"), Some(sw)),
+                FirmwareVerdict::Fixed,
+                "{sw}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_model_or_unreadable_firmware_is_unknown() {
+        assert_eq!(
+            classify_firmware(Some("HS110(EU)"), Some("1.0"), Some("1.2.5 Build 171213")),
+            FirmwareVerdict::Unknown
+        );
+        assert_eq!(
+            classify_firmware(None, Some("5.0"), Some("1.0.8 Build 230804")),
+            FirmwareVerdict::Unknown
+        );
+        assert_eq!(
+            classify_firmware(Some("HS103"), Some("5.0"), None),
+            FirmwareVerdict::Unknown
+        );
+        assert_eq!(
+            classify_firmware(Some("HS103"), Some("5.0"), Some("garbage")),
+            FirmwareVerdict::Unknown
+        );
+        // A keyed row needs a hardware version.
+        assert_eq!(
+            classify_firmware(Some("EP40"), None, Some("1.0.0 Build 200101")),
+            FirmwareVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn hw_matched_cve_finding_is_high_confirmed_with_cwe_287() {
+        let info = sysinfo_for("HS200(US)", "5.0", "1.0.8 Build 230804 Rel.172306");
+        let finding = device_finding(ip(), KASA_PORT, &info);
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.confidence, Confidence::Confirmed);
+        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-287"));
+        assert_eq!(finding.cve_ids, vec![CVE_AUTH.to_owned()]);
+        assert!(finding.references.iter().any(|r| r == FAQ_5342));
+        assert!(finding.references.iter().all(|r| r != FAQ_5267));
+        assert!(finding.affected_mac.is_some());
+        let remediation = finding.remediation.unwrap();
+        assert!(remediation.steps[0].contains("1.1.2 Build 241220 Rel.165559"));
+        assert!(
+            finding
+                .evidence
+                .unwrap()
+                .contains("fixed=1.1.2 Build 241220 Rel.165559")
+        );
+    }
+
+    #[test]
+    fn model_only_cve_finding_is_probable_with_cwe_327() {
+        let info = sysinfo_for("KS225(US)", "1.0", "1.0.2 Build 231108 Rel.165511");
+        let finding = device_finding(ip(), KASA_PORT, &info);
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.confidence, Confidence::Probable);
+        assert_eq!(finding.cwe_id.as_deref(), Some("CWE-327"));
+        assert_eq!(finding.cve_ids, vec![CVE_CRYPTO.to_owned()]);
+        assert!(finding.references.iter().any(|r| r == FAQ_5267));
+        assert!(finding.description.contains("model only"));
+    }
+
+    #[test]
+    fn a_bulb_below_the_fix_is_still_high() {
+        let info = parse_sysinfo(
+            r#"{"system":{"get_sysinfo":{"model":"KL125(US)","hw_ver":"4.0",
+               "sw_ver":"1.0.7 Build 220715 Rel.111111","mic_type":"IOT.SMARTBULB"}}}"#,
+        )
+        .unwrap();
+        let finding = device_finding(ip(), KASA_PORT, &info);
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.cve_ids.len(), 2);
+    }
+
+    #[test]
+    fn fixed_or_unknown_devices_get_the_generic_finding() {
+        let fixed = sysinfo_for("HS103(US)", "5.0", "1.1.3 Build 250908 Rel.112508");
+        let unknown = parse_sysinfo(HS110_SYSINFO).unwrap();
+        for info in [fixed, unknown] {
+            let finding = device_finding(ip(), KASA_PORT, &info);
+            let generic = control_finding(ip(), KASA_PORT, &info);
+            assert_eq!(finding.title, generic.title);
+            assert_eq!(finding.description, generic.description);
+            assert_eq!(finding.severity, generic.severity);
+            assert!(finding.cve_ids.is_empty());
+            assert_eq!(finding.cwe_id.as_deref(), Some("CWE-306"));
+        }
+    }
+
+    #[test]
+    fn cve_finding_titles_are_stable_across_devices() {
+        let a = device_finding(
+            ip(),
+            KASA_PORT,
+            &sysinfo_for("HS200", "5.0", "1.0.1 Build 200101"),
+        );
+        let b = device_finding(
+            ip(),
+            KASA_PORT,
+            &sysinfo_for("KS225", "1.0", "1.0.1 Build 200101"),
+        );
+        assert_eq!(a.title, b.title);
+    }
+
+    #[test]
+    fn remediation_is_update_verify_segment() {
+        let remediation = segmentation_remediation(false, None);
+        assert!(remediation.steps[0].starts_with("Update the firmware"));
+        assert!(remediation.steps[1].starts_with("Re-scan"));
+        assert!(remediation.steps[2].contains("only from the controller"));
+        assert!(remediation.steps.iter().any(|s| s.contains("FAQ 4416")));
+        let all = format!(
+            "{} {}",
+            remediation.description,
+            remediation.steps.join(" ")
+        );
+        assert!(!all.contains("does not add one"));
+        assert_eq!(remediation.steps.len(), 6);
+        assert_eq!(segmentation_remediation(true, None).steps.len(), 7);
+    }
+
+    #[test]
+    fn generic_finding_links_python_kasa_and_faq_4416() {
+        let finding = control_finding(ip(), KASA_PORT, &parse_sysinfo(HS110_SYSINFO).unwrap());
+        assert!(
+            finding
+                .references
+                .iter()
+                .any(|r| r == PYTHON_KASA_SUPPORTED)
+        );
+        assert!(finding.references.iter().any(|r| r == FAQ_4416));
+    }
+
+    #[test]
+    fn cve_summary_of_an_unlisted_id_is_empty() {
+        assert_eq!(cve_summary("CVE-2000-0001"), "");
+    }
+
     // ── Proptests ───────────────────────────────────────────────────
 
     proptest! {
+        /// Firmware parsing and classification never panic.
+        #[test]
+        fn prop_firmware_classification_no_panic(
+            model in ".{0,24}",
+            hw in ".{0,8}",
+            sw in ".{0,40}",
+        ) {
+            let _ = parse_sw_ver(&sw);
+            let _ = classify_firmware(Some(&model), Some(&hw), Some(&sw));
+        }
+
+        /// A parsed version round-trips through its canonical text.
+        #[test]
+        fn prop_sw_ver_roundtrips(a in 0u32..100, b in 0u32..100, c in 0u32..100, d in 0u32..999_999) {
+            prop_assert_eq!(parse_sw_ver(&format!("{a}.{b}.{c} Build {d} Rel.1")), Some((a, b, c, d)));
+        }
+
+        /// Vulnerability is downward-closed in the installed version.
+        #[test]
+        fn prop_older_firmware_is_never_less_vulnerable(
+            row in 0..FIXED_FIRMWARE.len(),
+            lo in (0u32..3, 0u32..5, 0u32..15, 200_000u32..270_000),
+            hi in (0u32..3, 0u32..5, 0u32..15, 200_000u32..270_000),
+        ) {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let row = FIXED_FIRMWARE[row];
+            let hw = row.hw_ver.unwrap_or("1.0");
+            let sw = |v: FwVersion| format!("{}.{}.{} Build {}", v.0, v.1, v.2, v.3);
+            let vulnerable = |v| matches!(
+                classify_firmware(Some(row.model), Some(hw), Some(&sw(v))),
+                FirmwareVerdict::Vulnerable { .. }
+            );
+            if vulnerable(hi) {
+                prop_assert!(vulnerable(lo));
+            }
+        }
+
         /// The JSON reader never panics on arbitrary text.
         #[test]
         fn prop_parse_json_no_panic(text in ".{0,512}") {
