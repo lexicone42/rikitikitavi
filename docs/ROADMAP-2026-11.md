@@ -6,6 +6,12 @@ Constraints are unchanged. Probes run unprivileged and read-only from a LAN host
 
 Owner-LAN evidence comes from `scan-20260912-224815.json` (43 devices, 219 findings) and the 2026-11 `smoke.json` (27 devices, 71 findings). `v040.json` was not present. The Kasa findings come from the 0.4.0 scanner on the owner's six plugs, as described in the task.
 
+## Status (2026-11-14)
+
+Shipped: Top 12 items 1-12 (Plex2Shell, Kasa firmware table, reverse DNS, remediation gate, product-aware remediation, identity ports, Synology advisories and rsync correlation, Hue swversion, Spotify Connect, HA hostname matchers and house table, `verify`), plus NT-06 (PHP2Shell), RE-02 (HA tables), FIX-02 (`fix-plan`) and the FIX-08 accepted-risk ledger.
+
+Open: NT-08/RE-04 (tvOS currency), NT-09 (UniFi SAB-069), ID-08 (NBSTAT), ID-11 (MA-M/MA-S), ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-14, RE-06 (OSV). Also open: `dedup_rank` keeps one scanner's findings per (ip, port), which can hide a second scanner's distinct finding on the same port.
+
 ## Executive summary
 
 1. **Dependencies:** reqwest is stuck at 0.13.1. The workspace asks for the `webpki-roots` feature, which 0.13.2+ removed, so `cargo update` cannot reach 0.13.5 and its redirect header-stripping fix. Nothing flags this.
