@@ -5,14 +5,24 @@ use std::path::Path;
 /// Export scan results as a JSON file.
 pub fn export_json(results: &ScanResults, path: &Path) -> Result<()> {
     tracing::info!(?path, "exporting JSON report");
-    let json = serde_json::to_string_pretty(results)?;
+    let json = to_json_string(results)?;
     rikitikitavi_core::fs::write_private(path, json.as_bytes())?;
     Ok(())
 }
 
-/// Serialize scan results to a JSON string.
+/// Serialize scan results to a JSON string. Each finding carries its `fingerprint` (hex),
+/// the token `--suppress` and `--accept-file` take.
 pub fn to_json_string(results: &ScanResults) -> Result<String> {
-    Ok(serde_json::to_string_pretty(results)?)
+    let mut value = serde_json::to_value(results)?;
+    let fingerprints = results.findings.iter().map(|f| f.fingerprint().to_string());
+    if let Some(items) = value.get_mut("findings").and_then(|v| v.as_array_mut()) {
+        for (item, fp) in items.iter_mut().zip(fingerprints) {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("fingerprint".to_owned(), fp.into());
+            }
+        }
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 #[cfg(test)]
@@ -90,6 +100,19 @@ mod tests {
             serde_json::from_str(r#"{"findings":[],"devices":[],"attack_paths":[],"risk_score":0.0,"scan_duration_secs":0}"#)
                 .unwrap();
         assert!(legacy.report_cards.is_empty());
+    }
+
+    #[test]
+    fn findings_carry_their_fingerprint() {
+        let f = Finding::new("ports", "Telnet open", "d", Severity::High)
+            .with_ip("10.0.0.5".parse().unwrap())
+            .with_port(23);
+        let fp = f.fingerprint().to_string();
+        let json = to_json_string(&make_results(vec![f])).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["findings"][0]["fingerprint"], fp);
+        let back: ScanResults = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.findings[0].fingerprint().to_string(), fp);
     }
 
     #[test]

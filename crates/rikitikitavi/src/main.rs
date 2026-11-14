@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod accept;
 mod cli;
 mod config;
 mod runner;
@@ -145,6 +146,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         .as_deref()
         .map(|p| load_list(p, "known-devices", None, parse_device_identifier))
         .transpose()?;
+    let ledger = args.accept_file.as_deref().map(accept::load).transpose()?;
     // Rules are parsed and validated up front so a bad file fails before the scan.
     let rules = args
         .rules
@@ -328,9 +330,19 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
             Err(e) => eprintln!("Warning: could not write baseline {}: {e}", path.display()),
         }
     }
+    if let Some(ledger) = ledger.as_ref() {
+        let accepted = apply_ledger(ledger, &mut results);
+        if accepted > 0 {
+            regrade(&mut results, known_devices.as_ref());
+        }
+        if !args.quiet {
+            println!("Accepted {accepted} finding(s) listed in the accept file");
+        }
+    }
     if let (Some(set), Some(path)) = (suppressions.as_ref(), args.suppress.as_ref()) {
         let before = results.findings.len();
         results.findings.retain(|f| !set.contains(&f.fingerprint()));
+        results.accepted.retain(|a| !set.contains(&a.fingerprint));
         let suppressed = before - results.findings.len();
         if suppressed > 0 {
             regrade(&mut results, known_devices.as_ref());
@@ -355,7 +367,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     }
 
     if let Some(prev) = previous {
-        let diff = rikitikitavi_analysis::diff_scan_results(&prev, &results);
+        let diff = rikitikitavi_analysis::diff_scan_results(&prev, &with_accepted(&results));
         tolerate_broken_pipe(print_comparison_report(&diff))?;
     }
 
@@ -386,6 +398,7 @@ async fn cmd_verify(args: cli::VerifyArgs, loaded: &config::LoadedConfig) -> Res
 
     let app_config = &loaded.config;
     config::validate_scan_config(&app_config.scan)?;
+    let ledger = args.accept_file.as_deref().map(accept::load).transpose()?;
 
     let (intensity, capped) =
         effective_intensity(false, args.aggressive, app_config.scan.intensity);
@@ -401,16 +414,33 @@ async fn cmd_verify(args: cli::VerifyArgs, loaded: &config::LoadedConfig) -> Res
 
     let history = rikitikitavi_analysis::ScanHistory::new()
         .context("could not determine the scan history directory")?;
-    let baseline = history
+    let mut baseline = history
         .load_latest()?
         .context("no saved full scan; run `rikitikitavi scan` first")?;
+    if let Some(ledger) = ledger.as_ref() {
+        apply_ledger(ledger, &mut baseline);
+    }
 
+    let requested = !args.finding.is_empty();
+    let (skipped, tokens): (Vec<String>, Vec<String>) = args.finding.into_iter().partition(|t| {
+        baseline
+            .accepted
+            .iter()
+            .any(|a| a.fingerprint.to_string() == *t || a.finding.id.to_string() == *t)
+    });
+    for t in &skipped {
+        eprintln!("Note: finding {t} is accepted in the accept file; not re-checked.");
+    }
     let selection = verify::Selection {
         min_severity: args.severity.map(Into::into),
         ips: args.ip,
-        findings: args.finding,
+        findings: tokens,
     };
-    let selected = verify::select(&baseline.findings, &selection)?;
+    let selected = if requested && selection.findings.is_empty() {
+        Vec::new()
+    } else {
+        verify::select(&baseline.findings, &selection)?
+    };
 
     let registry = rikitikitavi_scanners::ScannerRegistry::new();
     let lookup = |id: &str| registry.get(id);
@@ -582,7 +612,10 @@ fn format_warning(
     })
 }
 
-/// Read a `--suppress` / `--known-devices` file. Unreadable, or invalid lines with no
+/// Byte cap on a `--suppress` / `--known-devices` file.
+const MAX_LIST_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read a `--suppress` / `--known-devices` file. Unreadable, oversize, or invalid lines with no
 /// valid entry, is an error; other invalid lines and a format mismatch are warned on stderr.
 fn load_list<T: Eq + std::hash::Hash>(
     path: &std::path::Path,
@@ -590,9 +623,7 @@ fn load_list<T: Eq + std::hash::Hash>(
     expected_format: Option<&str>,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<std::collections::HashSet<T>> {
-    use anyhow::Context as _;
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read {what} file {}", path.display()))?;
+    let contents = accept::read_capped(path, MAX_LIST_FILE_BYTES, what)?;
     let parsed = parse_list_file(&contents, parse);
     if let Some(warning) = format_warning(what, path, parsed.format.as_deref(), expected_format) {
         eprintln!("{warning}");
@@ -662,8 +693,8 @@ fn mark_device_status(
     }
 }
 
-/// Recompute risk score and report cards after `results.findings` changed;
-/// known/new status is re-applied.
+/// Recompute risk score, report cards, priority actions and (when present) attack paths
+/// after `results.findings` changed; known/new status is re-applied.
 fn regrade(
     results: &mut rikitikitavi_models::ScanResults,
     known: Option<&std::collections::HashSet<String>>,
@@ -671,9 +702,30 @@ fn regrade(
     results.risk_score = rikitikitavi_analysis::calculate_risk_score(&results.findings);
     results.report_cards =
         rikitikitavi_analysis::grade_devices(&results.devices, &results.findings);
+    results.priority_actions = rikitikitavi_analysis::generate_priority_actions(&results.findings);
+    if !results.attack_paths.is_empty() {
+        results.attack_paths = rikitikitavi_analysis::generate_attack_paths(&results.findings);
+    }
     if let Some(known) = known {
         mark_device_status(results, known);
     }
+}
+
+/// Apply `ledger` dated today (local time), printing its warnings. Returns the number accepted.
+fn apply_ledger(ledger: &accept::Ledger, results: &mut rikitikitavi_models::ScanResults) -> usize {
+    let before = results.accepted.len();
+    for warning in accept::apply(ledger, results, chrono::Local::now().date_naive()) {
+        eprintln!("{warning}");
+    }
+    results.accepted.len() - before
+}
+
+/// `results` with accepted findings back in `findings`, for diffing against raw history.
+fn with_accepted(results: &rikitikitavi_models::ScanResults) -> rikitikitavi_models::ScanResults {
+    let mut all = results.clone();
+    all.findings
+        .extend(results.accepted.iter().map(|a| a.finding.clone()));
+    all
 }
 
 /// Grade the devices of a scan loaded from history that predates report cards.
@@ -1005,6 +1057,24 @@ fn print_cli_report(results: &rikitikitavi_models::ScanResults) -> std::io::Resu
         out!("  Informational ({}):", informational.len());
         for f in &informational {
             out!("    [{:8}] {}", f.severity, f.title);
+        }
+        out!();
+    }
+
+    if !results.accepted.is_empty() {
+        out!("  Accepted risk ({}, not scored):", results.accepted.len());
+        for a in &results.accepted {
+            out!(
+                "    [{:8}] {}  [{}]",
+                a.finding.severity,
+                a.finding.title,
+                a.fingerprint
+            );
+            out!(
+                "              Accepted: {} (expires {})",
+                a.reason,
+                a.expires
+            );
         }
         out!();
     }
@@ -2005,6 +2075,56 @@ mod tests {
         let set = load_list(&mixed, "suppression", None, parse_fingerprint).unwrap();
         std::fs::remove_file(&mixed).ok();
         assert_eq!(set.len(), 1);
+
+        let big = temp_path("big-baseline");
+        let cap = usize::try_from(crate::MAX_LIST_FILE_BYTES).unwrap();
+        std::fs::write(&big, "01a2b3c4d5e6f708\n".repeat(cap / 17 + 1)).unwrap();
+        let msg = load_list(&big, "suppression", None, parse_fingerprint)
+            .unwrap_err()
+            .to_string();
+        std::fs::remove_file(&big).ok();
+        assert!(msg.contains("exceeds"), "{msg}");
+    }
+
+    #[test]
+    fn accepted_findings_leave_score_cards_and_actions_but_stay_in_diff_view() {
+        use rikitikitavi_core::Severity;
+        use rikitikitavi_models::{Device, Finding, Remediation, ScanResults};
+        let host: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let fix = Remediation {
+            description: "Disable telnet".to_owned(),
+            steps: vec!["Turn it off".to_owned()],
+            effort: None,
+        };
+        let telnet = Finding::new("ports", "Telnet open", "d", Severity::Critical)
+            .with_ip(host)
+            .with_port(23)
+            .with_remediation(fix);
+        let info = Finding::new("ports", "SSH open", "d", Severity::Info)
+            .with_ip(host)
+            .with_port(22);
+        let mut results = ScanResults {
+            findings: vec![telnet.clone(), info],
+            devices: vec![Device::new(host)],
+            ..Default::default()
+        };
+        crate::regrade(&mut results, None);
+        let before = results.risk_score;
+        assert!(!results.priority_actions.is_empty());
+
+        let ledger = crate::accept::parse(&format!(
+            "accepted:\n  - fingerprint: \"{}\"\n    reason: lab box\n    \
+             accepted_on: 2026-01-01\n    expires: 2999-01-01\n",
+            telnet.fingerprint()
+        ))
+        .unwrap();
+        assert_eq!(crate::apply_ledger(&ledger, &mut results), 1);
+        crate::regrade(&mut results, None);
+        assert!(results.risk_score < before);
+        assert!(results.priority_actions.is_empty());
+        assert_eq!(results.report_cards[0].critical, 0);
+        assert_eq!(results.accepted[0].finding.title, "Telnet open");
+        assert_eq!(crate::with_accepted(&results).findings.len(), 2);
     }
 
     #[cfg(unix)]

@@ -23,6 +23,9 @@ const MAX_PATTERN_BYTES: usize = 200;
 /// Cap on rules per file.
 const MAX_RULES: usize = 1000;
 
+/// Byte cap on a rule file.
+pub const MAX_RULES_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Cap on predicates per rule (across `all` and `any`).
 const MAX_PREDICATES: usize = 64;
 
@@ -171,10 +174,24 @@ enum RuleFile {
 }
 
 /// Parse and validate a rule file. Fails on malformed YAML, an over-long
-/// pattern, an unknown device type, an empty match, or the size caps.
+/// pattern, an unknown device type, an empty match, or the size caps (incl. file bytes).
 pub fn load_rules(path: &Path) -> anyhow::Result<Vec<Rule>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read rules file {}: {e}", path.display()))?;
+    use std::io::Read as _;
+    let cannot =
+        |e: std::io::Error| anyhow::anyhow!("cannot read rules file {}: {e}", path.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(cannot)?
+        .take(MAX_RULES_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(cannot)?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= MAX_RULES_FILE_BYTES,
+        "rules file {} exceeds {MAX_RULES_FILE_BYTES} bytes",
+        path.display()
+    );
+    let text = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("rules file {} is not UTF-8", path.display()))?;
     parse_rules(&text)
 }
 

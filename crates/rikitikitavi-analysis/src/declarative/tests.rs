@@ -501,3 +501,19 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn load_rules_rejects_oversize_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.yaml");
+    let cap = usize::try_from(MAX_RULES_FILE_BYTES).unwrap();
+    std::fs::write(&path, format!("# {}\nrules: []\n", "x".repeat(cap))).unwrap();
+    assert!(
+        load_rules(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds")
+    );
+    std::fs::write(&path, "rules: []\n").unwrap();
+    assert!(load_rules(&path).unwrap().is_empty());
+}

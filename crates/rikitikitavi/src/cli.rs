@@ -122,6 +122,12 @@ pub struct ScanArgs {
     #[arg(long)]
     pub suppress: Option<PathBuf>,
 
+    /// Accepted-risk ledger (YAML). Listed findings stay in the report, marked accepted,
+    /// and are left out of the risk score, grades, priority actions and `--fail-on`.
+    /// Entries past `expires` are ignored. Invalid or oversize files are an error.
+    #[arg(long)]
+    pub accept_file: Option<PathBuf>,
+
     /// Write all current findings' fingerprints to this file for use with `--suppress`.
     #[arg(long)]
     pub write_baseline: Option<PathBuf>,
@@ -195,6 +201,10 @@ pub struct VerifyArgs {
     /// Allow replaying login checks (`credentials` findings).
     #[arg(long)]
     pub aggressive: bool,
+
+    /// Accepted-risk ledger (YAML, as for `scan --accept-file`); listed findings are not re-checked.
+    #[arg(long)]
+    pub accept_file: Option<PathBuf>,
 
     /// Output format.
     #[arg(long, default_value = "text")]
@@ -544,6 +554,22 @@ mod tests {
         };
         assert_eq!(args.fail_on, FailOnArg::Never);
         assert!(matches!(args.network, NetworkArg::Auto));
+        assert!(args.accept_file.is_none());
+    }
+
+    #[test]
+    fn accept_file_parses_on_scan_and_verify() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "scan", "--accept-file", "a.yaml"]).unwrap();
+        let Command::Scan(args) = cli.command else {
+            panic!("expected scan command");
+        };
+        assert_eq!(args.accept_file.unwrap(), PathBuf::from("a.yaml"));
+        let cli =
+            Cli::try_parse_from(["rikitikitavi", "verify", "--accept-file", "a.yaml"]).unwrap();
+        let Command::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.accept_file.unwrap(), PathBuf::from("a.yaml"));
     }
     #[test]
     fn verify_parses_filters() {
@@ -568,6 +594,7 @@ mod tests {
         assert_eq!(args.finding, ["00000000000000ab"]);
         assert_eq!(args.format, VerifyFormatArg::Json);
         assert!(!args.aggressive);
+        assert!(args.accept_file.is_none());
         assert!(Cli::try_parse_from(["rikitikitavi", "verify", "--ip", "nope"]).is_err());
     }
 
