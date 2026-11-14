@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tracing: `scan`, `discovery` and per-scanner spans (findings, outcome, time
+  budget); spans log busy/idle time on close. `--log-format text|json`.
+- Optional OTLP/HTTP trace export behind the `otel` cargo feature, active only
+  when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; independent of the log level.
 - Dependencies refreshed; six `quinn-proto`/`quinn-udp` advisories cleared.
 - YAML parsing moved from `serde_yaml_ng` (on the archived `unsafe-libyaml`) to
   the pure-Rust `serde-saphyr`, for config, rule files and remediation templates.

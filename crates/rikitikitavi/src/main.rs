@@ -1,10 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod config;
 mod runner;
+mod telemetry;
 
 use cli::{Cli, Command};
 
@@ -12,16 +12,12 @@ use cli::{Cli, Command};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
-        )
-        .init();
+    telemetry::init(&cli.log_level, cli.log_format);
 
     let loaded = config::load_config(cli.config.as_deref())?;
     let app_config = &loaded.config;
 
-    match cli.command {
+    let result = match cli.command {
         Command::Scan(args) => cmd_scan(args, &loaded).await,
         #[cfg(feature = "tui")]
         Command::Tui(args) => cmd_tui(args, app_config).await,
@@ -48,7 +44,9 @@ async fn main() -> Result<()> {
             cmd_version(verbose);
             Ok(())
         }
-    }
+    };
+    telemetry::shutdown();
+    result
 }
 
 /// `scan` flags that were set but are not yet wired into the scan.
@@ -372,6 +370,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
             if !args.quiet {
                 eprintln!("Failing: {breach} finding(s) at or above {threshold:?} (--fail-on).");
             }
+            telemetry::shutdown();
             std::process::exit(2);
         }
     }

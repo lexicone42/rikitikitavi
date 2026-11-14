@@ -498,6 +498,30 @@ exchange, so confidence is capped at `probable`. Loading fails with a clear
 error on malformed YAML, an unknown field or device type, an empty match, or an
 over-long pattern. See [`examples/rules/`](examples/rules/).
 
+### Logging and Tracing
+
+A scan is traced as spans: `scan` (root), `discovery`, and one `scanner` span per
+scanner carrying `id`, `findings`, `outcome` (`ok`, `partial`, `error`, `timeout`)
+and `budget_secs`. Each span logs its busy and idle time when it closes:
+
+```bash
+rikitikitavi -l info scan                 # per-scanner timings on stderr
+rikitikitavi -l info --log-format json scan 2> scan.log.jsonl
+```
+
+To export traces to an OpenTelemetry collector, build with the `otel` feature
+(off by default, so the default binary has no export path) and set the standard
+endpoint variable. Export is independent of `--log-level` and covers only this
+project's spans:
+
+```bash
+cargo install --git <repo> --features otel
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 rikitikitavi scan
+```
+
+Traces go over OTLP/HTTP to `<endpoint>/v1/traces` with `service.name=rikitikitavi`.
+Without the variable set, nothing is exported even in an `otel` build.
+
 ### Host Discovery
 
 In the default (Active) mode, rikitikitavi runs a bounded, unprivileged

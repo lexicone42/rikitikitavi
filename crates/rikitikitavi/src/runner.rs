@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
+use tracing::Instrument as _;
 
 /// Scanners that run first and populate `discovered_devices`.
 pub const PHASE1_IDS: [&str; 3] = ["network", "ports", "device"];
@@ -160,6 +161,7 @@ pub fn apply_exclusions(devices: &mut Vec<Device>, exclusions: &ExclusionSet) ->
 
 /// ARP-cache discovery followed by the active TCP sweep; fills `ctx.discovered_devices`
 /// with exclusions applied. Returns the number of hosts added by the sweep.
+#[tracing::instrument(name = "discovery", skip_all, fields(devices, swept))]
 pub async fn discover_hosts(ctx: &mut ScanContext) -> Result<usize> {
     let exclusions = ctx.config.exclusions()?;
     ctx.discovered_devices = discover_network(ctx);
@@ -173,6 +175,9 @@ pub async fn discover_hosts(ctx: &mut ScanContext) -> Result<usize> {
         tracing::info!(filled, "MACs filled from ARP cache after sweep");
         apply_exclusions(&mut ctx.discovered_devices, &exclusions);
     }
+    let span = tracing::Span::current();
+    span.record("devices", ctx.discovered_devices.len());
+    span.record("swept", added);
     Ok(added)
 }
 
@@ -446,8 +451,27 @@ async fn run_scanner_within(
     ctx: &ScanContext,
     budget: Duration,
 ) -> Result<Vec<Finding>, rikitikitavi_core::ScanError> {
+    let span = tracing::info_span!(
+        "scanner",
+        id = scanner.id(),
+        budget_secs = budget.as_secs(),
+        findings = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
     let mut collected: Vec<Finding> = Vec::new();
-    let outcome = tokio::time::timeout(budget, scanner.scan_collecting(ctx, &mut collected)).await;
+    let outcome = tokio::time::timeout(budget, scanner.scan_collecting(ctx, &mut collected))
+        .instrument(span.clone())
+        .await;
+    span.record("findings", collected.len());
+    span.record(
+        "outcome",
+        match &outcome {
+            Ok(Ok(())) => "ok",
+            Ok(Err(_)) if collected.is_empty() => "error",
+            Ok(Err(_)) => "partial",
+            Err(_) => "timeout",
+        },
+    );
     match outcome {
         Ok(Ok(())) => Ok(collected),
         Ok(Err(e)) => {
@@ -481,7 +505,23 @@ async fn run_scanner_within(
 pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
     let secs = ctx.config.timeout_seconds;
     let limit = (secs > 0).then(|| Duration::from_secs(secs));
-    bounded(limit, run_scan_inner(ctx)).await
+    let span = tracing::info_span!(
+        "scan",
+        perspective = %ctx.perspective,
+        intensity = ?ctx.config.intensity,
+        devices = tracing::field::Empty,
+        findings = tracing::field::Empty,
+        risk_score = tracing::field::Empty,
+    );
+    let result = bounded(limit, run_scan_inner(ctx))
+        .instrument(span.clone())
+        .await;
+    if let Ok(results) = &result {
+        span.record("devices", results.devices.len());
+        span.record("findings", results.findings.len());
+        span.record("risk_score", results.risk_score);
+    }
+    result
 }
 
 #[allow(clippy::too_many_lines)]

@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(short, long, global = true, default_value = "warn")]
     pub log_level: String,
 
+    /// Log output format. Spans report their duration when they close.
+    #[arg(long, global = true, default_value = "text")]
+    pub log_format: LogFormat,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -429,6 +433,12 @@ pub enum ThemeArg {
     Accessible,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +481,13 @@ mod tests {
         };
         assert_eq!(args.fail_on, FailOnArg::Never);
         assert!(matches!(args.network, NetworkArg::Auto));
+    }
+    #[test]
+    fn log_format_defaults_to_text_and_accepts_json() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "version"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Text);
+        let cli = Cli::try_parse_from(["rikitikitavi", "scan", "--log-format", "json"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Json);
+        assert!(Cli::try_parse_from(["rikitikitavi", "--log-format", "xml", "version"]).is_err());
     }
 }
