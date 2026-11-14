@@ -124,8 +124,9 @@ pub async fn active_host_discovery(
         exclusions,
         excluded_mac_ips,
     );
+    // 128 hosts x 6 probe ports stays under a 1024 descriptor limit.
     let found =
-        rikitikitavi_network::sweep::tcp_sweep_hosts(targets, Duration::from_millis(400), 256)
+        rikitikitavi_network::sweep::tcp_sweep_hosts(targets, Duration::from_millis(400), 128)
             .await;
 
     let mut added = 0;

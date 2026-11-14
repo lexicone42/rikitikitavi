@@ -935,6 +935,21 @@ fn geolocation_finding(ip: IpAddr, port: u16, lat: f64, lon: f64) -> Finding {
     .with_cwe("CWE-200")
     .with_evidence(format!("latitude={lat:.4} longitude={lon:.4}"))
     .with_references(refs!["https://github.com/softScheck/tplink-smartplug"])
+    .with_remediation(geolocation_remediation())
+}
+
+fn geolocation_remediation() -> Remediation {
+    Remediation {
+        description: "Remove the stored location, then keep the device off networks \
+                      that untrusted clients can reach."
+            .to_owned(),
+        steps: vec![
+            "In the Kasa app open the device's settings and clear its location.".to_owned(),
+            "Re-scan and confirm the coordinates are gone from the finding.".to_owned(),
+            "Segment the device as described in its local-control finding.".to_owned(),
+        ],
+        effort: Some("5 minutes".to_owned()),
+    }
 }
 
 // ── Scanner ─────────────────────────────────────────────────────────────────

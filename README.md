@@ -58,7 +58,7 @@ sudo rikitikitavi monitor --interface wlan0
 
 ## Features
 
-### 37 Security Scanners
+### 39 Security Scanners
 
 Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
@@ -118,13 +118,15 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **RTSP / ONVIF** | IP-camera streams reachable without authentication |
 | **UPnP-IGD** | Router WAN→LAN port forwards ("what's exposed to the internet?") |
 | **KNXnet/IP** | Building-automation gateways on UDP 3671 (`SEARCH_REQUEST` only), unsecured service families |
-| **Media Servers** | Plex `/identity` version correlation (CVE-2020-5741 KEV, CVE-2025-34158), Jellyfin `/System/Info/Public` and UDP 7359 discovery, open first-run wizard |
+| **Media Servers** | Plex `/identity` version correlation (Plex2Shell KEV chain below 1.43.3.10861, CVE-2020-5741, CVE-2025-34158), Jellyfin `/System/Info/Public` and UDP 7359 discovery, open first-run wizard |
 | **3D Printers** | Moonraker/Klipper authorization posture (7125/7130) and `OctoPrint` (5000), identification paths only |
+| **Hue Bridge** | Unauthenticated `/api/config` firmware read; BSB002 below 1975170000 (CVE-2026-3557, CVE-2026-3562) |
+| **Spotify Connect** | ZeroConf `getInfo` device identification (type, brand, model); identification only |
 | **DD-WRT UPnP** | Unauthenticated `MiniUPnPd`/DD-WRT control endpoints reachable on the LAN |
 | **Client-Side LAN Exposure** | Devices attacked as *clients* of a hostile LAN service (no listening port to scan) |
 | **Passive WiFi** | 802.11 frame analysis, rogue AP detection, deauth attacks *(`rikitikitavi monitor`, feature `monitor`)* |
 
-The 37 registered scanners are every row above except two: Passive WiFi, which is
+The 39 registered scanners are every row above except two: Passive WiFi, which is
 not in `ScannerRegistry` and runs only through the `monitor` command, and
 Matter / Thread, which is a capability of the mDNS/SSDP scanner rather than a
 scanner of its own.
@@ -233,6 +235,37 @@ shows up as one resolved plus one new. Devices are keyed on MAC (IP only when
 the MAC is unknown), so they survive address changes. Severity changes are
 tracked separately from new/resolved findings.
 
+### Fixing and Verifying
+
+Every finding at Low or above carries a remediation; a test fails the build if
+one is added without. Fixes are product-aware where a vendor source exists
+(Kasa fixed-firmware builds per model and hardware version, Denon/Marantz
+network control, Dyson's built-in broker, Hue and UniFi update paths).
+
+```bash
+# Markdown checklist from the last scan: Do now / This weekend / Replace / Accepted
+rikitikitavi fix-plan -o fix-plan.md
+
+# After fixing, re-check only the affected hosts
+rikitikitavi verify                       # Low and above
+rikitikitavi verify --finding 8a49cb832045970f
+
+# Record a risk you have decided to live with
+rikitikitavi scan --accept-file accepted.yaml
+```
+
+`verify` replays the scanners behind each prior finding against that host
+alone and reports `resolved`, `still present` or `inconclusive`. An offline
+host, a scanner error, or a finding that cannot be replayed directly (mDNS,
+UPnP, ARP) is inconclusive, never resolved. Exit codes: 0 all resolved,
+3 some still present, 4 only inconclusive left.
+
+An accept-file entry is `{fingerprint, reason, accepted_on, expires,
+compensating}`. Accepted findings stay in the report with their reason but
+leave the risk score, grades and `--fail-on`. Past `expires` the entry is
+ignored with a warning and the finding is active again. Fingerprints are
+printed by `verify`, `fix-plan` and JSON output.
+
 ### UniFi Integration
 
 Deep security auditing for Ubiquiti UniFi networks:
@@ -319,6 +352,8 @@ rikitikitavi <COMMAND>
 Commands:
   scan        Run network security scan
   tui         Launch interactive terminal UI
+  verify      Re-check findings from the last full scan on the affected hosts only
+  fix-plan    Markdown fix checklist from the last full scan
   report      Print the last saved scan (--latest); other modes not yet implemented
   unifi       UniFi controller commands
   aws         AWS Security Lake commands (not yet implemented; every subcommand exits non-zero)
@@ -524,6 +559,10 @@ Without the variable set, nothing is exported even in an `otel` build.
 
 ### Host Discovery
 
+Devices are named by a reverse-DNS (PTR) pass against the gateway and any
+RFC 1918 resolvers, never a public one, and typed from the name by a small
+hostname table and the Home Assistant DHCP matchers.
+
 In the default (Active) mode, rikitikitavi runs a bounded, unprivileged
 TCP-connect sweep across the detected subnet, so a cold ARP cache on a freshly
 booted machine no longer yields an empty "looks clean" report. `--quick`
@@ -567,7 +606,7 @@ host/port/service, CWE reference, and remediation steps with estimated effort:
           │                    │                     │
    ┌──────┴──────┐   ┌────────┴────────┐   ┌───────┴───────┐
    │   scanners  │   │    analysis     │   │    export     │
-   │ 37 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
+   │ 39 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
    │ + registry  │   │ attack paths    │   │ HTML, OCSF    │
    └──────┬──────┘   └────────┬────────┘   └───────────────┘
           │                    │

@@ -90,6 +90,7 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
                  attacker's iframe.",
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.security-headers", &[]))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -109,6 +110,7 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
                  CSP helps prevent XSS and data injection attacks.",
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.security-headers", &[]))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -129,6 +131,10 @@ pub fn classify_missing_headers(ip: IpAddr, port: u16, headers: &HeaderSet) -> V
                  to security issues.",
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.http_audit.security-headers",
+                &[],
+            ))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -225,6 +231,10 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
             ),
             Severity::Low,
         )
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.http_audit.product-exposed",
+            &[],
+        ))
         .with_ip(ip)
         .with_port(port)
         .with_service("HTTP")
@@ -396,6 +406,10 @@ pub fn classify_server_header(ip: IpAddr, port: u16, server: &str) -> Option<Fin
                     ),
                     Severity::High,
                 )
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.services.outdated-web-server",
+                    &[],
+                ))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -446,6 +460,10 @@ pub fn check_powered_by_eol(ip: IpAddr, port: u16, powered_by: &str) -> Vec<Find
                     &format!("The X-Powered-By header advertises {token}. {summary}"),
                     crate::services::eol_severity(powered_by),
                 )
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.services.outdated-web-server",
+                    &[],
+                ))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -638,6 +656,7 @@ pub fn classify_http_methods(ip: IpAddr, port: u16, allow_header: &str) -> Vec<F
                 ),
                 Severity::Medium,
             )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.dangerous-methods", &[]))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -685,6 +704,10 @@ pub fn detect_framework(
                 ),
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.credentials.banner-disclosure",
+                &[],
+            ))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -1136,6 +1159,7 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                      inline <script> tags and event handlers are allowed.",
                     Severity::Medium,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.csp-weak", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1156,6 +1180,7 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                      which is a common XSS attack vector.",
                     Severity::Medium,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.csp-weak", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1176,6 +1201,7 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                      to execute arbitrary code, bypassing the CSP.",
                     Severity::Medium,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.csp-weak", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1206,6 +1232,10 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                 ),
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.http_audit.csp-weak",
+                &[],
+            ))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -1229,6 +1259,7 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                      plugin content (Flash, Java) may be injectable.",
                     Severity::Low,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.csp-weak", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1267,6 +1298,10 @@ pub fn analyze_csp(ip: IpAddr, port: u16, header: &str, has_x_frame_options: boo
                  clickjacking attacks.",
                 Severity::Low,
             )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.http_audit.csp-weak",
+                &[],
+            ))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -1305,6 +1340,7 @@ pub fn analyze_cors(
                      CORS misconfiguration that may work in older clients.",
                     Severity::High,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.cors-permissive", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1324,6 +1360,7 @@ pub fn analyze_cors(
                      you browse the internet.",
                     Severity::Medium,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.cors-permissive", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1343,6 +1380,7 @@ pub fn analyze_cors(
                  this effectively an open CORS policy.",
                 Severity::Medium,
             )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.cors-permissive", &[]))
             .with_ip(ip)
             .with_port(port)
             .with_service("HTTP")
@@ -1430,6 +1468,7 @@ pub fn analyze_cookies(
                     ),
                     Severity::Medium,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.cookie-flags", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1455,6 +1494,7 @@ pub fn analyze_cookies(
                     ),
                     Severity::Low,
                 )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.cookie-flags", &[]))
                 .with_ip(ip)
                 .with_port(port)
                 .with_service("HTTP")
@@ -1504,6 +1544,10 @@ pub fn analyze_cookies(
                         ),
                         Severity::Low,
                     )
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.http_audit.cookie-flags",
+                        &[],
+                    ))
                     .with_ip(ip)
                     .with_port(port)
                     .with_service("HTTP")
@@ -1716,6 +1760,10 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16, synology_host: bool) -> Vec<
                          exposing unnecessary services.",
                         Severity::Low,
                     )
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.http_audit.default-page",
+                        &[],
+                    ))
                     .with_ip(ip)
                     .with_port(port)
                     .with_service("HTTP"),

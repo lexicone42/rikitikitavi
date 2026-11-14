@@ -39,6 +39,8 @@ const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Wait for a continuation segment, once the peer has said something.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_millis(300);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Wall-clock cap on the non-root path fetches of one port.
+const HTTP_PATHS_BUDGET: Duration = Duration::from_secs(6);
 /// Detection strings live in the first few KiB; bound what a hostile peer can feed us.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 128 * 1024;
@@ -613,6 +615,7 @@ async fn probe_http_port(client: &reqwest::Client, ip: IpAddr, port: u16) -> Vec
         .collect();
     let fetched = futures::stream::iter(pending)
         .buffer_unordered(MAX_HTTP_PATH_CONCURRENCY)
+        .take_until(tokio::time::sleep(HTTP_PATHS_BUDGET))
         .collect::<Vec<_>>()
         .await;
     hits.extend(fetched.into_iter().flatten());

@@ -7,9 +7,6 @@ use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::path::Path;
 
-/// CWE tagged on end-of-life findings.
-const EOL_CWE: &str = "CWE-1104";
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Bucket {
     DoNow,
@@ -21,9 +18,7 @@ enum Bucket {
 
 fn is_eol(f: &Finding) -> bool {
     let title = f.title.to_ascii_lowercase();
-    f.cwe_id.as_deref() == Some(EOL_CWE)
-        || title.contains("end-of-life")
-        || title.contains("end of life")
+    title.contains("end-of-life") || title.contains("end of life")
 }
 
 fn has_fix(f: &Finding) -> bool {
@@ -321,7 +316,7 @@ mod tests {
         )
         .with_ip(nas)
         .with_port(22)
-        .with_cwe(EOL_CWE);
+        .with_cwe("CWE-1104");
         let nofix = Finding::new("rtsp", "RTSP stream open", "d", Severity::Medium)
             .with_ip(cam)
             .with_port(554);

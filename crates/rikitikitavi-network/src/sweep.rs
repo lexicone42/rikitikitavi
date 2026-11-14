@@ -4,6 +4,7 @@
 //! Callers filter exclusions out of the target list before probing; a MAC exclusion
 //! can only be mapped to an IP for hosts already in the ARP cache.
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,15 +37,23 @@ pub fn sweep_targets(network: &IpNetwork) -> Vec<IpAddr> {
         .collect()
 }
 
-/// Probe a single host: alive if any probe port connects or is refused.
+/// Probe a single host on every probe port at once: alive if any connects or is refused.
 async fn host_alive(ip: IpAddr, timeout: Duration) -> bool {
-    for &port in PROBE_PORTS {
-        let addr = SocketAddr::new(ip, port);
-        match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(_stream)) => return true,
-            // Refused: host reachable, port closed.
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => return true,
-            _ => {}
+    let mut probes: FuturesUnordered<_> = PROBE_PORTS
+        .iter()
+        .map(|&port| async move {
+            let addr = SocketAddr::new(ip, port);
+            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => true,
+                // Refused: host reachable, port closed.
+                Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+                Err(_) => false,
+            }
+        })
+        .collect();
+    while let Some(alive) = probes.next().await {
+        if alive {
+            return true;
         }
     }
     false

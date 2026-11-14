@@ -6,8 +6,43 @@
   sensitive headers are stripped on cross-scheme redirects. Outbound TLS now
   validates against the OS root store. The authenticated UniFi client follows
   no redirects.
-- The services scanner probes hosts concurrently (16 at a time, device order
-  preserved): a full scan of a 58-device LAN drops from about 126 s to 51 s.
+- Scan speed, found with the span timings: a full scan of a 71-device /22 drops
+  from about 126 s to 27 s. The services scanner probes hosts concurrently and
+  reuses the banners phase 1 already read; ssl and nuclei-detect run hosts in
+  parallel; the port scan interleaves hosts with at most 16 probes in flight
+  per host; the discovery sweep probes its liveness ports at once. Default
+  `parallelism` is 256 (was 100).
+- `verify` subcommand: replays the scanners behind prior findings on the
+  affected hosts only and reports resolved / still present / inconclusive
+  (exit 0 / 3 / 4). An offline host is never "resolved".
+- `fix-plan` subcommand: Markdown checklist from the last scan, grouped per
+  device, each item with its fix, references and a `verify` command.
+- `--accept-file`: accepted-risk ledger with reason and expiry. Accepted
+  findings stay visible but leave the score, grades and `--fail-on`.
+- Every finding at Low or above carries a remediation, enforced by a test.
+  Remediation templates match on vendor, product, device type and port:
+  Dyson MQTT, Denon/Marantz network control, Hue and UniFi get vendor-specific
+  steps. 61 templates added.
+- Reverse-DNS device naming through the gateway resolver (RFC 1918 resolvers
+  only), with a hostname table and the Home Assistant DHCP hostname matchers
+  for typing. On the test LAN, named devices rose from 18 to 59 of 71.
+- Plex: one verdict for the Plex2Shell chain below 1.43.3.10861 (four KEV CVEs).
+- Kasa: fixed-firmware table per model and hardware version from TP-Link FAQ
+  5342 and 5267 (CVE-2026-108473, CVE-2026-76784); the fix names the build.
+- New scanners: Hue Bridge firmware (CVE-2026-3557, CVE-2026-3562) and Spotify
+  Connect identification. 37 scanners become 39.
+- Synology: SA-26:13 / SA-26:19 minimum builds on the DSM finding; rsync on a
+  Synology host is flagged for CVE-2026-85101. PHP2Shell floors on
+  `X-Powered-By` (CVE-2026-109618, CVE-2026-109619).
+- Default ports grew from 58 to 66 (3689, 4070, 5001, 7000, 8880, 55442, 55443,
+  62078) so the iOS, NAS, UniFi-controller and new Echo classifier rules fire.
+- An MQTT broker that enforces authentication is reported Low, not Medium.
+  An identified Denon/Marantz receiver gets no telnet credential probe; its
+  finding is retitled, so its fingerprint changes.
+- `--suppress` now also removes suppressed findings from priority actions and
+  attack paths. Byte caps on suppress, known-devices, accept and rule files.
+- Home Assistant discovery tables regenerated at fa47075 (adds `hp_printer`,
+  drops six Dahua OUIs from `imou`).
 - Tracing: `scan`, `discovery` and per-scanner spans (findings, outcome, time
   budget); spans log busy/idle time on close. `--log-format text|json`.
 - Optional OTLP/HTTP trace export behind the `otel` cargo feature, active only
