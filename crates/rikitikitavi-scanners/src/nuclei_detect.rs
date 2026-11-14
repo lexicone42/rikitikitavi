@@ -4,7 +4,7 @@ use reqwest::redirect::Policy;
 use rikitikitavi_core::{Confidence, Perspective, ScanError, Severity};
 use rikitikitavi_models::config::{ExclusionSet, ScanIntensity};
 use rikitikitavi_models::{DeviceHint, DeviceType, Finding, Remediation, ScanContext};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -42,7 +42,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Detection strings live in the first few KiB; bound what a hostile peer can feed us.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 128 * 1024;
-const MAX_CONCURRENCY: usize = 8;
+const MAX_CONCURRENCY: usize = 32;
 /// Distinct paths fetched per HTTP target. Covers every path the table asks
 /// for today (13); the cap only bounds a future regeneration.
 const MAX_HTTP_PATHS: usize = 16;
@@ -822,6 +822,27 @@ fn targets_for(ctx: &ScanContext, exclusions: &ExclusionSet) -> Vec<Target> {
     targets
 }
 
+/// Findings for one host's targets, probed one port at a time.
+#[tracing::instrument(level = "debug", name = "host", skip_all, fields(%ip, ports = targets.len()))]
+async fn probe_host(client: reqwest::Client, ip: IpAddr, targets: Vec<Target>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for target in targets {
+        let mut hits = probe_tcp_port(ip, target.port).await;
+        if is_http_port(target.port) {
+            hits.extend(probe_http_port(&client, ip, target.port).await);
+        }
+        if !hits.is_empty() {
+            findings.push(identification_finding(
+                ip,
+                target.port,
+                &hits,
+                target.device_type,
+            ));
+        }
+    }
+    findings
+}
+
 #[async_trait]
 impl Scanner for NucleiDetectScanner {
     fn id(&self) -> &'static str {
@@ -873,24 +894,22 @@ impl Scanner for NucleiDetectScanner {
             message: e.to_string(),
         })?;
 
+        let mut by_host: BTreeMap<IpAddr, Vec<Target>> = BTreeMap::new();
+        for target in targets {
+            by_host.entry(target.ip).or_default().push(target);
+        }
+
+        // Hosts in parallel, ports within a host in sequence.
         let concurrency = ctx.config.parallelism.clamp(1, MAX_CONCURRENCY);
-        let findings: Vec<Finding> = futures::stream::iter(targets.into_iter().map(|target| {
-            let client = client.clone();
-            async move {
-                let mut hits = probe_tcp_port(target.ip, target.port).await;
-                if is_http_port(target.port) {
-                    hits.extend(probe_http_port(&client, target.ip, target.port).await);
-                }
-                (target, hits)
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .filter_map(|(target, hits)| async move {
-            (!hits.is_empty())
-                .then(|| identification_finding(target.ip, target.port, &hits, target.device_type))
-        })
-        .collect()
-        .await;
+        let findings: Vec<Finding> =
+            futures::stream::iter(by_host.into_iter().map(|(ip, ports)| {
+                let client = client.clone();
+                probe_host(client, ip, ports)
+            }))
+            .buffer_unordered(concurrency)
+            .flat_map(futures::stream::iter)
+            .collect()
+            .await;
 
         tracing::info!(findings_count = findings.len(), "nuclei detection complete");
         Ok(findings)

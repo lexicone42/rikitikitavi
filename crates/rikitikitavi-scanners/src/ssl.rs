@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
 use rikitikitavi_models::{Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
@@ -20,6 +21,9 @@ pub struct SslScanner;
 const TLS_PORTS: &[u16] = &[443, 8443, 8080, 8888, 993, 995, 465, 587, 636, 8883];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hosts probed at once.
+const HOST_CONCURRENCY: usize = 32;
 
 /// Finding for a deprecated protocol version string (TLS 1.0/1.1, SSL); `None` for TLS 1.2+.
 pub fn classify_tls_version(ip: IpAddr, port: u16, version: &str) -> Option<Finding> {
@@ -984,6 +988,8 @@ impl Scanner for SslScanner {
             &[443]
         };
 
+        // Hosts in parallel, ports within a host in sequence; `buffered` keeps device order.
+        let mut probes = Vec::new();
         for device in &ctx.discovered_devices {
             let tls_ports: Vec<u16> = device
                 .open_ports
@@ -991,12 +997,23 @@ impl Scanner for SslScanner {
                 .filter(|p| allowed_tls_ports.contains(&p.port))
                 .map(|p| p.port)
                 .collect();
-
-            for port in tls_ports {
-                let port_findings = probe_tls(device.ip, port).await;
-                findings.extend(port_findings);
+            if tls_ports.is_empty() {
+                continue;
             }
+            let ip = device.ip;
+            probes.push(async move {
+                let mut host_findings = Vec::new();
+                for port in tls_ports {
+                    host_findings.extend(probe_tls(ip, port).await);
+                }
+                host_findings
+            });
         }
+        let per_host: Vec<Vec<Finding>> = futures::stream::iter(probes)
+            .buffered(HOST_CONCURRENCY)
+            .collect()
+            .await;
+        findings.extend(per_host.into_iter().flatten());
 
         tracing::info!(findings_count = findings.len(), "TLS scan complete");
         Ok(findings)

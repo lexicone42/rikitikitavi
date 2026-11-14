@@ -35,7 +35,7 @@ const MAX_COMMUNITIES_PER_HOST: usize = 8;
 const PER_HOST_BUDGET: Duration = Duration::from_secs(6);
 
 /// Hosts probed concurrently.
-const SNMP_CONCURRENCY: usize = 16;
+const SNMP_CONCURRENCY: usize = 64;
 
 /// Community strings tried, in prevalence order; `public` (read-only) precedes
 /// `private` (read-write). Only entries also present in the `RouterSploit` corpus
