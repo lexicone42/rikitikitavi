@@ -1050,6 +1050,7 @@ fn rdns_findings(
     devices: &[Device],
     findings: &[Finding],
 ) -> Vec<Finding> {
+    use rikitikitavi_scanners::ha_discovery_db;
     use rikitikitavi_scanners::hostname_db::classify_hostname;
 
     let named: HashSet<IpAddr> = findings
@@ -1080,6 +1081,24 @@ fn rdns_findings(
                         rule.device_type.label()
                     ),
                 );
+            } else {
+                let mac = device.mac.as_ref().map(ToString::to_string);
+                let typed = ha_discovery_db::dhcp_hostname_hits(name, mac.as_deref())
+                    .into_iter()
+                    .map(|hit| (hit.domain, ha_discovery_db::domain_device_type(hit.domain)))
+                    .find(|(_, device_type)| *device_type != DeviceType::Unknown);
+                if let Some((domain, device_type)) = typed {
+                    hint = hint
+                        .with_device_type(device_type)
+                        .with_device_subtype(domain);
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut description,
+                        format_args!(
+                            " The name matches the Home Assistant `{domain}` DHCP matcher ({}).",
+                            device_type.label()
+                        ),
+                    );
+                }
             }
             Some(
                 Finding::new(

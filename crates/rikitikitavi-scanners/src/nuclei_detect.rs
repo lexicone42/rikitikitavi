@@ -467,6 +467,7 @@ fn hits_for(templates: &[&'static TcpTemplate], parts: &TcpParts) -> Vec<Hit> {
 }
 
 /// Every TCP hit on one open port.
+#[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
 async fn probe_tcp_port(ip: IpAddr, port: u16) -> Vec<Hit> {
     let templates: Vec<&'static TcpTemplate> = tcp_templates_for_port(port).collect();
     if templates.is_empty() {
@@ -570,6 +571,7 @@ async fn fetch_and_match(client: &reqwest::Client, url: String, path: &'static s
 ///
 /// The root GET gates the rest: a port that does not answer it is not serving
 /// HTTP, and paying a timeout for each remaining path would be wasted.
+#[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
 async fn probe_http_port(client: &reqwest::Client, ip: IpAddr, port: u16) -> Vec<Hit> {
     let scheme = scheme_for(port);
     let host = match ip {
