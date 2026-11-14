@@ -101,6 +101,9 @@ const fn port_to_service(port: u16) -> &'static str {
     }
 }
 
+/// In-flight TCP probes per host.
+const PER_HOST_PROBES: usize = 16;
+
 /// Common ports for a home network scan (66 ports; see `common_port_count`).
 #[must_use]
 pub fn common_ports() -> Vec<u16> {
@@ -193,6 +196,7 @@ pub(crate) async fn udp_probe(
 ///
 /// For HTTP ports, sends a `HEAD / HTTP/1.0` to elicit a response.
 /// For other ports, just reads whatever the server sends on connect.
+#[tracing::instrument(level = "debug", skip_all, fields(%addr))]
 async fn grab_banner(addr: SocketAddr) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -521,13 +525,24 @@ impl Scanner for PortScanner {
 
         // Bounded concurrency: `buffer_unordered` keeps at most `parallelism`
         // probes in flight, bounding memory on large (host, port) sweeps.
-        let pairs: Vec<(IpAddr, u16)> = targets
+        // Port-major order spreads in-flight probes across hosts.
+        let pairs: Vec<(IpAddr, u16)> = ports
             .iter()
-            .flat_map(|&ip| ports.iter().map(move |&port| (ip, port)))
+            .flat_map(|&port| targets.iter().map(move |&ip| (ip, port)))
             .collect();
+
+        let host_slots: std::collections::HashMap<IpAddr, tokio::sync::Semaphore> = targets
+            .iter()
+            .map(|&ip| (ip, tokio::sync::Semaphore::new(PER_HOST_PROBES)))
+            .collect();
+        let host_slots = &host_slots;
 
         let results: Vec<PortResult> = futures::stream::iter(pairs)
             .map(|(ip, port)| async move {
+                let _slot = match host_slots.get(&ip) {
+                    Some(slots) => slots.acquire().await.ok(),
+                    None => None,
+                };
                 let addr = SocketAddr::new(ip, port);
                 let open = tcp_connect_probe(addr, timeout).await;
                 let banner = if open && do_banner {

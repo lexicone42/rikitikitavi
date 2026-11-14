@@ -70,7 +70,7 @@ impl Default for ScanConfig {
             network_mode: NetworkMode::default(),
             intensity: ScanIntensity::Active,
             timeout_seconds: 0,
-            parallelism: 100,
+            parallelism: 256,
             excluded_networks: Vec::new(),
             excluded_devices: Vec::new(),
             port_scan_range: PortRange::Common,
@@ -375,7 +375,7 @@ mod tests {
         let config: ScanConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.timeout_seconds, 120);
         // Other fields should use defaults
-        assert_eq!(config.parallelism, 100);
+        assert_eq!(config.parallelism, 256);
         assert!(config.attack_paths);
     }
 

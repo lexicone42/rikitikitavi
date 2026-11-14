@@ -7,7 +7,7 @@ scan:
                                  # (the --perspective flag overrides this)
   intensity: active              # passive | active | aggressive
                                  # aggressive from a file is capped at active; login attempts need `scan --aggressive`
-  parallelism: 100               # 1..=4096, outside that range is a startup error
+  parallelism: 256               # 1..=4096, outside that range is a startup error
   timeout_seconds: 0             # 0 = unbounded; otherwise the whole scan aborts after N seconds
   port_scan_range: common        # common | extended | full, or a list: [22, 80, 443]
   attack_paths: true               # the CLI value wins (--attack-paths)

@@ -570,6 +570,7 @@ const BANNER_PORTS: &[u16] = &[21, 22, 23, 25, 110, 143, 3306, 5432, 6379, 53282
 const HTTP_PORTS: &[u16] = &[80, 8080, 8443, 8888];
 
 /// Grab a banner from a TCP service that speaks first.
+#[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
 async fn grab_banner(ip: IpAddr, port: u16) -> Option<String> {
     let addr = SocketAddr::new(ip, port);
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -592,6 +593,7 @@ async fn grab_banner(ip: IpAddr, port: u16) -> Option<String> {
 }
 
 /// Grab an HTTP Server header.
+#[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
 async fn grab_http_server(ip: IpAddr, port: u16) -> Option<String> {
     let addr = SocketAddr::new(ip, port);
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
@@ -2050,6 +2052,7 @@ const fn is_likely_http_port(port: u16) -> bool {
 }
 
 /// Run deep protocol-specific probes on a port based on its well-known service.
+#[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
 async fn deep_probe(ip: IpAddr, port: u16, banner: Option<&str>) -> Vec<Finding> {
     if port == 22 || banner.is_some_and(is_ssh_banner) {
         return probe_ssh_kex(ip, port)
@@ -2069,9 +2072,10 @@ async fn deep_probe(ip: IpAddr, port: u16, banner: Option<&str>) -> Vec<Finding>
 }
 
 /// Hosts banner-probed at once.
-const DEVICE_CONCURRENCY: usize = 16;
+const DEVICE_CONCURRENCY: usize = 64;
 
 /// Banner and protocol probes for one discovered device.
+#[tracing::instrument(level = "debug", name = "host", skip_all, fields(ip = %device.ip, ports = device.open_ports.len()))]
 async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Finding> {
     let ip = device.ip;
     let mut findings = Vec::new();
@@ -2108,8 +2112,13 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
                 }
             }
         } else {
-            // Unknown port: plain banner grab
-            if let Some(banner) = grab_banner(ip, port).await {
+            // At active intensity phase 1 has already read this port's banner.
+            let banner = if active {
+                open_port.banner.clone()
+            } else {
+                grab_banner(ip, port).await
+            };
+            if let Some(banner) = banner {
                 findings.extend(classify_banner(ip, port, &banner));
                 findings.extend(check_os_eol(ip, port, &banner));
                 findings.extend(classify_backdoor_ssh(ip, port, &banner, role));

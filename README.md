@@ -437,7 +437,7 @@ unfiltered set.
 scan:
   intensity: active            # passive | active | aggressive; a file value of aggressive is capped
                                # at active, login attempts require `scan --aggressive`
-  parallelism: 100             # default 100; 1..=4096, outside that range is a startup error
+  parallelism: 256             # default 256; 1..=4096, outside that range is a startup error
   timeout_seconds: 0           # 0 = unbounded; otherwise the whole scan aborts after N seconds
   excluded_networks: ["192.168.50.0/24"]                    # CIDRs never probed
   excluded_devices: ["192.168.1.40", "aa:bb:cc:dd:ee:ff"]  # IPs never probed; MACs once the ARP cache knows them

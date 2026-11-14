@@ -902,7 +902,7 @@ fn enrich_devices_from_findings(ctx: &mut ScanContext, findings: &[Finding]) {
                         protocol: PortProtocol::Tcp,
                         service: finding.affected_service.clone(),
                         version: None,
-                        banner: None,
+                        banner: finding.evidence.clone(),
                     });
                 }
             }
