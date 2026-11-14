@@ -23,6 +23,7 @@ pub mod ha_discovery_db;
 pub mod hostname_db;
 pub mod http_audit;
 pub mod http_util;
+pub mod hue;
 pub mod isolation;
 pub mod kasa;
 pub mod knx;

@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::device::PortProtocol;
+use rikitikitavi_models::{Device, Finding, Remediation, ScanContext};
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -201,6 +203,17 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
             return None;
         };
 
+    let is_synology = product.starts_with("Synology");
+    let extra = if is_synology {
+        SYNOLOGY_DSM_ADVISORY
+    } else {
+        ""
+    };
+    let mut references = refs![advisory];
+    if is_synology {
+        references.extend(SYNOLOGY_ADVISORY_LINKS.iter().map(|s| (*s).to_owned()));
+    }
+
     Some(
         Finding::new(
             "http_audit",
@@ -208,7 +221,7 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
             &format!(
                 "The web interface at {ip}:{port} appears to be {product}. {why} Keep its \
                  firmware/software current, require strong authentication, and ensure it is \
-                 not reachable from the internet."
+                 not reachable from the internet.{extra}"
             ),
             Severity::Low,
         )
@@ -216,8 +229,131 @@ pub fn classify_nas_ha(ip: IpAddr, port: u16, server: Option<&str>, body: &str) 
         .with_port(port)
         .with_service("HTTP")
         .with_confidence(rikitikitavi_core::Confidence::Probable)
-        .with_references(refs![advisory]),
+        .with_references(references),
     )
+}
+
+/// Minimum DSM builds for Synology-SA-26:13 and SA-26:19, per branch.
+pub const SYNOLOGY_DSM_MIN_BUILDS: &[&str] = &[
+    "7.2.1-69057-13",
+    "7.2.2-72806-10",
+    "7.3.2-86009-5",
+    "7.4.1-90080-1",
+];
+
+const SYNOLOGY_ADVISORY_LINKS: &[&str] = &[
+    "https://www.synology.com/en-global/security/advisory/Synology_SA_26_13",
+    "https://www.synology.com/en-global/security/advisory/Synology_SA_26_19",
+];
+
+const SYNOLOGY_DSM_ADVISORY: &str = " Synology-SA-26:13 (8 CVEs, 2 Critical) and \
+     Synology-SA-26:19 (Auth API SQL injection CVE-2026-76954, rsync authentication bypass \
+     CVE-2026-85101) are fixed from DSM 7.2.1-69057-13, 7.2.2-72806-10, 7.3.2-86009-5 and \
+     7.4.1-90080-1 on their respective branches. The DSM build is not readable without \
+     signing in, so this scan does not compare it. The NAS may not notify you of this DSM \
+     update; check DSM > Control Panel > Update and install it manually.";
+
+/// IPs identified as Synology: device vendor, a `Synology` device hint, or the
+/// `classify_nas_ha` finding.
+fn synology_hosts(findings: &[Finding], devices: &[Device]) -> HashSet<IpAddr> {
+    let by_device = devices
+        .iter()
+        .filter(|d| {
+            d.vendor
+                .as_deref()
+                .is_some_and(|v| v.to_ascii_lowercase().contains("synology"))
+        })
+        .map(|d| d.ip);
+    let by_finding = findings
+        .iter()
+        .filter(|f| {
+            (f.scanner == "http_audit" && f.title.starts_with("Synology DSM"))
+                || f.device_hint.as_ref().is_some_and(|h| {
+                    h.vendor
+                        .as_deref()
+                        .is_some_and(|v| v.to_ascii_lowercase().contains("synology"))
+                })
+        })
+        .filter_map(|f| f.affected_ip);
+    by_device.chain(by_finding).collect()
+}
+
+/// rsync daemon port.
+const RSYNC_PORT: u16 = 873;
+
+/// IPs with an rsync daemon: nuclei `rsyncd-service-detect`, or TCP 873 open.
+fn rsync_hosts(findings: &[Finding], devices: &[Device]) -> HashSet<IpAddr> {
+    let by_nuclei = findings
+        .iter()
+        .filter(|f| {
+            f.scanner == "nuclei-detect"
+                && f.evidence
+                    .as_deref()
+                    .is_some_and(|e| e.contains("rsyncd-service-detect"))
+        })
+        .filter_map(|f| f.affected_ip);
+    let by_port = devices
+        .iter()
+        .filter(|d| {
+            d.open_ports
+                .iter()
+                .any(|p| p.port == RSYNC_PORT && p.protocol == PortProtocol::Tcp)
+        })
+        .map(|d| d.ip);
+    by_nuclei.chain(by_port).collect()
+}
+
+/// Synology hosts that also run an rsync daemon: one Medium/Inferred finding per
+/// host for CVE-2026-85101 (SA-26:19). The DSM build is unknown, so the CVE is
+/// not confirmed.
+#[must_use]
+pub fn correlate_synology_rsync(findings: &[Finding], devices: &[Device]) -> Vec<Finding> {
+    let rsync = rsync_hosts(findings, devices);
+    let mut ips: Vec<IpAddr> = synology_hosts(findings, devices)
+        .intersection(&rsync)
+        .copied()
+        .collect();
+    ips.sort_unstable();
+    ips.into_iter()
+        .map(|ip| {
+            Finding::new(
+                "http_audit",
+                &format!(
+                    "Synology rsync daemon may be affected by CVE-2026-85101 on {ip}:{RSYNC_PORT}"
+                ),
+                &format!(
+                    "{ip} is identified as a Synology NAS and runs an rsync daemon on TCP \
+                     {RSYNC_PORT}. Synology-SA-26:19 lists CVE-2026-85101 (CVSS 8.6), an \
+                     rsync authentication bypass that lets a remote attacker read specific \
+                     files and write arbitrary files, in DSM before 7.2.1-69057-13, \
+                     7.2.2-72806-10, 7.3.2-86009-5 and 7.4.1-90080-1. The DSM build is not \
+                     readable without signing in, so whether this NAS is patched is unknown."
+                ),
+                Severity::Medium,
+            )
+            .with_ip(ip)
+            .with_port(RSYNC_PORT)
+            .with_service("rsync")
+            .with_confidence(rikitikitavi_core::Confidence::Inferred)
+            .with_cve_ids(vec!["CVE-2026-85101".to_owned()])
+            .with_cwe("CWE-288")
+            .with_remediation(Remediation {
+                description: "Install the DSM build that fixes Synology-SA-26:19.".to_owned(),
+                steps: vec![
+                    format!(
+                        "Update DSM to at least {} on your branch (DSM > Control Panel > \
+                         Update); the NAS may not notify you, so check manually.",
+                        SYNOLOGY_DSM_MIN_BUILDS.join(" / ")
+                    ),
+                    "Disable the rsync service if nothing uses it.".to_owned(),
+                ],
+                effort: Some("30 minutes".to_owned()),
+            })
+            .with_references(refs![
+                "https://www.synology.com/en-global/security/advisory/Synology_SA_26_19",
+            ])
+        })
+        .collect()
 }
 
 /// Parse the version triple following `apache/` in a lowercased `Server` header.
@@ -319,6 +455,127 @@ pub fn check_powered_by_eol(ip: IpAddr, port: u16, powered_by: &str) -> Vec<Find
             )
         })
         .collect()
+}
+
+/// First PHP release per branch with the CVE-2026-109618/-109619 fixes.
+const PHP2SHELL_FIXED: &[[u32; 3]] = &[[8, 2, 35], [8, 3, 36], [8, 4, 27], [8, 5, 12]];
+
+/// PHP builds Synology ships with backported fixes (SA-26:14).
+const SYNOLOGY_PHP_BACKPORTS: &[[u32; 3]] = &[[7, 4, 33], [8, 0, 30], [8, 1, 34]];
+
+/// `x.y.z` and the remainder after it.
+fn parse_php_version(version: &str) -> Option<([u32; 3], &str)> {
+    let mut nums = [0u32; 3];
+    let mut rest = version;
+    for (i, slot) in nums.iter_mut().enumerate() {
+        if i > 0 {
+            rest = rest.strip_prefix('.')?;
+        }
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if end == 0 || end > 9 {
+            return None;
+        }
+        *slot = rest[..end].parse().ok()?;
+        rest = &rest[end..];
+    }
+    Some((nums, rest))
+}
+
+/// Confidence that `version` is affected by `PHP2Shell`, or `None` when it is at or
+/// above its branch's fix, or on a branch newer than the table.
+fn php2shell_confidence(version: &str, synology: bool) -> Option<rikitikitavi_core::Confidence> {
+    use rikitikitavi_core::Confidence;
+    let (v, suffix) = parse_php_version(version)?;
+    let [major, minor, patch] = v;
+    let unsupported = major < 8 || (major == 8 && minor <= 1);
+    if !unsupported {
+        let &[_, _, fixed] = PHP2SHELL_FIXED
+            .iter()
+            .find(|f| f[0] == major && f[1] == minor)?;
+        if patch >= fixed {
+            return None;
+        }
+    }
+    let distro = matches!(suffix.chars().next(), Some('-' | '+' | '~'));
+    if distro || (synology && SYNOLOGY_PHP_BACKPORTS.contains(&v)) {
+        Some(Confidence::Inferred)
+    } else {
+        Some(Confidence::Probable)
+    }
+}
+
+/// `PHP2Shell` (CVE-2026-109618/-109619) from an `X-Powered-By: PHP/x.y.z` header.
+pub fn check_php2shell(ip: IpAddr, port: u16, powered_by: &str, synology: bool) -> Option<Finding> {
+    use rikitikitavi_core::Confidence;
+    let lower = powered_by.to_ascii_lowercase();
+    let token = lower
+        .split([',', ' ', ';'])
+        .find(|t| t.starts_with("php/"))?;
+    let version = &token["php/".len()..];
+    let distro_header = ["ubuntu", "debian", "+deb", "~deb"]
+        .iter()
+        .any(|m| lower.contains(m));
+    let base = php2shell_confidence(version, synology)?;
+    let confidence = if distro_header {
+        Confidence::Inferred
+    } else {
+        base
+    };
+    let severity = if confidence == Confidence::Inferred {
+        Severity::Medium
+    } else {
+        Severity::High
+    };
+    let note = match confidence {
+        Confidence::Inferred if synology => {
+            " Synology backports PHP fixes without changing the upstream version (SA-26:14), \
+             so this build may already be patched."
+        }
+        Confidence::Inferred => {
+            " The version carries a distribution suffix; distributions backport fixes \
+             without changing the upstream version, so this build may already be patched."
+        }
+        _ => "",
+    };
+    Some(
+        Finding::new(
+            "http_audit",
+            &format!("PHP vulnerable to PHP2Shell on {ip}:{port}"),
+            &format!(
+                "The X-Powered-By header advertises PHP {version}. CVE-2026-109618 and \
+                 CVE-2026-109619 (CISA KEV) are fixed in PHP 8.5.12, 8.4.27, 8.3.36 and \
+                 8.2.35; PHP 8.1 and earlier are unsupported and receive no fix.{note}"
+            ),
+            severity,
+        )
+        .with_ip(ip)
+        .with_port(port)
+        .with_service("HTTP")
+        .with_confidence(confidence)
+        .with_cve_ids(vec![
+            "CVE-2026-109618".to_owned(),
+            "CVE-2026-109619".to_owned(),
+        ])
+        .with_evidence(powered_by)
+        .with_remediation(Remediation {
+            description: "Upgrade PHP to a fixed release on a supported branch.".to_owned(),
+            steps: vec![
+                "Upgrade to PHP 8.5.12, 8.4.27, 8.3.36 or 8.2.35 or later; move off PHP 8.1 \
+                 and earlier."
+                    .to_owned(),
+                "Until patched, take the PHP application off the network or restrict who can \
+                 reach it."
+                    .to_owned(),
+            ],
+            effort: Some("1 hour".to_owned()),
+        })
+        .with_references(refs![
+            "https://www.cisa.gov/news-events/alerts/2026/10/21/critical-vulnerabilities-php-require-immediate-patching",
+            "https://www.synology.com/en-global/security/advisory/Synology_SA_26_14",
+        ]),
+    )
 }
 
 /// Set of security headers found in a response.
@@ -1341,7 +1598,7 @@ fn recog_identify(
 
 /// Audit a single HTTP endpoint.
 #[allow(clippy::too_many_lines)]
-async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
+async fn audit_http_endpoint(ip: IpAddr, port: u16, synology_host: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     let scheme = if port == 443 || port == 8443 {
         "https"
@@ -1432,8 +1689,13 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16) -> Vec<Finding> {
         // Body read is capped (untrusted device).
         let body = crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
 
+        let mut synology = synology_host;
         if let Some(f) = classify_nas_ha(ip, port, headers.server.as_deref(), &body) {
+            synology |= f.title.starts_with("Synology");
             findings.push(f);
+        }
+        if let Some(ref pb) = powered_by {
+            findings.extend(check_php2shell(ip, port, pb, synology));
         }
 
         findings.extend(recog_identify(
@@ -1626,11 +1888,15 @@ impl Scanner for HttpAuditScanner {
         }
 
         // Flatten to (ip, port) endpoints, then audit with bounded concurrency.
-        let mut endpoints: Vec<(IpAddr, u16)> = Vec::new();
+        let mut endpoints: Vec<(IpAddr, u16, bool)> = Vec::new();
         for device in &ctx.discovered_devices {
+            let synology = device
+                .vendor
+                .as_deref()
+                .is_some_and(|v| v.to_ascii_lowercase().contains("synology"));
             for p in &device.open_ports {
                 if AUDIT_PORTS.contains(&p.port) {
-                    endpoints.push((device.ip, p.port));
+                    endpoints.push((device.ip, p.port, synology));
                 }
             }
         }
@@ -1641,7 +1907,9 @@ impl Scanner for HttpAuditScanner {
         // restore deterministic ordering before flattening.
         let indexed: Vec<(usize, Vec<Finding>)> =
             futures::stream::iter(endpoints.into_iter().enumerate())
-                .map(|(idx, (ip, port))| async move { (idx, audit_http_endpoint(ip, port).await) })
+                .map(|(idx, (ip, port, synology))| async move {
+                    (idx, audit_http_endpoint(ip, port, synology).await)
+                })
                 .buffer_unordered(concurrency)
                 .collect()
                 .await;
@@ -1853,6 +2121,135 @@ mod tests {
     fn test_classify_nas_ha_ignores_ordinary_pages() {
         let ip: IpAddr = "192.168.1.10".parse().unwrap();
         assert!(classify_nas_ha(ip, 80, Some("nginx/1.18.0"), "<h1>hello</h1>").is_none());
+    }
+
+    #[test]
+    fn synology_finding_lists_dsm_minimum_builds() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        let f = classify_nas_ha(ip, 5000, None, "<title>DiskStation</title>").unwrap();
+        for build in SYNOLOGY_DSM_MIN_BUILDS {
+            assert!(f.description.contains(build), "{build}");
+        }
+        assert!(f.description.contains("Control Panel > Update"));
+        assert!(
+            f.references
+                .iter()
+                .any(|r| r.ends_with("Synology_SA_26_19"))
+        );
+        assert!(f.cve_ids.is_empty());
+        assert_eq!(f.severity, Severity::Low);
+        let q = classify_nas_ha(ip, 8080, Some("QTS"), "<html>QNAP Systems</html>").unwrap();
+        assert!(!q.description.contains("7.4.1-90080-1"));
+    }
+
+    fn php(header: &str, synology: bool) -> Option<rikitikitavi_core::Confidence> {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        check_php2shell(ip, 80, header, synology).map(|f| f.confidence)
+    }
+
+    #[test]
+    fn php2shell_floor_table() {
+        use rikitikitavi_core::Confidence::{Inferred, Probable};
+        for fixed in [
+            "PHP/8.5.12",
+            "PHP/8.4.27",
+            "PHP/8.3.36",
+            "PHP/8.2.35",
+            "PHP/8.6.0",
+        ] {
+            assert_eq!(php(fixed, false), None, "{fixed}");
+        }
+        for below in ["PHP/8.5.11", "PHP/8.4.26", "PHP/8.3.35", "PHP/8.2.34"] {
+            assert_eq!(php(below, false), Some(Probable), "{below}");
+        }
+        for old in ["PHP/8.1.34", "PHP/7.4.33", "PHP/5.6.40"] {
+            assert_eq!(php(old, false), Some(Probable), "{old}");
+        }
+        assert_eq!(php("PHP/8.2.28-1+deb12u1", false), Some(Inferred));
+        assert_eq!(php("PHP/7.4.3-4ubuntu2.24", false), Some(Inferred));
+        assert_eq!(php("ASP.NET", false), None);
+        assert_eq!(php("", false), None);
+        assert_eq!(php("PHP/8.2", false), None);
+    }
+
+    #[test]
+    fn php2shell_synology_backports() {
+        use rikitikitavi_core::Confidence::{Inferred, Probable};
+        for build in ["PHP/7.4.33", "PHP/8.0.30", "PHP/8.1.34"] {
+            assert_eq!(php(build, true), Some(Inferred), "{build}");
+        }
+        assert_eq!(php("PHP/7.3.33", true), Some(Probable));
+        assert_eq!(php("PHP/8.1.33", true), Some(Probable));
+    }
+
+    #[test]
+    fn php2shell_finding_shape() {
+        let ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let f = check_php2shell(ip, 80, "PHP/8.3.10", false).unwrap();
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.cve_ids, ["CVE-2026-109618", "CVE-2026-109619"]);
+        let f = check_php2shell(ip, 80, "PHP/8.1.34", true).unwrap();
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.description.contains("SA-26:14"));
+    }
+
+    fn device_on(ip: IpAddr, vendor: Option<&str>, ports: &[u16]) -> Device {
+        let mut d = Device::new(ip);
+        d.vendor = vendor.map(ToOwned::to_owned);
+        d.open_ports = ports
+            .iter()
+            .map(|&port| rikitikitavi_models::device::OpenPort {
+                port,
+                protocol: PortProtocol::Tcp,
+                service: None,
+                version: None,
+                banner: None,
+            })
+            .collect();
+        d
+    }
+
+    #[test]
+    fn rsync_correlation_needs_synology_and_rsync() {
+        let nas: IpAddr = "192.168.1.220".parse().unwrap();
+        let other: IpAddr = "192.168.1.30".parse().unwrap();
+        let devices = vec![
+            device_on(nas, Some("Synology Incorporated"), &[873, 5000]),
+            device_on(other, Some("Raspberry Pi"), &[873]),
+        ];
+        let out = correlate_synology_rsync(&[], &devices);
+        assert_eq!(out.len(), 1);
+        let f = &out[0];
+        assert_eq!(f.affected_ip, Some(nas));
+        assert_eq!(f.affected_port, Some(873));
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(f.confidence, rikitikitavi_core::Confidence::Inferred);
+        assert_eq!(f.cve_ids, ["CVE-2026-85101"]);
+        assert!(f.remediation.is_some());
+
+        let no_rsync = vec![device_on(nas, Some("Synology Incorporated"), &[5000])];
+        assert!(correlate_synology_rsync(&[], &no_rsync).is_empty());
+    }
+
+    #[test]
+    fn rsync_correlation_from_findings() {
+        let nas: IpAddr = "192.168.1.220".parse().unwrap();
+        let devices = vec![device_on(nas, None, &[5000])];
+        let id = classify_nas_ha(nas, 5000, None, "<title>DiskStation</title>").unwrap();
+        let rsync = Finding::new(
+            "nuclei-detect",
+            "Rsyncd Service identified",
+            "d",
+            Severity::Info,
+        )
+        .with_ip(nas)
+        .with_port(873)
+        .with_evidence("rsyncd-service-detect: @RSYNCD: 31.0");
+        assert_eq!(
+            correlate_synology_rsync(&[id.clone(), rsync], &devices).len(),
+            1
+        );
+        assert!(correlate_synology_rsync(&[id], &devices).is_empty());
     }
 
     #[test]
@@ -2795,6 +3192,11 @@ mod tests {
         #[test]
         fn prop_powered_by_eol_no_panic(header in arb_powered_by()) {
             let ip: IpAddr = "10.0.0.1".parse().unwrap();
+            for synology in [false, true] {
+                if let Some(f) = check_php2shell(ip, 80, &header, synology) {
+                    prop_assert_eq!(f.cve_ids.len(), 2);
+                }
+            }
             for finding in check_powered_by_eol(ip, 80, &header) {
                 prop_assert!(finding.title.starts_with("End-of-life "));
                 prop_assert_eq!(finding.cwe_id.as_deref(), Some("CWE-1104"));

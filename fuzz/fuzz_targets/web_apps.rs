@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use rikitikitavi_scanners::{ddwrt_upnp, media_server, papercut, print3d};
+use rikitikitavi_scanners::{ddwrt_upnp, hue, media_server, papercut, print3d};
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
@@ -14,4 +14,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = print3d::fuzz::server(&text);
     let _ = print3d::fuzz::octoprint(&text);
     ddwrt_upnp::fuzz::server(&text);
+    let _ = hue::fuzz::config(&text);
 });

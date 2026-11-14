@@ -647,6 +647,11 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     }
 
     post_enrich_devices(&mut ctx.discovered_devices, &all_findings);
+    rikitikitavi_scanners::hue::suppress_bridge_admin_no_auth(&mut all_findings);
+    let correlated = rikitikitavi_scanners::http_audit::correlate_synology_rsync(
+        &all_findings,
+        &ctx.discovered_devices,
+    );
 
     let pre_dedup = all_findings.len();
     let mut all_findings = deduplicate_findings(all_findings);
@@ -658,6 +663,9 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
             "deduplicated findings"
         );
     }
+
+    // Added after dedup so the Medium does not evict the rsync inventory finding.
+    all_findings.extend(correlated);
 
     // KEV before scoring.
     let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
