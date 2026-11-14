@@ -141,3 +141,171 @@ remediation:
   typicalDurationSeconds: 300
   blastRadiusTags: ["wifi"]
   changeType: "standard"
+---
+id: "rikitikitavi.wifi.hidden-ssid"
+version: "1.0.0"
+summary: "Make the SSID visible and rely on WPA2/WPA3"
+description: "A hidden SSID adds no protection and makes clients probe for it."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi"]
+
+steps:
+  - id: "visible"
+    kind: "manual.step"
+    params:
+      text: "If this is your network, turn off the hide-SSID option in the router's Wi-Fi settings."
+  - id: "security"
+    kind: "manual.step"
+    params:
+      text: "Rely on WPA2 (AES) or WPA3 with a strong passphrase."
+  - id: "not-yours"
+    kind: "manual.step"
+    params:
+      text: "If it is not your network, no action is needed."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.deauth-flood"
+version: "1.0.0"
+summary: "Enable management-frame protection"
+description: "A burst of deauthentication frames can disconnect clients or push them to a rogue AP."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi"]
+
+steps:
+  - id: "pmf"
+    kind: "manual.step"
+    params:
+      text: "Turn on Protected Management Frames (802.11w) or WPA3 on your access points."
+  - id: "source"
+    kind: "manual.step"
+    params:
+      text: "If the frames come from a BSSID that is not yours, note when it happens; repeated floods mean someone nearby is attacking the network."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.rogue-ap"
+version: "1.0.0"
+summary: "Check whether the access point is yours"
+description: "An access point is broadcasting your SSID from an unknown BSSID."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi"]
+
+steps:
+  - id: "inventory"
+    kind: "manual.step"
+    params:
+      text: "Compare the BSSID with your router, mesh nodes and extenders; a new or replaced unit explains it."
+  - id: "protect"
+    kind: "manual.step"
+    params:
+      text: "If it is not yours, change the Wi-Fi passphrase and enable WPA3 or Protected Management Frames."
+  - id: "locate"
+    kind: "manual.step"
+    params:
+      text: "Use the signal strength to locate the transmitter."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.directed-probes"
+version: "1.0.0"
+summary: "Forget networks that devices no longer use"
+description: "Devices broadcast the names of networks they remember."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi", "privacy"]
+
+steps:
+  - id: "forget"
+    kind: "manual.step"
+    params:
+      text: "On each device, remove saved Wi-Fi networks you no longer use, especially open ones."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.mac-randomization"
+version: "1.0.0"
+summary: "Turn on private Wi-Fi addresses"
+description: "Devices probe with their real MAC address and can be tracked across networks."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi", "privacy"]
+
+steps:
+  - id: "enable"
+    kind: "manual.step"
+    params:
+      text: "On each device, turn on the private or randomized MAC address option in its Wi-Fi settings."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.wifi.default-ssid"
+version: "1.0.0"
+summary: "Rename the network from its default SSID"
+description: "A default or common SSID reveals the equipment and weakens WPA2-PSK against precomputed attacks."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi"]
+
+steps:
+  - id: "rename"
+    kind: "manual.step"
+    params:
+      text: "Rename the SSID to something that does not identify you or the equipment."
+  - id: "reconnect"
+    kind: "manual.step"
+    params:
+      text: "Reconnect your devices to the renamed network."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"

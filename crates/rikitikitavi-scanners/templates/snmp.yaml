@@ -1,0 +1,31 @@
+id: "rikitikitavi.snmp.default-community"
+version: "1.0.0"
+summary: "Remove the default SNMP community"
+description: "The SNMP agent accepts a well-known community string."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["snmp"]
+
+steps:
+  - id: "disable"
+    kind: "manual.step"
+    params:
+      text: "If nothing on your network polls this device over SNMP, disable the SNMP agent in its settings."
+  - id: "v3"
+    kind: "manual.step"
+    params:
+      text: "Otherwise disable SNMPv1/v2c and use SNMPv3 with authentication and privacy (authPriv)."
+  - id: "community"
+    kind: "manual.step"
+    params:
+      text: "If only v2c is available, set a long random community and restrict SNMP to your management host."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["snmp"]
+  changeType: "standard"

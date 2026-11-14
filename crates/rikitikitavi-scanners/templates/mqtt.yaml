@@ -1,0 +1,31 @@
+id: "rikitikitavi.mqtt.anonymous-access"
+version: "1.0.0"
+summary: "Require authentication on the MQTT broker"
+description: "The broker accepts anonymous clients."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["mqtt", "iot"]
+
+steps:
+  - id: "auth"
+    kind: "manual.step"
+    params:
+      text: "Disable anonymous access (Mosquitto: allow_anonymous false) and configure a password file or client certificates."
+  - id: "clients"
+    kind: "manual.step"
+    params:
+      text: "Give each client its own username and password and update them to use it."
+  - id: "restrict"
+    kind: "manual.step"
+    params:
+      text: "Restrict port 1883 to the hosts that need it, and prefer MQTT over TLS on 8883."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["mqtt"]
+  changeType: "standard"

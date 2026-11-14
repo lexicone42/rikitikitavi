@@ -211,3 +211,187 @@ remediation:
   typicalDurationSeconds: 600
   blastRadiusTags: ["ssh"]
   changeType: "standard"
+---
+id: "rikitikitavi.services.weak-ssh-algorithms"
+version: "1.0.0"
+summary: "Remove weak key exchange, cipher and MAC algorithms from SSH"
+description: "The SSH server offers SHA-1, small-group, CBC or MD5-based algorithms."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ssh", "crypto"]
+
+steps:
+  - id: "config"
+    kind: "manual.step"
+    params:
+      text: "For OpenSSH you manage, restrict KexAlgorithms, Ciphers and MACs in sshd_config to modern choices (curve25519, AES-GCM or ChaCha20-Poly1305, and -etm SHA-2 MACs), then restart sshd."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "For a device, install pending firmware updates; SSH algorithms are rarely configurable."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan to confirm the weak algorithms are gone."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["ssh"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.smtp-no-starttls"
+version: "1.0.0"
+summary: "Enable STARTTLS on the mail server"
+description: "The SMTP server does not offer STARTTLS."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["smtp", "tls"]
+
+steps:
+  - id: "enable"
+    kind: "manual.step"
+    params:
+      text: "Install a certificate and enable STARTTLS on the mail server."
+  - id: "unused"
+    kind: "manual.step"
+    params:
+      text: "If the host should not run a mail server, stop and disable it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["smtp"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.smtp-no-auth"
+version: "1.0.0"
+summary: "Require authentication before relaying mail"
+description: "The SMTP server does not advertise AUTH and may relay mail for anyone."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["smtp"]
+
+steps:
+  - id: "relay"
+    kind: "manual.step"
+    params:
+      text: "Configure the server to relay only for authenticated users or your own networks (Postfix: smtpd_relay_restrictions)."
+  - id: "test"
+    kind: "manual.step"
+    params:
+      text: "Test from another host that relaying to an outside address is refused."
+  - id: "unused"
+    kind: "manual.step"
+    params:
+      text: "If the host should not run a mail server, stop and disable it."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["smtp"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.eol-os"
+version: "1.0.0"
+summary: "Upgrade the end-of-life operating system"
+description: "The operating system no longer receives security updates."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["os", "eol"]
+
+steps:
+  - id: "upgrade"
+    kind: "manual.step"
+    params:
+      text: "On a computer or server you manage, upgrade to a supported release of the operating system."
+  - id: "appliance"
+    kind: "manual.step"
+    params:
+      text: "On an appliance or router, install the vendor's latest firmware; if the vendor no longer ships updates, plan a replacement."
+  - id: "interim"
+    kind: "manual.step"
+    params:
+      text: "Until then, keep the host off the internet and limit which hosts can reach it."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 7200
+  blastRadiusTags: ["os"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.lts-os"
+version: "1.0.0"
+summary: "Plan the upgrade before LTS support ends"
+description: "The operating system is past its security-team support and relies on LTS coverage."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["os", "eol"]
+
+steps:
+  - id: "lts"
+    kind: "manual.step"
+    params:
+      text: "Confirm the host still installs updates from the LTS archive."
+  - id: "upgrade"
+    kind: "manual.step"
+    params:
+      text: "Schedule an upgrade to a release with full security support before the LTS end date."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 7200
+  blastRadiusTags: ["os"]
+  changeType: "standard"
+---
+id: "rikitikitavi.services.outdated-web-server"
+version: "1.0.0"
+summary: "Update the web server software or device firmware"
+description: "The Server header names an outdated or end-of-life component."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["http", "eol"]
+
+steps:
+  - id: "update"
+    kind: "manual.step"
+    params:
+      text: "On a server you manage, update the web server package to a supported release."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "On an appliance, install the vendor's latest firmware; the web server ships with it."
+  - id: "internet"
+    kind: "manual.step"
+    params:
+      text: "Keep the interface off the internet until it is updated."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["http"]
+  changeType: "standard"

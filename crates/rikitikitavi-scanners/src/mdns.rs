@@ -194,7 +194,11 @@ pub fn classify_upnp_device(ip: IpAddr, location: &str, info: &UpnpDeviceInfo) -
             .with_ip(ip)
             .with_service("UPnP")
             .with_cwe("CWE-200")
-            .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]),
+            .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.mdns.upnp-serial",
+                &[],
+            )),
         );
     }
 
@@ -316,7 +320,13 @@ fn classify_ssdp_service(ip: IpAddr, service: &SsdpService) -> Finding {
     )
     .with_ip(ip)
     .with_service("SSDP")
-    .with_cwe("CWE-284");
+    .with_cwe("CWE-284")
+    .with_opt_remediation(
+        svc_type
+            .contains("InternetGatewayDevice")
+            .then(|| crate::remediation::get("rikitikitavi.router.upnp-enabled", &[]))
+            .flatten(),
+    );
 
     let ha_type = consensus_device_type(&ha_domains);
     if !ha_domains.is_empty() {
@@ -584,6 +594,10 @@ fn classify_matter_commissionable(
     .with_service("Matter")
     .with_cwe("CWE-287")
     .with_device_hint(identity.hint(DeviceType::IoT))
+    .with_opt_remediation(crate::remediation::get(
+        "rikitikitavi.mdns.matter-window-open",
+        &[],
+    ))
 }
 
 /// Thread border-agent advertisement (`_meshcop._udp`, `_meshcop-e._udp`).
@@ -690,6 +704,10 @@ fn classify_thread_border_agent(
     .with_service("Thread")
     .with_cwe("CWE-200")
     .with_device_hint(identity.hint(DeviceType::Hub))
+    .with_opt_remediation(crate::remediation::get(
+        "rikitikitavi.mdns.thread-border-router",
+        &[],
+    ))
 }
 
 /// Instance name, falling back to the hostname.
@@ -745,7 +763,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_port(service.port)
         .with_service("SSH")
         .with_cwe("CWE-200")
-        .with_device_hint(identity.hint(DeviceType::Unknown));
+        .with_device_hint(identity.hint(DeviceType::Unknown))
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.ssh-open", &[]));
         findings.push(finding);
     } else if svc_type.contains("_http._tcp") {
         let severity = if service
@@ -775,7 +794,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_service("HTTP")
         .with_cwe("CWE-200")
         .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
-        .with_device_hint(identity.hint(DeviceType::Unknown));
+        .with_device_hint(identity.hint(DeviceType::Unknown))
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.mdns.http-advertised",
+            &[],
+        ));
         findings.push(finding);
     } else if svc_type.contains("_ipp._tcp") || svc_type.contains("_printer._tcp") {
         let hint = identity.hint(DeviceType::Printer);
@@ -798,7 +821,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_service("IPP")
             .with_cwe("CWE-200")
             .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
-            .with_device_hint(hint),
+            .with_device_hint(hint)
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ports.printer-exposed",
+                &[],
+            )),
         );
     } else if svc_type.contains("_smb._tcp") || svc_type.contains("_afpovertcp._tcp") {
         let finding = Finding::new(
@@ -818,7 +845,11 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
         .with_port(service.port)
         .with_service("SMB")
         .with_cwe("CWE-732")
-        .with_device_hint(identity.hint(DeviceType::Unknown));
+        .with_device_hint(identity.hint(DeviceType::Unknown))
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.mdns.file-sharing",
+            &[],
+        ));
         findings.push(finding);
     } else if svc_type.contains("_airplay._tcp") || svc_type.contains("_raop._tcp") {
         let airplay_type = if display_name.contains("MacBook") || display_name.contains("macbook") {
@@ -886,7 +917,8 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             .with_port(service.port)
             .with_service("HomeKit")
             .with_cwe("CWE-287")
-            .with_device_hint(hint),
+            .with_device_hint(hint)
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.mdns.homekit", &[])),
         );
     } else if svc_type.contains("_matterd._udp") {
         findings.push(classify_matter_commissioner(service, &identity, &base_desc));
@@ -1303,6 +1335,10 @@ mod tests {
         };
         let finding = classify_ssdp_service(ip, &svc);
         assert_eq!(finding.severity, Severity::Medium);
+        assert_eq!(
+            finding.remediation.map(|r| r.description).as_deref(),
+            Some("Disable UPnP on the router")
+        );
     }
 
     #[test]
@@ -1315,6 +1351,7 @@ mod tests {
         };
         let finding = classify_ssdp_service(ip, &svc);
         assert_eq!(finding.severity, Severity::Info);
+        assert!(finding.remediation.is_none());
     }
 
     // ── UPnP device description tests ─────────────────────────────

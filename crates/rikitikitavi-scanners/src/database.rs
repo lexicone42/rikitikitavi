@@ -691,7 +691,11 @@ async fn check_redis(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                         .with_ip(*ip)
                         .with_port(port)
                         .with_service("Redis")
-                        .with_cwe("CWE-1104"),
+                        .with_cwe("CWE-1104")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.database.redis-eol",
+                            &[],
+                        )),
                     );
                 }
             }
@@ -737,6 +741,7 @@ async fn check_mongodb(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     let Some(greeting) = check_mysql_greeting(*ip, port).await else {
         return;
@@ -790,7 +795,11 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             .with_ip(*ip)
             .with_port(port)
             .with_service("MySQL")
-            .with_cwe("CWE-319"),
+            .with_cwe("CWE-319")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.database.mysql-no-tls",
+                &[],
+            )),
         );
     }
 
@@ -812,7 +821,11 @@ async fn check_mysql(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                     .with_ip(*ip)
                     .with_port(port)
                     .with_service("MySQL")
-                    .with_cwe("CWE-328"),
+                    .with_cwe("CWE-328")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.database.mysql-weak-auth",
+                        &[],
+                    )),
                 );
             }
             "mysql_native_password" => {

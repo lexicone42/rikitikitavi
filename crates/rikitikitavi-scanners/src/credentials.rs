@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rikitikitavi_core::{Perspective, ScanError, Severity};
-use rikitikitavi_models::{Finding, ScanContext};
+use rikitikitavi_models::{Device, Finding, ScanContext};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1107,7 +1107,11 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
                     .with_ip(ip)
                     .with_port(21)
                     .with_service("FTP")
-                    .with_cwe("CWE-200"),
+                    .with_cwe("CWE-200")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.credentials.banner-disclosure",
+                        &[],
+                    )),
                 );
             }
 
@@ -1131,7 +1135,11 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
                     .with_ip(ip)
                     .with_port(21)
                     .with_service("FTP")
-                    .with_cwe("CWE-1104"),
+                    .with_cwe("CWE-1104")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.credentials.vsftpd-outdated",
+                        &[],
+                    )),
                 );
             }
         }
@@ -1184,6 +1192,54 @@ async fn check_ftp_credentials(ip: IpAddr, findings: &mut Vec<Finding>) {
             );
         }
     }
+}
+
+/// Title prefix of the finding for an identified Denon/Marantz receiver's port 23.
+pub const AVR_CONTROL_TITLE: &str =
+    "Denon/Marantz receiver control port open without authentication";
+
+/// Denon or Marantz receiver, by vendor (OUI `D&M` or `UPnP`), HA subtype or hostname.
+pub fn is_denon_marantz_avr(device: &Device) -> bool {
+    let lower = |f: Option<&str>| f.map(str::to_lowercase).unwrap_or_default();
+    let vendor = lower(device.vendor.as_deref());
+    let hostname = lower(device.hostname.as_deref());
+    vendor.contains("denon")
+        || vendor.contains("marantz")
+        || vendor.starts_with("d&m")
+        || lower(device.device_subtype.as_deref()).contains("denonavr")
+        || hostname.starts_with("denon-")
+        || hostname.starts_with("marantz-")
+}
+
+/// Port 23 on an identified receiver. Built without connecting: the receiver
+/// accepts a single control connection.
+fn avr_control_finding(ip: IpAddr) -> Finding {
+    Finding::new(
+        "credentials",
+        &format!("{AVR_CONTROL_TITLE} on {ip}:23"),
+        &format!(
+            "Port 23 on the Denon/Marantz receiver at {ip} is its documented network \
+             control protocol, which has no authentication: any host on the LAN can \
+             switch power, input and volume. It is not a login shell, and the receiver \
+             has no SSH. The receiver accepts a single control connection, so this scan \
+             did not connect to it."
+        ),
+        Severity::Medium,
+    )
+    .with_confidence(rikitikitavi_core::Confidence::Probable)
+    .with_ip(ip)
+    .with_port(23)
+    .with_service("Telnet")
+    .with_cwe("CWE-306")
+    .with_references(refs![
+        "https://assets.denon.com/documentmaster/uk/avr1713_avr1613_protocol_v860.pdf",
+        "https://manuals.denon.com/AVRX3800H/NA/EN/HJWMSYmehwmguq.php",
+        "https://www.home-assistant.io/integrations/denonavr/",
+    ])
+    .with_opt_remediation(crate::remediation::get(
+        "rikitikitavi.products.denon-avr-telnet",
+        &[],
+    ))
 }
 
 #[async_trait]
@@ -1278,7 +1334,7 @@ impl Scanner for CredentialScanner {
                         )
                         .with_confidence(rikitikitavi_core::Confidence::Inferred)
                         .with_ip(ip)
-                        .with_cwe("CWE-1393"),
+                        .with_cwe("CWE-1393").with_opt_remediation(crate::remediation::get("rikitikitavi.credentials.class-default-advisory", &[])),
                     );
                 }
 
@@ -1306,13 +1362,21 @@ impl Scanner for CredentialScanner {
                             .with_ip(ip)
                             .with_port(21)
                             .with_service("FTP")
-                            .with_cwe("CWE-1393"),
+                            .with_cwe("CWE-1393")
+                            .with_opt_remediation(
+                                crate::remediation::get(
+                                    "rikitikitavi.credentials.ftp-default-confirmed",
+                                    &[],
+                                ),
+                            ),
                         );
                     }
                 }
 
                 // Telnet: flag cleartext protocol + test default credentials
-                if has_port(23) {
+                if has_port(23) && is_denon_marantz_avr(device) {
+                    findings.push(avr_control_finding(ip));
+                } else if has_port(23) {
                     let login_result = if attempt_login {
                         check_telnet_default_creds(ip, device.vendor.as_deref()).await
                     } else {
@@ -1506,7 +1570,13 @@ impl Scanner for CredentialScanner {
                             .with_ip(ip)
                             .with_port(port)
                             .with_service("HTTP")
-                            .with_cwe("CWE-1393"),
+                            .with_cwe("CWE-1393")
+                            .with_opt_remediation(
+                                crate::remediation::get(
+                                    "rikitikitavi.credentials.http-default-confirmed",
+                                    &[],
+                                ),
+                            ),
                         );
                     }
 
@@ -2387,6 +2457,66 @@ mod tests {
             parse_pasv_response("227 ) x (1,2,3,4,5,6)"),
             Some("1.2.3.4:1286".parse().unwrap())
         );
+    }
+
+    fn device_with(vendor: Option<&str>, subtype: Option<&str>, hostname: Option<&str>) -> Device {
+        let mut d = Device::new("192.168.1.34".parse().unwrap());
+        d.vendor = vendor.map(str::to_owned);
+        d.device_subtype = subtype.map(str::to_owned);
+        d.hostname = hostname.map(str::to_owned);
+        d
+    }
+
+    #[test]
+    fn denon_marantz_avr_identified_by_vendor_subtype_or_hostname() {
+        assert!(is_denon_marantz_avr(&device_with(Some("D&M"), None, None)));
+        assert!(is_denon_marantz_avr(&device_with(
+            Some("Denon"),
+            None,
+            None
+        )));
+        assert!(is_denon_marantz_avr(&device_with(
+            Some("Marantz"),
+            None,
+            None
+        )));
+        assert!(is_denon_marantz_avr(&device_with(
+            None,
+            Some("denonavr/heos"),
+            None
+        )));
+        assert!(is_denon_marantz_avr(&device_with(
+            None,
+            None,
+            Some("Denon-AVR-X1800H")
+        )));
+        assert!(!is_denon_marantz_avr(&device_with(
+            Some("Sound United"),
+            None,
+            None
+        )));
+        assert!(!is_denon_marantz_avr(&device_with(
+            Some("Cisco"),
+            None,
+            Some("router")
+        )));
+        assert!(!is_denon_marantz_avr(&device_with(None, None, None)));
+    }
+
+    #[test]
+    fn avr_control_finding_is_medium_with_denon_remediation() {
+        let f = avr_control_finding("192.168.1.34".parse().unwrap());
+        assert_eq!(
+            f.title,
+            "Denon/Marantz receiver control port open without authentication on 192.168.1.34:23"
+        );
+        assert!(f.title.starts_with(AVR_CONTROL_TITLE));
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(f.affected_port, Some(23));
+        assert!(!f.title.contains("default credentials"));
+        let rem = f.remediation.expect("remediation");
+        assert!(rem.steps.iter().any(|s| s.contains("Off In Standby")));
+        assert!(!rem.steps.iter().any(|s| s.contains("Enable SSH")));
     }
 }
 

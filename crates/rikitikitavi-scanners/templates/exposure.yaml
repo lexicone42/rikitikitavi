@@ -42,3 +42,35 @@ remediation:
   typicalDurationSeconds: 300
   blastRadiusTags: ["network"]
   changeType: "standard"
+---
+id: "rikitikitavi.exposure.no-nat"
+version: "1.0.0"
+summary: "Confirm the gateway firewall blocks unsolicited inbound traffic"
+description: "The gateway holds a public address, so the firewall rather than NAT decides what the internet can reach."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["firewall", "exposure"]
+
+steps:
+  - id: "firewall"
+    kind: "manual.step"
+    params:
+      text: "In the router's settings, confirm the firewall is on and drops inbound connections that are not replies to outbound traffic."
+  - id: "forwards"
+    kind: "manual.step"
+    params:
+      text: "Review port forwards and UPnP mappings and remove any you do not need."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "From outside your network (for example a phone on mobile data), check that services on your LAN are not reachable."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["firewall"]
+  changeType: "standard"

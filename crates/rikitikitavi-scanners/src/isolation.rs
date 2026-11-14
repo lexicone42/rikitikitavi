@@ -163,7 +163,11 @@ impl Scanner for IsolationScanner {
                         ),
                         Severity::Low,
                     )
-                    .with_cwe("CWE-653"),
+                    .with_cwe("CWE-653")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.isolation.inter-vlan-routing",
+                        &[],
+                    )),
                 );
             } else if !arp_ips.is_empty() {
                 findings.push(Finding::new(

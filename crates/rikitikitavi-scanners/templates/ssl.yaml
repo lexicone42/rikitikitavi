@@ -207,3 +207,187 @@ remediation:
   typicalDurationSeconds: 900
   blastRadiusTags: ["tls"]
   changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-expiring"
+version: "1.0.0"
+summary: "Renew the TLS certificate before it expires"
+description: "The certificate expires within 30 days."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "certificate"]
+
+steps:
+  - id: "self-managed"
+    kind: "manual.step"
+    params:
+      text: "If you installed this certificate yourself, renew it (for example with your ACME client) and reload the service."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "If the device generated its own certificate, install pending firmware updates and look for a certificate or HTTPS setting in its admin interface that renews or regenerates it."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan and confirm the new expiry date."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-hostname-mismatch"
+version: "1.0.0"
+summary: "Reach the device by the name on its certificate, or reissue the certificate"
+description: "The certificate does not name the address it was reached on."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "certificate"]
+
+steps:
+  - id: "by-name"
+    kind: "manual.step"
+    params:
+      text: "If the device is reached by IP address on your LAN, use the hostname its certificate names instead, where your router's DNS provides one."
+  - id: "reissue"
+    kind: "manual.step"
+    params:
+      text: "For a service you manage, reissue the certificate with the hostname and address clients use in its Subject Alternative Names."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-issue"
+version: "1.0.0"
+summary: "Inspect and replace the problem certificate"
+description: "The TLS certificate failed validation for a reason this scan did not classify."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "certificate"]
+
+steps:
+  - id: "inspect"
+    kind: "manual.step"
+    params:
+      text: "Inspect the certificate: openssl s_client -connect <ip>:<port> -showcerts."
+  - id: "replace"
+    kind: "manual.step"
+    params:
+      text: "For a service you manage, replace the certificate; for a device, install pending firmware updates."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan to confirm the issue is gone."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.cert-sha1-signature"
+version: "1.0.0"
+summary: "Replace the SHA-1 signed certificate"
+description: "The certificate is signed with SHA-1, which browsers reject."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "certificate"]
+
+steps:
+  - id: "reissue"
+    kind: "manual.step"
+    params:
+      text: "For a service you manage, issue a new certificate signed with SHA-256 or stronger."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "For a device with a built-in certificate, install pending firmware updates; if none replaces it, keep the device's web interface off the internet."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan to confirm the new signature algorithm."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.excessive-validity"
+version: "1.0.0"
+summary: "Use a shorter-lived certificate and renew it automatically"
+description: "The certificate is valid for more than 825 days, so it is unlikely ever to be rotated."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "certificate"]
+
+steps:
+  - id: "self-managed"
+    kind: "manual.step"
+    params:
+      text: "If you installed this certificate yourself, replace it with one valid for 398 days or less and automate renewal."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "If the device generated it, there is usually no setting to change: install firmware updates and keep its admin interface off the internet."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ssl.weak-cipher-suite"
+version: "1.0.0"
+summary: "Prefer ECDHE key exchange with AEAD cipher suites"
+description: "The server negotiated a CBC, SHA-1 or static-RSA cipher suite."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "cipher"]
+
+steps:
+  - id: "self-managed"
+    kind: "manual.step"
+    params:
+      text: "For a server you manage, restrict cipher suites to ECDHE with AES-GCM or ChaCha20-Poly1305 (for example Mozilla's \"intermediate\" TLS configuration)."
+  - id: "device"
+    kind: "manual.step"
+    params:
+      text: "For a device, install pending firmware updates; cipher suites are rarely configurable."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan to confirm the negotiated cipher suite."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["tls"]
+  changeType: "standard"

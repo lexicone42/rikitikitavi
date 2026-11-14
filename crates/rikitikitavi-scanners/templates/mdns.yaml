@@ -1,0 +1,175 @@
+id: "rikitikitavi.mdns.upnp-serial"
+version: "1.0.0"
+summary: "Limit who can read the device's UPnP description"
+description: "The device publishes its serial number in its UPnP description."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["upnp", "disclosure"]
+
+steps:
+  - id: "dlna"
+    kind: "manual.step"
+    params:
+      text: "If the device's settings offer a media-sharing, DLNA or UPnP toggle you do not use, turn it off."
+  - id: "segment"
+    kind: "manual.step"
+    params:
+      text: "Otherwise keep it on a trusted or IoT network segment; the description is readable by anything on the same segment."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["upnp"]
+  changeType: "standard"
+---
+id: "rikitikitavi.mdns.matter-window-open"
+version: "1.0.0"
+summary: "Close the Matter commissioning window once pairing is done"
+description: "The device is advertising an open Matter commissioning window."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["matter", "pairing"]
+
+steps:
+  - id: "finish"
+    kind: "manual.step"
+    params:
+      text: "If you are pairing this device, finish or cancel pairing in the app that started it."
+  - id: "review"
+    kind: "manual.step"
+    params:
+      text: "If you did not open it, review the device's paired controllers: on Apple, Settings > General > Matter Accessories; in Home Assistant, the device's Manage fabrics option. Remove any you do not recognise."
+  - id: "code"
+    kind: "manual.step"
+    params:
+      text: "Keep the setup QR code in a safe place. A printed code does not change, so a factory reset does not invalidate a leaked one."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["matter"]
+  changeType: "standard"
+---
+id: "rikitikitavi.mdns.thread-border-router"
+version: "1.0.0"
+summary: "Keep the Thread border router updated and on the controller's network"
+description: "The border-agent record discloses the Thread network identity to the LAN."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["thread", "disclosure"]
+
+steps:
+  - id: "update"
+    kind: "manual.step"
+    params:
+      text: "Keep the border router's firmware current through its app."
+  - id: "placement"
+    kind: "manual.step"
+    params:
+      text: "Keep Thread border routers on the same network as your controllers (https://www.home-assistant.io/integrations/matter/)."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["thread"]
+  changeType: "standard"
+---
+id: "rikitikitavi.mdns.http-advertised"
+version: "1.0.0"
+summary: "Confirm the advertised web interface requires a login"
+description: "The device advertises a web interface over mDNS."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["http", "mdns"]
+
+steps:
+  - id: "check"
+    kind: "manual.step"
+    params:
+      text: "Open the advertised web address in a browser and check that settings are behind a login."
+  - id: "password"
+    kind: "manual.step"
+    params:
+      text: "If there is no login, set an admin password in the device's app or settings; if none exists, keep the device on an IoT network."
+  - id: "update"
+    kind: "manual.step"
+    params:
+      text: "Install pending firmware updates."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["http"]
+  changeType: "standard"
+---
+id: "rikitikitavi.mdns.file-sharing"
+version: "1.0.0"
+summary: "Review the shares this host advertises"
+description: "The host advertises SMB or AFP file sharing."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["smb", "file-sharing"]
+
+steps:
+  - id: "guest"
+    kind: "manual.step"
+    params:
+      text: "Turn off guest access and require an account for every share."
+  - id: "unused"
+    kind: "manual.step"
+    params:
+      text: "If you do not share files from this host, turn file sharing off (macOS: System Settings > General > Sharing; Windows: Advanced sharing settings)."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["smb"]
+  changeType: "standard"
+---
+id: "rikitikitavi.mdns.homekit"
+version: "1.0.0"
+summary: "Review who can control your HomeKit accessories"
+description: "A HomeKit accessory controls a physical function in the home."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["homekit"]
+
+steps:
+  - id: "people"
+    kind: "manual.step"
+    params:
+      text: "In the Home app, review the people who share your home and remove anyone who should not have access."
+  - id: "update"
+    kind: "manual.step"
+    params:
+      text: "Install firmware updates for the accessory from its manufacturer's app."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["homekit"]
+  changeType: "standard"

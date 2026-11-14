@@ -416,7 +416,7 @@ fn build_mapping_finding(router_ip: IpAddr, entry: &PortMappingEntry) -> Finding
             "https://cwe.mitre.org/data/definitions/284.html",
             "https://www.rapid7.com/blog/post/2013/01/29/security-flaws-in-universal-plug-and-play-unplug-dont-play/",
         ])
-        .with_device_hint(DeviceHint::new().with_device_type(DeviceType::Router))
+        .with_device_hint(DeviceHint::new().with_device_type(DeviceType::Router)).with_opt_remediation(crate::remediation::get("rikitikitavi.upnp_igd.mapping", &[]))
 }
 
 /// Build the informational summary finding for one Internet Gateway Device.

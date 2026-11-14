@@ -391,7 +391,8 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         )
         .with_ip(ip)
         .with_port(port)
-        .with_service(service),
+        .with_service(service)
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.ssh-open", &[])),
 
         9100 | 631 => Finding::new(
             "ports",
@@ -407,7 +408,11 @@ fn classify_port(ip: IpAddr, port: u16, banner: Option<&str>) -> Finding {
         .with_port(port)
         .with_service(service)
         .with_cwe("CWE-284")
-        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",]),
+        .with_references(refs!["https://owasp.org/www-project-internet-of-things/",])
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ports.printer-exposed",
+            &[],
+        )),
 
         _ => Finding::new(
             "ports",
@@ -597,7 +602,11 @@ impl Scanner for PortScanner {
                     )
                     .with_ip(*ip)
                     .with_cwe("CWE-284")
-                    .with_references(refs!["https://attack.mitre.org/techniques/T1046/",]),
+                    .with_references(refs!["https://attack.mitre.org/techniques/T1046/",])
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.ports.many-open",
+                        &[],
+                    )),
                 );
             }
         }

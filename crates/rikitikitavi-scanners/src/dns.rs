@@ -320,21 +320,25 @@ pub fn classify_spf(record: &str) -> Option<Finding> {
                 ),
                 Severity::High,
             )
-            .with_cwe("CWE-284"),
+            .with_cwe("CWE-284")
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.spf-policy", &[])),
         );
     }
 
     // "~all" is softfail.
     if lower.contains("~all") {
-        return Some(Finding::new(
-            "dns",
-            "SPF uses softfail (~all)",
-            &format!(
-                "SPF record uses ~all (softfail) instead of -all (hardfail). \
+        return Some(
+            Finding::new(
+                "dns",
+                "SPF uses softfail (~all)",
+                &format!(
+                    "SPF record uses ~all (softfail) instead of -all (hardfail). \
                  Unauthorized senders may still deliver mail. Record: {record}"
-            ),
-            Severity::Low,
-        ));
+                ),
+                Severity::Low,
+            )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.spf-policy", &[])),
+        );
     }
 
     // "-all" (hardfail).
@@ -355,16 +359,22 @@ pub fn classify_dmarc(record: &str) -> Option<Finding> {
 
     // p=none means monitoring-only — no enforcement
     if lower.contains("p=none") {
-        return Some(Finding::new(
-            "dns",
-            "DMARC policy is none (monitoring only)",
-            &format!(
-                "DMARC record uses p=none, which monitors but does not reject \
+        return Some(
+            Finding::new(
+                "dns",
+                "DMARC policy is none (monitoring only)",
+                &format!(
+                    "DMARC record uses p=none, which monitors but does not reject \
                  spoofed mail. Consider upgrading to p=quarantine or p=reject. \
                  Record: {record}"
-            ),
-            Severity::Low,
-        ));
+                ),
+                Severity::Low,
+            )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.dns.dmarc-policy",
+                &[],
+            )),
+        );
     }
 
     Some(Finding::new(
@@ -412,15 +422,18 @@ async fn check_email_security(nameservers: &[IpAddr], domain: &str, findings: &m
     }
 
     if !has_spf {
-        findings.push(Finding::new(
-            "dns",
-            &format!("No SPF record for {domain}"),
-            &format!(
-                "No SPF TXT record found for {domain}. Without SPF, anyone can \
+        findings.push(
+            Finding::new(
+                "dns",
+                &format!("No SPF record for {domain}"),
+                &format!(
+                    "No SPF TXT record found for {domain}. Without SPF, anyone can \
                  send email appearing to come from this domain."
-            ),
-            Severity::Medium,
-        ));
+                ),
+                Severity::Medium,
+            )
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.spf-policy", &[])),
+        );
     }
 
     // DMARC — TXT record at _dmarc.domain
@@ -436,16 +449,22 @@ async fn check_email_security(nameservers: &[IpAddr], domain: &str, findings: &m
     }
 
     if !has_dmarc {
-        findings.push(Finding::new(
-            "dns",
-            &format!("No DMARC record for {domain}"),
-            &format!(
-                "No DMARC TXT record found at _dmarc.{domain}. Without DMARC, \
+        findings.push(
+            Finding::new(
+                "dns",
+                &format!("No DMARC record for {domain}"),
+                &format!(
+                    "No DMARC TXT record found at _dmarc.{domain}. Without DMARC, \
                  there is no policy to handle SPF/DKIM failures, making email \
                  spoofing easier."
-            ),
-            Severity::Medium,
-        ));
+                ),
+                Severity::Medium,
+            )
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.dns.dmarc-policy",
+                &[],
+            )),
+        );
     }
 
     // DKIM — check common selector "default" at default._domainkey.domain
@@ -547,12 +566,15 @@ impl Scanner for DnsScanner {
                  not be working, or the system uses an alternative resolver \
                  (e.g. systemd-resolved)."
             };
-            findings.push(Finding::new(
-                "dns",
-                "No DNS servers configured",
-                description,
-                Severity::High,
-            ));
+            findings.push(
+                Finding::new(
+                    "dns",
+                    "No DNS servers configured",
+                    description,
+                    Severity::High,
+                )
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.dns.no-servers", &[])),
+            );
             return Ok(findings);
         }
 

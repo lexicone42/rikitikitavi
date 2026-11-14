@@ -1,0 +1,31 @@
+id: "rikitikitavi.rtsp.no-auth"
+version: "1.0.0"
+summary: "Require authentication on the camera's RTSP stream"
+description: "The RTSP stream can be read without credentials."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["rtsp", "camera"]
+
+steps:
+  - id: "auth"
+    kind: "manual.step"
+    params:
+      text: "In the camera's settings, enable RTSP authentication and set a strong password."
+  - id: "unused"
+    kind: "manual.step"
+    params:
+      text: "If nothing records the stream over RTSP, turn RTSP off."
+  - id: "segment"
+    kind: "manual.step"
+    params:
+      text: "Keep cameras on an IoT VLAN, allow RTSP only from your recorder, and never port-forward 554."
+
+remediation:
+  riskLevel: "high"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["rtsp"]
+  changeType: "standard"

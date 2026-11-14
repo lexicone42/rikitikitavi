@@ -226,16 +226,22 @@ impl Scanner for DeviceScanner {
         }
 
         if unidentified > 0 {
-            findings.push(Finding::new(
-                "device",
-                &format!("{unidentified} unidentified device(s) on network"),
-                &format!(
-                    "{unidentified} device(s) have MAC addresses from unknown vendors. \
+            findings.push(
+                Finding::new(
+                    "device",
+                    &format!("{unidentified} unidentified device(s) on network"),
+                    &format!(
+                        "{unidentified} device(s) have MAC addresses from unknown vendors. \
                      These could be less common IoT devices, VMs with randomized MACs, \
                      or devices with privacy-focused MAC randomization."
-                ),
-                Severity::Low,
-            ));
+                    ),
+                    Severity::Low,
+                )
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.device.unidentified",
+                    &[],
+                )),
+            );
         }
 
         findings.push(Finding::new(

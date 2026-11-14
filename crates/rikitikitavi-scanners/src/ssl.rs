@@ -180,7 +180,11 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
         .with_ip(ip)
         .with_port(port)
         .with_service("TLS")
-        .with_cwe("CWE-295");
+        .with_cwe("CWE-295")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.ssl.cert-hostname-mismatch",
+            &[],
+        ));
     }
 
     // Generic certificate issue
@@ -193,6 +197,7 @@ pub fn classify_cert_issue(ip: IpAddr, port: u16, issue: &str) -> Finding {
     .with_ip(ip)
     .with_port(port)
     .with_service("TLS")
+    .with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.cert-issue", &[]))
 }
 
 /// Details extracted from a direct TLS handshake via `rustls`.
@@ -521,6 +526,10 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
                 cert.not_after,
                 cert.key_algorithm,
                 cert.key_bits,
+            ))
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.cert-expired",
+                &[],
             )),
         );
     }
@@ -542,7 +551,11 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-295"),
+            .with_cwe("CWE-295")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.cert-expiring",
+                &[],
+            )),
         );
     }
 
@@ -562,7 +575,11 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("TLS")
-            .with_cwe("CWE-326"),
+            .with_cwe("CWE-326")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.cert-weak-key",
+                &[],
+            )),
         );
     }
 
@@ -583,7 +600,11 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
             .with_port(port)
             .with_service("TLS")
             .with_cwe("CWE-328")
-            .with_references(refs!["https://shattered.io/",]),
+            .with_references(refs!["https://shattered.io/",])
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.ssl.cert-sha1-signature",
+                &[],
+            )),
         );
     }
 
@@ -617,7 +638,7 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
                 .with_cwe("CWE-295")
                 .with_references(refs![
                     "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
-                ]),
+                ]).with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.cert-self-signed", &[])),
         );
     }
 
@@ -649,7 +670,11 @@ pub fn analyze_certificate(ip: IpAddr, port: u16, cert: &CertDetails) -> Vec<Fin
                 .with_cwe("CWE-324")
                 .with_references(refs![
                     "https://cabforum.org/working-groups/server/baseline-requirements/",
-                ]),
+                ])
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.ssl.excessive-validity",
+                    &[],
+                )),
             );
         }
     }
@@ -717,7 +742,7 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_cwe("CWE-327")
             .with_references(refs![
                 "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
-            ]),
+            ]).with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.weak-cipher-suite", &[])),
         );
     }
 
@@ -738,7 +763,7 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_cwe("CWE-328")
             .with_references(refs![
                 "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
-            ]),
+            ]).with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.weak-cipher-suite", &[])),
         );
     }
 
@@ -762,7 +787,7 @@ fn classify_cipher_suite(ip: IpAddr, port: u16, cipher: &str) -> Option<Finding>
             .with_cwe("CWE-326")
             .with_references(refs![
                 "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html",
-            ]),
+            ]).with_opt_remediation(crate::remediation::get("rikitikitavi.ssl.weak-cipher-suite", &[])),
         );
     }
 
@@ -943,7 +968,7 @@ async fn probe_tls(ip: IpAddr, port: u16) -> Vec<Finding> {
                     .with_cwe("CWE-319")
                     .with_references(refs![
                         "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
-                    ]),
+                    ]).with_opt_remediation(crate::remediation::get("rikitikitavi.http_audit.missing-hsts", &[])),
                 );
     }
 
@@ -1268,6 +1293,21 @@ mod tests {
                 .iter()
                 .any(|f| f.title.contains("Expired") && f.severity == Severity::High),
             "expected expired cert finding"
+        );
+        let remediation = |prefix: &str| {
+            findings
+                .iter()
+                .find(|f| f.title.starts_with(prefix))
+                .and_then(|f| f.remediation.as_ref())
+                .map(|r| r.description.as_str())
+        };
+        assert_eq!(
+            remediation("Expired"),
+            Some("Renew the expired TLS certificate")
+        );
+        assert_eq!(
+            remediation("Self-signed"),
+            Some("Replace self-signed certificate with a CA-signed one")
         );
     }
 

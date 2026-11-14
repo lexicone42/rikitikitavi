@@ -46,7 +46,11 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
                 ),
                 Severity::Critical,
             )
-            .with_cwe("CWE-319"),
+            .with_cwe("CWE-319")
+            .with_opt_remediation(rikitikitavi_scanners::remediation::get(
+                "rikitikitavi.wifi.open-network",
+                &[],
+            )),
         );
     } else if security_lower == "wep" {
         findings.push(
@@ -59,7 +63,11 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
                 ),
                 Severity::Critical,
             )
-            .with_cwe("CWE-327"),
+            .with_cwe("CWE-327")
+            .with_opt_remediation(rikitikitavi_scanners::remediation::get(
+                "rikitikitavi.wifi.wep-encryption",
+                &[],
+            )),
         );
     }
 
@@ -115,7 +123,11 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
                     ),
                     Severity::Medium,
                 )
-                .with_cwe("CWE-693"),
+                .with_cwe("CWE-693")
+                .with_opt_remediation(rikitikitavi_scanners::remediation::get(
+                    "rikitikitavi.unifi.pmf",
+                    &[],
+                )),
             );
         }
     }
@@ -125,17 +137,23 @@ pub fn audit_wlan(wlan: &WlanConfig) -> Vec<Finding> {
         .iter()
         .any(|d| ssid_lower.contains(&d.to_lowercase()));
     if is_default {
-        findings.push(Finding::new(
-            "unifi",
-            &format!("Default/common SSID: \"{}\"", wlan.name),
-            &format!(
-                "WLAN \"{}\" uses a default or commonly-seen SSID. While not a direct \
+        findings.push(
+            Finding::new(
+                "unifi",
+                &format!("Default/common SSID: \"{}\"", wlan.name),
+                &format!(
+                    "WLAN \"{}\" uses a default or commonly-seen SSID. While not a direct \
                  vulnerability, default SSIDs reveal the equipment brand and suggest the \
                  network may not have been fully configured.",
-                wlan.name
-            ),
-            Severity::Low,
-        ));
+                    wlan.name
+                ),
+                Severity::Low,
+            )
+            .with_opt_remediation(rikitikitavi_scanners::remediation::get(
+                "rikitikitavi.wifi.default-ssid",
+                &[],
+            )),
+        );
     }
 
     if wlan.is_guest {
@@ -159,14 +177,20 @@ pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     if rules.is_empty() {
-        findings.push(Finding::new(
-            "unifi",
-            "No custom firewall rules configured",
-            "No custom firewall rules are configured on the controller. The default \
+        findings.push(
+            Finding::new(
+                "unifi",
+                "No custom firewall rules configured",
+                "No custom firewall rules are configured on the controller. The default \
              UniFi firewall allows all inter-VLAN traffic. Consider adding rules to \
              restrict traffic between VLANs.",
-            Severity::Medium,
-        ));
+                Severity::Medium,
+            )
+            .with_opt_remediation(rikitikitavi_scanners::remediation::get(
+                "rikitikitavi.unifi.no-firewall-rules",
+                &[],
+            )),
+        );
         return findings;
     }
 

@@ -163,6 +163,10 @@ fn anomaly_to_finding(anomaly: &ArpAnomaly) -> Finding {
                 Severity::Medium,
             )
             .with_cwe("CWE-290")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.arp.spoofing-detected",
+                &[],
+            ))
         }
         ArpAnomaly::BroadcastMac { ip, mac } => Finding::new(
             "arp",
@@ -175,7 +179,11 @@ fn anomaly_to_finding(anomaly: &ArpAnomaly) -> Finding {
             Severity::High,
         )
         .with_ip(*ip)
-        .with_cwe("CWE-290"),
+        .with_cwe("CWE-290")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.arp.spoofing-detected",
+            &[],
+        )),
 
         ArpAnomaly::IncompleteMac { ip } => Finding::new(
             "arp",

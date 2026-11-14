@@ -253,3 +253,99 @@ remediation:
   typicalDurationSeconds: 600
   blastRadiusTags: ["iot"]
   changeType: "standard"
+---
+id: "rikitikitavi.ports.ssh-open"
+version: "1.0.0"
+summary: "Use key-based SSH login and disable SSH where unused"
+description: "SSH is reachable from the network."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ssh", "remote-access"]
+
+steps:
+  - id: "unused"
+    kind: "manual.step"
+    params:
+      text: "If you do not log in to this device over SSH, turn the SSH service off."
+  - id: "keys"
+    kind: "manual.step"
+    params:
+      text: "Otherwise use key-based login and disable password authentication (OpenSSH: PasswordAuthentication no)."
+  - id: "internet"
+    kind: "manual.step"
+    params:
+      text: "Make sure no router port forward or UPnP mapping exposes the SSH port to the internet."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["ssh"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.printer-exposed"
+version: "1.0.0"
+summary: "Set a printer admin password and disable unused print protocols"
+description: "Printer services are reachable from the network."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["printer"]
+
+steps:
+  - id: "password"
+    kind: "manual.step"
+    params:
+      text: "Set an admin password on the printer's embedded web server."
+  - id: "protocols"
+    kind: "manual.step"
+    params:
+      text: "Disable print protocols you do not use (raw 9100, LPD, IPP, SNMPv1/v2c) in its network settings."
+  - id: "update"
+    kind: "manual.step"
+    params:
+      text: "Install the current printer firmware."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["printer"]
+  changeType: "standard"
+---
+id: "rikitikitavi.ports.many-open"
+version: "1.0.0"
+summary: "Turn off services this host does not need"
+description: "Many open ports increase the attack surface."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ports"]
+
+steps:
+  - id: "list"
+    kind: "manual.step"
+    params:
+      text: "List what listens on the host (Linux: ss -tlnp; macOS: lsof -iTCP -sTCP:LISTEN; Windows: netstat -abno)."
+  - id: "disable"
+    kind: "manual.step"
+    params:
+      text: "Stop and disable services you do not use."
+  - id: "firewall"
+    kind: "manual.step"
+    params:
+      text: "Enable the host firewall and allow only the services you need."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["ports"]
+  changeType: "standard"

@@ -142,7 +142,11 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_ip(ip)
             .with_port(port)
             .with_service("SSH")
-            .with_cwe("CWE-327"),
+            .with_cwe("CWE-327")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.weak-ssh-algorithms",
+                &[],
+            )),
         );
     }
 
@@ -170,7 +174,11 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_port(port)
             .with_service("SSH")
             .with_cwe("CWE-327")
-            .with_references(refs!["https://nvd.nist.gov/vuln/detail/CVE-2008-5161"]),
+            .with_references(refs!["https://nvd.nist.gov/vuln/detail/CVE-2008-5161"])
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.weak-ssh-algorithms",
+                &[],
+            )),
         );
     }
 
@@ -196,7 +204,11 @@ pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding
             .with_ip(ip)
             .with_port(port)
             .with_service("SSH")
-            .with_cwe("CWE-328"),
+            .with_cwe("CWE-328")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.weak-ssh-algorithms",
+                &[],
+            )),
         );
     }
 
@@ -296,7 +308,11 @@ pub fn classify_smtp_ehlo(ip: IpAddr, port: u16, info: &SmtpEhloInfo) -> Vec<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("SMTP")
-            .with_cwe("CWE-319"),
+            .with_cwe("CWE-319")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.smtp-no-starttls",
+                &[],
+            )),
         );
     }
 
@@ -316,7 +332,11 @@ pub fn classify_smtp_ehlo(ip: IpAddr, port: u16, info: &SmtpEhloInfo) -> Vec<Fin
             .with_ip(ip)
             .with_port(port)
             .with_service("SMTP")
-            .with_cwe("CWE-284"),
+            .with_cwe("CWE-284")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.services.smtp-no-auth",
+                &[],
+            )),
         );
     }
 
@@ -441,7 +461,8 @@ pub fn classify_ftp_feat(ip: IpAddr, port: u16, info: &FtpFeatInfo) -> Vec<Findi
             .with_ip(ip)
             .with_port(port)
             .with_service("FTP")
-            .with_cwe("CWE-319"),
+            .with_cwe("CWE-319")
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.ports.ftp-open", &[])),
         );
     }
 
@@ -776,7 +797,8 @@ fn check_debian_eol(ip: IpAddr, port: u16, banner: &str, today: &str) -> Option<
             .with_port(port)
             .with_service("SSH")
             .with_confidence(Confidence::Probable)
-            .with_cwe("CWE-1104"),
+            .with_cwe("CWE-1104")
+            .with_opt_remediation(crate::remediation::get("rikitikitavi.services.eol-os", &[])),
         );
     }
 
@@ -803,7 +825,8 @@ fn check_debian_eol(ip: IpAddr, port: u16, banner: &str, today: &str) -> Option<
         .with_port(port)
         .with_service("SSH")
         .with_confidence(Confidence::Probable)
-        .with_cwe("CWE-1104"),
+        .with_cwe("CWE-1104")
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.services.lts-os", &[])),
     )
 }
 
@@ -855,7 +878,8 @@ fn check_ubuntu_eol(ip: IpAddr, port: u16, banner: &str, today: &str) -> Option<
         .with_port(port)
         .with_service("SSH")
         .with_confidence(Confidence::Inferred)
-        .with_cwe("CWE-1104"),
+        .with_cwe("CWE-1104")
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.services.eol-os", &[])),
     )
 }
 
@@ -1456,7 +1480,11 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         )
         .with_ip(ip)
         .with_port(port)
-        .with_service("SSH");
+        .with_service("SSH")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.credentials.banner-disclosure",
+            &[],
+        ));
 
         if let Some(os) = parse_os_from_ssh_banner(banner) {
             finding = finding.with_device_hint(DeviceHint::new().with_os_guess(os));
@@ -1475,7 +1503,11 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
             )
             .with_ip(ip)
             .with_port(port)
-            .with_service("FTP"),
+            .with_service("FTP")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.credentials.banner-disclosure",
+                &[],
+            )),
         );
     }
 
@@ -1970,7 +2002,11 @@ fn check_header_components(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> 
                 .with_service("HTTP")
                 .with_confidence(Confidence::Probable)
                 .with_cwe("CWE-1104")
-                .with_evidence(server),
+                .with_evidence(server)
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.services.outdated-web-server",
+                    &[],
+                )),
             )
         })
         .collect()
@@ -1993,7 +2029,11 @@ fn classify_http_server(ip: IpAddr, port: u16, server: &str) -> Vec<Finding> {
         .with_ip(ip)
         .with_port(port)
         .with_service("HTTP")
-        .with_evidence(server);
+        .with_evidence(server)
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.services.outdated-web-server",
+            &[],
+        ));
 
         if let Some(cwe) = issue.cwe {
             finding = finding.with_cwe(cwe);
@@ -2402,6 +2442,10 @@ mod tests {
         // Use 9.9 (latest) which has no known CVEs
         let finding = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.9").unwrap();
         assert_eq!(finding.severity, Severity::Low);
+        assert_eq!(
+            finding.remediation.map(|r| r.description).as_deref(),
+            Some("Keep the service patched and stop advertising its version")
+        );
     }
 
     #[test]

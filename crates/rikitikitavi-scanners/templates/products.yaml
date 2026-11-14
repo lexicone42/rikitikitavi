@@ -1,0 +1,221 @@
+id: "rikitikitavi.products.dyson-mqtt"
+version: "1.0.0"
+summary: "Keep the Dyson on current firmware and limit who can reach its MQTT port"
+description: "Dyson devices run their own plaintext MQTT broker on 1883 with a cloud-issued per-device credential and no documented TLS or disable option (community-sourced)."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["mqtt", "iot", "dyson", "product"]
+
+match:
+  vendor: ["dyson"]
+  port: [1883]
+
+steps:
+  - id: "explain"
+    kind: "manual.step"
+    params:
+      text: "TLS cannot be turned on and the port cannot be closed: the device runs its own MQTT broker with a per-device password issued by the Dyson cloud (community reverse-engineering, not Dyson documentation: https://gemu2015.github.io/Sonoff-Tasmota/examples/dyson_tp02/)."
+  - id: "firmware"
+    kind: "manual.step"
+    params:
+      text: "Keep the firmware current through the Dyson app."
+  - id: "segment"
+    kind: "manual.step"
+    params:
+      text: "Put the device on an IoT VLAN."
+  - id: "restrict"
+    kind: "manual.step"
+    params:
+      text: "Allow TCP 1883 to {{ ip }} only from the controller that uses it (for example Home Assistant)."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["iot"]
+  changeType: "standard"
+---
+id: "rikitikitavi.products.denon-avr-telnet"
+version: "1.0.0"
+summary: "Limit the receiver's network control port; it has no login and no SSH"
+description: "Port 23 on Denon and Marantz receivers is the documented network control protocol, with no authentication and no SSH alternative."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["telnet", "avr", "denon", "marantz", "product"]
+
+match:
+  vendor: ["denon", "marantz", "d&m"]
+  port: [23]
+
+steps:
+  - id: "explain"
+    kind: "manual.step"
+    params:
+      text: "Port 23 is the receiver's documented control protocol, not a login shell. The protocol has no authentication and the receiver has no SSH, so \"use SSH instead\" does not apply (https://assets.denon.com/documentmaster/uk/avr1713_avr1613_protocol_v860.pdf)."
+  - id: "standby"
+    kind: "manual.step"
+    params:
+      text: "If you do not need the app, HEOS or web control while the receiver is in standby: Setup > Network > Network Control > Off In Standby (\"IP Control\" on older models). The default, Always On, is what web control and the HEOS/AVR Remote apps need (https://manuals.denon.com/AVRX3800H/NA/EN/HJWMSYmehwmguq.php)."
+  - id: "segment"
+    kind: "manual.step"
+    params:
+      text: "Otherwise put the receiver on an IoT VLAN and allow TCP 23, 8080 and 60006 to it only from your controller. The receiver accepts a single control connection (https://www.home-assistant.io/integrations/denonavr/)."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["iot", "media"]
+  changeType: "standard"
+---
+id: "rikitikitavi.products.hue-bridge-self-signed"
+version: "1.0.0"
+summary: "Update the Hue Bridge firmware"
+description: "Hue Bridge firmware 1971060010 replaced the self-signed certificates, so a self-signed certificate means the firmware is older."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["tls", "hue", "firmware", "product"]
+
+match:
+  finding: ["Self-signed certificate"]
+  vendor: ["signify", "philips lighting"]
+
+steps:
+  - id: "explain"
+    kind: "manual.step"
+    params:
+      text: "Bridge firmware 1971060010 (2025-05-22) replaced the self-signed certificates, so this bridge is running older firmware (https://www.philips-hue.com/en-us/support/release-notes/bridge)."
+  - id: "auto-update"
+    kind: "manual.step"
+    params:
+      text: "In the Hue app, turn on Settings > Software update > Automatic update and install any pending bridge update."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan and confirm the self-signed certificate finding on {{ ip }} is gone."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: true
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["iot", "lighting"]
+  changeType: "standard"
+---
+id: "rikitikitavi.products.unifi-console-ssh"
+version: "1.0.0"
+summary: "Turn off UniFi console SSH if you do not use it"
+description: "SSH is off by default on UniFi consoles, so an open port 22 means it was enabled."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ssh", "unifi", "gateway", "product"]
+
+match:
+  finding: ["SSH open"]
+  vendor: ["ubiquiti"]
+  deviceType: ["router"]
+
+steps:
+  - id: "explain"
+    kind: "manual.step"
+    params:
+      text: "SSH is off by default on UniFi consoles, so an open port 22 means someone enabled it (https://help.ui.com/hc/en-us/articles/204909374-Connecting-to-UniFi-with-Debug-Tools-SSH)."
+  - id: "disable"
+    kind: "manual.step"
+    params:
+      text: "If you do not use it: Settings > Control Plane > Console > SSH, and turn it off."
+  - id: "updates"
+    kind: "manual.step"
+    params:
+      text: "Turn on auto-update and update UniFi OS: Settings > Control Plane > Updates (https://help.ui.com/hc/en-us/articles/7605005245975-UniFi-Updates)."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["remote-access", "gateway"]
+  changeType: "standard"
+---
+id: "rikitikitavi.products.unifi-console-openssh"
+version: "1.0.0"
+summary: "Update UniFi OS; the console's SSH server and OS ship with it"
+description: "On a UniFi console the SSH server and base OS are updated through UniFi OS, not a package manager."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ssh", "unifi", "gateway", "eol", "product"]
+
+match:
+  finding: ["Vulnerable OpenSSH", "OpenSSH with known CVEs", "End-of-life OS", "OS on security-team support only"]
+  vendor: ["ubiquiti"]
+  deviceType: ["router"]
+
+steps:
+  - id: "updates"
+    kind: "manual.step"
+    params:
+      text: "Turn on auto-update and update UniFi OS: Settings > Control Plane > Updates (https://help.ui.com/hc/en-us/articles/7605005245975-UniFi-Updates)."
+  - id: "disable-ssh"
+    kind: "manual.step"
+    params:
+      text: "If you do not use SSH, turn it off: Settings > Control Plane > Console > SSH. It is off by default on consoles (https://help.ui.com/hc/en-us/articles/204909374-Connecting-to-UniFi-with-Debug-Tools-SSH)."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Re-run the scan after updating and check whether the reported SSH or OS version changed."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: true
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["gateway"]
+  changeType: "standard"
+---
+id: "rikitikitavi.products.gateway-ssh-open"
+version: "1.0.0"
+summary: "Confirm you enabled SSH on the router, then limit or disable it"
+description: "Consumer routers ship with SSH off, so SSH on the gateway is either a deliberate setting or a sign of tampering."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["ssh", "gateway"]
+
+match:
+  finding: ["SSH open"]
+  deviceType: ["router"]
+
+steps:
+  - id: "check-enabled"
+    kind: "manual.step"
+    params:
+      text: "In the router's administration UI, check whether SSH is enabled and on port {{ port }}."
+  - id: "check-keys"
+    kind: "manual.step"
+    params:
+      text: "Check the authorized-key list in the same UI. A key you do not recognise means the router is compromised: factory reset and reconfigure by hand rather than restoring a backup."
+  - id: "limit"
+    kind: "manual.step"
+    params:
+      text: "If SSH is deliberate, turn off remote/WAN administration, use key-based login, and disable SSH when you are not using it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["remote-access", "gateway"]
+  changeType: "standard"

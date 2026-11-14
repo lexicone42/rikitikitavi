@@ -273,26 +273,15 @@ async fn check_mqtt_plain(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
                 .with_references(refs![
                     "https://cwe.mitre.org/data/definitions/306.html",
                     "https://owasp.org/www-project-internet-of-things/",
-                ]),
+                ])
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.mqtt.anonymous-access",
+                    &[],
+                )),
             );
         }
-        ConnackVerdict::NotAuthorized | ConnackVerdict::BadCredentials => {
-            findings.push(
-                Finding::new(
-                    "mqtt",
-                    &format!("MQTT broker requires authentication on {ip}:{port}"),
-                    &format!(
-                        "The MQTT broker at {ip}:{port} rejected an anonymous CONNECT \
-                         and requires credentials. This is the correct posture."
-                    ),
-                    Severity::Info,
-                )
-                .with_confidence(rikitikitavi_core::Confidence::Confirmed)
-                .with_ip(*ip)
-                .with_port(port)
-                .with_service("MQTT"),
-            );
-        }
+        ConnackVerdict::BadCredentials => findings.push(auth_required_finding(*ip, port, 0x04)),
+        ConnackVerdict::NotAuthorized => findings.push(auth_required_finding(*ip, port, 0x05)),
         // Non-auth refusal codes do not demonstrate anonymous access; stay silent.
         ConnackVerdict::Refused(code) => {
             tracing::debug!(
@@ -307,6 +296,30 @@ async fn check_mqtt_plain(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
             tracing::debug!(ip = %ip, port, "MQTT broker returned a non-CONNACK response");
         }
     }
+}
+
+/// Title prefix of the Confirmed auth-enforced verdict.
+pub const AUTH_REQUIRED_TITLE: &str = "MQTT broker requires authentication";
+
+/// Broker answered an anonymous CONNECT with CONNACK `code` (0x04 or 0x05).
+fn auth_required_finding(ip: IpAddr, port: u16, code: u8) -> Finding {
+    Finding::new(
+        "mqtt",
+        &format!("{AUTH_REQUIRED_TITLE} on {ip}:{port}"),
+        &format!(
+            "The MQTT broker at {ip}:{port} rejected an anonymous CONNECT \
+             and requires credentials. This is the correct posture."
+        ),
+        Severity::Info,
+    )
+    .with_confidence(rikitikitavi_core::Confidence::Confirmed)
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("MQTT")
+    .with_evidence(format!(
+        "CONNACK return code {code:#04x} ({})",
+        connack_reason(code)
+    ))
 }
 
 /// Emit an informational finding for an MQTT-over-TLS broker (8883).
@@ -524,5 +537,26 @@ mod tests {
             prop_assert_eq!(decoded, value);
             prop_assert!(out.len() <= 4);
         }
+    }
+
+    #[test]
+    fn auth_required_finding_is_confirmed_with_connack_evidence() {
+        let f = auth_required_finding("192.168.2.133".parse().unwrap(), 1883, 0x05);
+        assert_eq!(
+            f.title,
+            "MQTT broker requires authentication on 192.168.2.133:1883"
+        );
+        assert!(f.title.starts_with(AUTH_REQUIRED_TITLE));
+        assert_eq!(f.severity, Severity::Info);
+        assert_eq!(f.confidence, rikitikitavi_core::Confidence::Confirmed);
+        assert_eq!(
+            f.evidence.as_deref(),
+            Some("CONNACK return code 0x05 (not authorized)")
+        );
+        let f = auth_required_finding("192.168.2.133".parse().unwrap(), 1883, 0x04);
+        assert_eq!(
+            f.evidence.as_deref(),
+            Some("CONNACK return code 0x04 (bad username or password)")
+        );
     }
 }

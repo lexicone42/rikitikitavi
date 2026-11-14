@@ -415,7 +415,8 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
         .with_references(refs![
             "https://cwe.mitre.org/data/definitions/306.html",
             "https://owasp.org/www-project-internet-of-things/",
-        ]);
+        ])
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.rtsp.no-auth", &[]));
         if !cves.is_empty() {
             finding = finding.with_cve_ids(cves);
         }

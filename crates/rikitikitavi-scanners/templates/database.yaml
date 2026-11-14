@@ -231,3 +231,91 @@ remediation:
   typicalDurationSeconds: 600
   blastRadiusTags: ["database"]
   changeType: "standard"
+---
+id: "rikitikitavi.database.redis-eol"
+version: "1.0.0"
+summary: "Upgrade Redis to a supported release"
+description: "This Redis version no longer receives security patches."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["redis", "eol"]
+
+steps:
+  - id: "upgrade"
+    kind: "manual.step"
+    params:
+      text: "Upgrade Redis to a supported release (7.0 or later) through your package manager or container image."
+  - id: "auth"
+    kind: "manual.step"
+    params:
+      text: "Keep requirepass or ACLs enabled and bind Redis to the interfaces that need it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["redis"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.mysql-no-tls"
+version: "1.0.0"
+summary: "Enable TLS on the MySQL server"
+description: "The MySQL server does not advertise TLS, so credentials cross the network in cleartext."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["mysql", "tls"]
+
+steps:
+  - id: "enable"
+    kind: "manual.step"
+    params:
+      text: "Configure ssl_cert and ssl_key on the server and restart it."
+  - id: "require"
+    kind: "manual.step"
+    params:
+      text: "Set require_secure_transport = ON so clients cannot fall back to cleartext."
+  - id: "restrict"
+    kind: "manual.step"
+    params:
+      text: "Restrict port 3306 to the hosts that need it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["mysql"]
+  changeType: "standard"
+---
+id: "rikitikitavi.database.mysql-weak-auth"
+version: "1.0.0"
+summary: "Move accounts off mysql_old_password"
+description: "Accounts use the pre-4.1 password hash, which is weak against offline cracking."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["mysql", "auth"]
+
+steps:
+  - id: "migrate"
+    kind: "manual.step"
+    params:
+      text: "For each account: ALTER USER 'name'@'host' IDENTIFIED WITH caching_sha2_password BY '<new password>'; (mysql_native_password on older servers)."
+  - id: "upgrade"
+    kind: "manual.step"
+    params:
+      text: "Upgrade the server if it still offers the old plugin; current releases have removed it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["mysql"]
+  changeType: "standard"

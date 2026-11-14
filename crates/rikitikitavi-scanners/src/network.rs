@@ -59,12 +59,18 @@ impl Scanner for NetworkScanner {
                 );
             }
             None => {
-                findings.push(Finding::new(
-                    "network",
-                    "No default gateway detected",
-                    "Could not determine the default gateway. Network scanning may be limited.",
-                    Severity::Medium,
-                ));
+                findings.push(
+                    Finding::new(
+                        "network",
+                        "No default gateway detected",
+                        "Could not determine the default gateway. Network scanning may be limited.",
+                        Severity::Medium,
+                    )
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.network.no-gateway",
+                        &[],
+                    )),
+                );
             }
         }
 
@@ -118,7 +124,11 @@ impl Scanner for NetworkScanner {
                     Severity::Low,
                 )
                 .with_cwe("CWE-653")
-                .with_references(refs!["https://cwe.mitre.org/data/definitions/1008.html",]),
+                .with_references(refs!["https://cwe.mitre.org/data/definitions/1008.html",])
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.isolation.large-flat-network",
+                    &[],
+                )),
             );
         }
 

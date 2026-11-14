@@ -182,7 +182,7 @@ fn detect_weak_encryption(beacons: &HashMap<MacAddress, BeaconFrame>, findings: 
                         Severity::Critical,
                     )
                     .with_mac(MacAddr::new(beacon.bssid))
-                    .with_cwe("CWE-319"),
+                    .with_cwe("CWE-319").with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.open-network", &[])),
                 );
             }
             EncryptionType::Wep => {
@@ -198,7 +198,11 @@ fn detect_weak_encryption(beacons: &HashMap<MacAddress, BeaconFrame>, findings: 
                         Severity::High,
                     )
                     .with_mac(MacAddr::new(beacon.bssid))
-                    .with_cwe("CWE-326"),
+                    .with_cwe("CWE-326")
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.wifi.wep-encryption",
+                        &[],
+                    )),
                 );
             }
             _ => {}
@@ -236,7 +240,11 @@ fn detect_deauth_flood(
                 )
                 .with_mac(MacAddr::new(*source))
                 .with_cwe("CWE-400")
-                .with_evidence(format!("{count} deauth/disassoc frames from single source")),
+                .with_evidence(format!("{count} deauth/disassoc frames from single source"))
+                .with_opt_remediation(crate::remediation::get(
+                    "rikitikitavi.wifi.deauth-flood",
+                    &[],
+                )),
             );
         }
     }
@@ -275,7 +283,8 @@ fn detect_rogue_aps<S: ::std::hash::BuildHasher>(
                 .with_evidence(format!(
                     "SSID \"{home_ssid}\" from unknown BSSID {}",
                     wifi_frames::format_mac(&beacon.bssid),
-                )),
+                ))
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.rogue-ap", &[])),
             );
         }
     }
@@ -326,7 +335,7 @@ fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Findi
                 ),
                 Severity::Medium,
             )
-            .with_cwe("CWE-200"),
+            .with_cwe("CWE-200").with_opt_remediation(crate::remediation::get("rikitikitavi.wifi.directed-probes", &[])),
         );
     }
 
@@ -358,7 +367,11 @@ fn detect_device_tracking(probes: &[ProbeRequestFrame], findings: &mut Vec<Findi
                 ),
                 Severity::Low,
             )
-            .with_cwe("CWE-200"),
+            .with_cwe("CWE-200")
+            .with_opt_remediation(crate::remediation::get(
+                "rikitikitavi.wifi.mac-randomization",
+                &[],
+            )),
         );
     }
 }

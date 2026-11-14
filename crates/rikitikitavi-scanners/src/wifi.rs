@@ -188,17 +188,23 @@ impl Scanner for WifiScanner {
             }
 
             if network.hidden {
-                findings.push(Finding::new(
-                    "wifi",
-                    &format!("Hidden network detected (BSSID: {})", network.bssid),
-                    &format!(
-                        "A hidden WiFi network (BSSID: {}) was detected. Hiding an SSID \
+                findings.push(
+                    Finding::new(
+                        "wifi",
+                        &format!("Hidden network detected (BSSID: {})", network.bssid),
+                        &format!(
+                            "A hidden WiFi network (BSSID: {}) was detected. Hiding an SSID \
                          provides no real security benefit and can actually make clients \
                          more vulnerable (they broadcast probe requests for the hidden SSID).",
-                        network.bssid
-                    ),
-                    Severity::Low,
-                ));
+                            network.bssid
+                        ),
+                        Severity::Low,
+                    )
+                    .with_opt_remediation(crate::remediation::get(
+                        "rikitikitavi.wifi.hidden-ssid",
+                        &[],
+                    )),
+                );
             }
         }
 

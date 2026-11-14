@@ -175,7 +175,8 @@ impl Scanner for ExposureScanner {
                     ),
                     Severity::Medium,
                 )
-                .with_cwe("CWE-284"),
+                .with_cwe("CWE-284")
+                .with_opt_remediation(crate::remediation::get("rikitikitavi.exposure.no-nat", &[])),
             );
         }
 

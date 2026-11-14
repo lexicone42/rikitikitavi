@@ -1,0 +1,55 @@
+id: "rikitikitavi.unifi.pmf"
+version: "1.0.0"
+summary: "Set Protected Management Frames to optional or required"
+description: "Without PMF, clients can be forcibly disconnected with forged management frames."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["wifi", "unifi"]
+
+steps:
+  - id: "pmf"
+    kind: "manual.step"
+    params:
+      text: "In the WLAN's advanced security settings, set PMF to Optional (or Required where every client supports it)."
+  - id: "verify"
+    kind: "manual.step"
+    params:
+      text: "Reconnect a few clients and confirm they still join."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["wifi"]
+  changeType: "standard"
+---
+id: "rikitikitavi.unifi.no-firewall-rules"
+version: "1.0.0"
+summary: "Add rules that isolate IoT and guest networks"
+description: "No custom firewall rules are configured."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["firewall", "unifi"]
+
+steps:
+  - id: "isolate"
+    kind: "manual.step"
+    params:
+      text: "Isolate IoT and guest networks from the trusted network (https://help.ui.com/hc/en-us/articles/18965560820247-Implementing-Network-and-Client-Isolation-in-UniFi)."
+  - id: "allow"
+    kind: "manual.step"
+    params:
+      text: "Allow only the specific flows your controllers need, such as Home Assistant to IoT devices."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 1800
+  blastRadiusTags: ["firewall"]
+  changeType: "standard"

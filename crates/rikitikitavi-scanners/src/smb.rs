@@ -555,7 +555,10 @@ impl Scanner for SmbScanner {
                             )
                             .with_ip(ip)
                             .with_port(445)
-                            .with_service("unknown"),
+                            .with_service("unknown")
+                            .with_opt_remediation(
+                                crate::remediation::get("rikitikitavi.smb.unrecognized-445", &[]),
+                            ),
                         );
                     }
                 }

@@ -1,0 +1,31 @@
+id: "rikitikitavi.upnp_igd.mapping"
+version: "1.0.0"
+summary: "Review and remove the UPnP port mapping"
+description: "A UPnP port forward is active on the router."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["upnp", "router"]
+
+steps:
+  - id: "identify"
+    kind: "manual.step"
+    params:
+      text: "Identify the internal host the mapping points to and the application that created it."
+  - id: "remove"
+    kind: "manual.step"
+    params:
+      text: "Remove the mapping on the router's UPnP or port-forwarding page if you do not need it."
+  - id: "disable"
+    kind: "manual.step"
+    params:
+      text: "Keep UPnP off unless a game or application you use needs it."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["upnp"]
+  changeType: "standard"

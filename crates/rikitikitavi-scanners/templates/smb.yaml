@@ -106,3 +106,31 @@ remediation:
   typicalDurationSeconds: 300
   blastRadiusTags: ["smb"]
   changeType: "standard"
+---
+id: "rikitikitavi.smb.unrecognized-445"
+version: "1.0.0"
+summary: "Identify the service on port 445"
+description: "Port 445 answered with a protocol that is not SMB."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["smb"]
+
+steps:
+  - id: "identify"
+    kind: "manual.step"
+    params:
+      text: "On the host, find what listens on 445 (Linux: ss -tlnp | grep :445; Windows: netstat -abno | findstr :445)."
+  - id: "disable"
+    kind: "manual.step"
+    params:
+      text: "If it is not a service you expect, stop it and investigate how it was installed."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["smb"]
+  changeType: "standard"

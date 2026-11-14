@@ -1,0 +1,31 @@
+id: "rikitikitavi.device.unidentified"
+version: "1.0.0"
+summary: "Account for each unidentified device"
+description: "Some devices' MAC addresses match no known vendor."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["inventory"]
+
+steps:
+  - id: "compare"
+    kind: "manual.step"
+    params:
+      text: "Compare the unidentified addresses with your router's client list and name the ones you recognise."
+  - id: "private-mac"
+    kind: "manual.step"
+    params:
+      text: "Phones, tablets and laptops often use private (randomized) MAC addresses; check their Wi-Fi settings to match them."
+  - id: "unknown"
+    kind: "manual.step"
+    params:
+      text: "If a device remains unknown, block it in the router and change the Wi-Fi passphrase."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["inventory"]
+  changeType: "standard"

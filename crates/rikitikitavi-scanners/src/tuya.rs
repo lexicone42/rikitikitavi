@@ -507,6 +507,7 @@ fn opaque_finding(ip: IpAddr, observation: &Observation, magic: Magic) -> Findin
             .with_device_type(DeviceType::IoT),
     )
     .with_references(tuya_references(None))
+    .with_remediation(segment_remediation())
 }
 
 /// Finding for an open TCP 6668. `corroborated` is true when the same address

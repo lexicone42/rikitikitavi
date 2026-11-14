@@ -1,0 +1,63 @@
+id: "rikitikitavi.network.no-gateway"
+version: "1.0.0"
+summary: "Restore the default gateway"
+description: "The host has an address but no default gateway."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["network", "dhcp"]
+
+steps:
+  - id: "renew"
+    kind: "manual.step"
+    params:
+      text: "Renew the DHCP lease (or reconnect the interface)."
+  - id: "router"
+    kind: "manual.step"
+    params:
+      text: "Check that the router's DHCP server is enabled and advertises a gateway."
+  - id: "static"
+    kind: "manual.step"
+    params:
+      text: "If the address is static, add the router's address as the default gateway."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["network"]
+  changeType: "standard"
+---
+id: "rikitikitavi.network.apipa"
+version: "1.0.0"
+summary: "Restore DHCP on this network"
+description: "A 169.254.x.x address means DHCP did not answer."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["network", "dhcp"]
+
+steps:
+  - id: "cable"
+    kind: "manual.step"
+    params:
+      text: "Check the cable or Wi-Fi association, then renew the DHCP lease."
+  - id: "router"
+    kind: "manual.step"
+    params:
+      text: "Check that the router's DHCP server is running and its address pool is not exhausted."
+  - id: "rogue"
+    kind: "manual.step"
+    params:
+      text: "If several hosts are affected, look for a second router or access point acting as a DHCP server."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 600
+  blastRadiusTags: ["network"]
+  changeType: "standard"

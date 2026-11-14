@@ -102,3 +102,91 @@ remediation:
   typicalDurationSeconds: 300
   blastRadiusTags: ["dns"]
   changeType: "standard"
+---
+id: "rikitikitavi.dns.spf-policy"
+version: "1.0.0"
+summary: "Publish a strict SPF record for the domain"
+description: "The domain's SPF record is missing or does not reject unauthorised senders."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["dns", "email"]
+
+steps:
+  - id: "publish"
+    kind: "manual.step"
+    params:
+      text: "At your DNS host, publish one TXT record starting v=spf1 that lists only the services that send mail for the domain."
+  - id: "hardfail"
+    kind: "manual.step"
+    params:
+      text: "End the record with -all (or ~all while testing); never +all."
+  - id: "no-mail"
+    kind: "manual.step"
+    params:
+      text: "If the domain sends no mail, publish v=spf1 -all."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["dns"]
+  changeType: "standard"
+---
+id: "rikitikitavi.dns.dmarc-policy"
+version: "1.0.0"
+summary: "Publish a DMARC policy that rejects spoofed mail"
+description: "The domain has no DMARC record, or its policy only monitors."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["dns", "email"]
+
+steps:
+  - id: "publish"
+    kind: "manual.step"
+    params:
+      text: "At your DNS host, publish a TXT record at _dmarc.<domain>, for example v=DMARC1; p=none; rua=mailto:<you>."
+  - id: "enforce"
+    kind: "manual.step"
+    params:
+      text: "After reviewing the reports, raise the policy to p=quarantine and then p=reject."
+
+remediation:
+  riskLevel: "low"
+  requiresReboot: false
+  typicalDurationSeconds: 900
+  blastRadiusTags: ["dns"]
+  changeType: "standard"
+---
+id: "rikitikitavi.dns.no-servers"
+version: "1.0.0"
+summary: "Restore DNS server configuration on this host"
+description: "No DNS servers are configured on the scanning host."
+
+metadata:
+  owner: "rikitikitavi"
+  visibility: "public"
+  maturity: "beta"
+  tags: ["dns", "network"]
+
+steps:
+  - id: "dhcp"
+    kind: "manual.step"
+    params:
+      text: "Renew the DHCP lease and check that the router hands out DNS servers."
+  - id: "resolver"
+    kind: "manual.step"
+    params:
+      text: "If the host uses systemd-resolved or another local resolver, confirm it is running and has upstream servers."
+
+remediation:
+  riskLevel: "medium"
+  requiresReboot: false
+  typicalDurationSeconds: 300
+  blastRadiusTags: ["dns"]
+  changeType: "standard"

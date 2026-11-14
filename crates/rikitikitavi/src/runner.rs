@@ -666,6 +666,7 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     // Added after dedup so the Medium does not evict the rsync inventory finding.
     all_findings.extend(correlated);
+    apply_product_remediation(&mut all_findings, &ctx.discovered_devices, ctx.gateway);
 
     // KEV before scoring.
     let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
@@ -778,7 +779,8 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     }
 
     let mut result: Vec<Finding> = unkeyed;
-    for (_key, scanner_groups) in by_port {
+    for (_key, mut scanner_groups) in by_port {
+        apply_port_verdicts(&mut scanner_groups);
         let mut groups = scanner_groups.into_iter();
         // A `by_port` entry exists only because a group was pushed into it.
         let Some(mut winner) = groups.next() else {
@@ -794,6 +796,78 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
 
     result.sort_by_key(|f| std::cmp::Reverse(f.severity));
     result
+}
+
+/// Verdicts from deeper scanners on one (ip, port) that override the `ports` group:
+/// a Confirmed MQTT auth-enforced result caps `ports` findings at Low and records it;
+/// an identified Denon/Marantz receiver's control-port finding drops the `ports` group.
+fn apply_port_verdicts(groups: &mut Vec<(String, Vec<Finding>)>) {
+    use rikitikitavi_core::{Confidence, Severity};
+    use rikitikitavi_scanners::{credentials, mqtt};
+
+    let deeper: Vec<&Finding> = groups
+        .iter()
+        .filter(|(scanner, _)| scanner != "ports")
+        .flat_map(|(_, group)| group)
+        .collect();
+    let avr_control = deeper
+        .iter()
+        .any(|f| f.scanner == "credentials" && f.title.starts_with(credentials::AVR_CONTROL_TITLE));
+    let mqtt_auth_evidence = deeper
+        .iter()
+        .find(|f| {
+            f.scanner == "mqtt"
+                && f.confidence == Confidence::Confirmed
+                && f.title.starts_with(mqtt::AUTH_REQUIRED_TITLE)
+        })
+        .map(|f| f.evidence.clone());
+
+    if avr_control {
+        groups.retain(|(scanner, _)| scanner != "ports");
+    } else if let Some(evidence) = mqtt_auth_evidence {
+        for (_, group) in groups.iter_mut().filter(|(scanner, _)| scanner == "ports") {
+            for f in group {
+                f.severity = f.severity.min(Severity::Low);
+                f.confidence = Confidence::Confirmed;
+                f.description.push_str(
+                    " The broker rejected an anonymous CONNECT, so authentication is \
+                     enforced; credentials and messages still cross the network in cleartext.",
+                );
+                if f.evidence.is_none() {
+                    f.evidence.clone_from(&evidence);
+                }
+            }
+        }
+    }
+}
+
+/// Replace each finding's remediation with `remediation::resolve` against the
+/// device at its IP. Per IP a device with a vendor is preferred; the gateway
+/// resolves as a `Router`.
+fn apply_product_remediation(
+    findings: &mut [Finding],
+    devices: &[Device],
+    gateway: Option<IpAddr>,
+) {
+    use std::collections::HashMap;
+
+    let mut by_ip: HashMap<IpAddr, Device> = HashMap::new();
+    for device in devices {
+        let keep = by_ip
+            .get(&device.ip)
+            .is_some_and(|d| d.vendor.is_some() || device.vendor.is_none());
+        if !keep {
+            by_ip.insert(device.ip, device.clone());
+        }
+    }
+    if let Some(gw) = gateway.and_then(|ip| by_ip.get_mut(&ip)) {
+        gw.device_type = DeviceType::Router;
+    }
+    for finding in findings {
+        if let Some(device) = finding.affected_ip.and_then(|ip| by_ip.get(&ip)) {
+            finding.remediation = rikitikitavi_scanners::remediation::resolve(finding, device);
+        }
+    }
 }
 
 /// Rank one scanner's findings for an (ip, port): highest severity first, then
@@ -1722,6 +1796,130 @@ mod tests {
         let result = deduplicate_findings(vec![f1, f2]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].scanner, "credentials");
+    }
+
+    fn mqtt_ports_finding(ip_addr: IpAddr) -> Finding {
+        Finding::new(
+            "ports",
+            &format!("MQTT (unencrypted) open on {ip_addr}:1883"),
+            "MQTT without TLS (port 1883) transmits IoT messages in cleartext.",
+            Severity::Medium,
+        )
+        .with_ip(ip_addr)
+        .with_port(1883)
+        .with_service("MQTT")
+        .with_cwe("CWE-319")
+    }
+
+    fn mqtt_auth_finding(ip_addr: IpAddr, confidence: rikitikitavi_core::Confidence) -> Finding {
+        Finding::new(
+            "mqtt",
+            &format!("MQTT broker requires authentication on {ip_addr}:1883"),
+            "rejected",
+            Severity::Info,
+        )
+        .with_confidence(confidence)
+        .with_ip(ip_addr)
+        .with_port(1883)
+        .with_evidence("CONNACK return code 0x05 (not authorized)")
+    }
+
+    #[test]
+    fn dedup_mqtt_auth_verdict_downgrades_ports_finding() {
+        let addr = ip("192.168.2.133");
+        let before = mqtt_ports_finding(addr);
+        let fingerprint = before.fingerprint();
+        let result = deduplicate_findings(vec![
+            before,
+            mqtt_auth_finding(addr, rikitikitavi_core::Confidence::Confirmed),
+        ]);
+        assert_eq!(result.len(), 1);
+        let f = &result[0];
+        assert_eq!(f.scanner, "ports");
+        assert_eq!(f.fingerprint(), fingerprint);
+        assert_eq!(f.severity, Severity::Low);
+        assert_eq!(f.confidence, rikitikitavi_core::Confidence::Confirmed);
+        assert!(f.description.contains("authentication is enforced"));
+        assert_eq!(
+            f.evidence.as_deref(),
+            Some("CONNACK return code 0x05 (not authorized)")
+        );
+    }
+
+    #[test]
+    fn dedup_unconfirmed_mqtt_verdict_leaves_ports_finding() {
+        let addr = ip("192.168.2.133");
+        let result = deduplicate_findings(vec![
+            mqtt_ports_finding(addr),
+            mqtt_auth_finding(addr, rikitikitavi_core::Confidence::Probable),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "ports");
+        assert_eq!(result[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn dedup_avr_control_finding_replaces_ports_telnet() {
+        let addr = ip("192.168.1.34");
+        let telnet = basic_finding("ports", Severity::High, addr, 23)
+            .with_cwe("CWE-319")
+            .with_evidence("banner");
+        let avr = Finding::new(
+            "credentials",
+            &format!(
+                "{} on {addr}:23",
+                rikitikitavi_scanners::credentials::AVR_CONTROL_TITLE
+            ),
+            "control protocol",
+            Severity::Medium,
+        )
+        .with_ip(addr)
+        .with_port(23);
+        let result = deduplicate_findings(vec![telnet, avr]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "credentials");
+        assert_eq!(result[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn product_remediation_resolves_against_device_identity() {
+        let dyson_ip = ip("192.168.2.133");
+        let other_ip = ip("192.168.2.50");
+        let base =
+            rikitikitavi_scanners::remediation::get("rikitikitavi.ports.mqtt-unencrypted", &[]);
+        let mut findings = vec![
+            mqtt_ports_finding(dyson_ip).with_opt_remediation(base.clone()),
+            mqtt_ports_finding(other_ip).with_opt_remediation(base.clone()),
+        ];
+        let mut devices = vec![
+            Device::new(dyson_ip),
+            Device::new(dyson_ip),
+            Device::new(other_ip),
+        ];
+        devices[1].vendor = Some("Dyson".to_owned());
+        apply_product_remediation(&mut findings, &devices, None);
+        let dyson = findings[0].remediation.as_ref().unwrap();
+        assert!(dyson.description.contains("Dyson"));
+        assert!(dyson.steps.iter().any(|s| s.contains("192.168.2.133")));
+        assert_eq!(findings[1].remediation, base);
+    }
+
+    #[test]
+    fn product_remediation_treats_gateway_as_router() {
+        let gw = ip("192.168.1.1");
+        let mut findings = vec![basic_finding("ports", Severity::Low, gw, 22)];
+        findings[0].title = format!("SSH open on {gw}:22");
+        let mut device = Device::new(gw);
+        device.vendor = Some("Ubiquiti".to_owned());
+        apply_product_remediation(&mut findings, &[device.clone()], None);
+        assert!(findings[0].remediation.is_none());
+        apply_product_remediation(&mut findings, &[device], Some(gw));
+        let rem = findings[0].remediation.as_ref().unwrap();
+        assert!(
+            rem.steps
+                .iter()
+                .any(|s| s.contains("Control Plane > Console > SSH"))
+        );
     }
 
     #[test]

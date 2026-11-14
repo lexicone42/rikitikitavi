@@ -459,7 +459,11 @@ fn finding_for_hit(ip: IpAddr, hit: &SnmpHit) -> Finding {
             "https://www.rfc-editor.org/rfc/rfc3416",
             "https://cwe.mitre.org/data/definitions/284.html",
             "https://owasp.org/www-project-top-ten/",
-        ]);
+        ])
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.snmp.default-community",
+            &[],
+        ));
 
     if let Some(descr) = sys_descr {
         finding = finding.with_device_hint(hint_from_sys_descr(descr));

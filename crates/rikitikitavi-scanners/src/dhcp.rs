@@ -91,7 +91,11 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
             ),
             Severity::Low,
         )
-        .with_service("DHCP"),
+        .with_service("DHCP")
+        .with_opt_remediation(crate::remediation::get(
+            "rikitikitavi.network.no-gateway",
+            &[],
+        )),
 
         DhcpAnomaly::ApipaAddress { interface, ip } => Finding::new(
             "dhcp",
@@ -106,7 +110,8 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
         )
         .with_ip(*ip)
         .with_service("DHCP")
-        .with_cwe("CWE-923"),
+        .with_cwe("CWE-923")
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.network.apipa", &[])),
 
         DhcpAnomaly::ApipaGateway { gateway } => Finding::new(
             "dhcp",
@@ -120,7 +125,8 @@ fn anomaly_to_finding(anomaly: &DhcpAnomaly) -> Finding {
         )
         .with_ip(*gateway)
         .with_service("DHCP")
-        .with_cwe("CWE-923"),
+        .with_cwe("CWE-923")
+        .with_opt_remediation(crate::remediation::get("rikitikitavi.network.apipa", &[])),
     }
 }
 
