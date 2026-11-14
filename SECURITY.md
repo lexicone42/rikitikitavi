@@ -203,9 +203,9 @@ only:
 
 ### TLS Configuration
 
-HTTPS uses `rustls` (pure Rust TLS), TLS 1.2+ only, with Mozilla's roots via
-`webpki-roots` and no system certificate store. Whether the peer certificate
-is *validated* depends on the caller:
+HTTPS uses `rustls` (pure Rust TLS), TLS 1.2+ only, trusting the operating
+system's certificate store through `rustls-platform-verifier`. Whether the peer
+certificate is *validated* depends on the caller:
 
 - **Validated**: outbound internet calls (public-IP providers, EPSS) and the
   UniFi controller client (unless `--insecure` /

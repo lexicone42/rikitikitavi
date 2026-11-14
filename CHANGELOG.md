@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- reqwest 0.13.5 (was held at 0.13.1 by a removed `webpki-roots` feature):
+  sensitive headers are stripped on cross-scheme redirects. Outbound TLS now
+  validates against the OS root store. The authenticated UniFi client follows
+  no redirects.
 - The services scanner probes hosts concurrently (16 at a time, device order
   preserved): a full scan of a 58-device LAN drops from about 126 s to 51 s.
 - Tracing: `scan`, `discovery` and per-scanner spans (findings, outcome, time

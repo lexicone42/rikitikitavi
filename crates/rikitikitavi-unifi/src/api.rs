@@ -118,6 +118,8 @@ impl UniFiClient {
         let client = Client::builder()
             .danger_accept_invalid_certs(accept_invalid_certs)
             .cookie_store(true)
+            // Credentials and the CSRF header must never follow a redirect to another origin.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()?;
 
