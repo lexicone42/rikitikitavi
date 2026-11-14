@@ -90,21 +90,30 @@ const fn port_to_service(port: u16) -> &'static str {
         37020 => "Hikvision-SADP",
         37777 => "Dahua-NVR",
         53282 => "SSH-alt",
+        3689 => "DAAP",
+        4070 => "Spotify-Connect",
+        5001 => "DSM-HTTPS",
+        7000 => "AirPlay",
+        8880 => "UniFi-Portal",
+        55442 | 55443 => "Echo",
+        62078 => "iOS-lockdownd",
         _ => "Unknown",
     }
 }
 
-/// Common ports for a home network scan (58 ports; see `common_port_count`).
-fn common_ports() -> Vec<u16> {
+/// Common ports for a home network scan (66 ports; see `common_port_count`).
+#[must_use]
+pub fn common_ports() -> Vec<u16> {
     vec![
         21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 465, 548, 554, 587, 631, 993,
         995, 1080, 1433, 1883, 1900, 2049, 3306, 3389, 5000, 5060, 5353, 5432, 5900, 6379, 6667,
         8080, 8443, 8554, 8883, 8888, 9100, 9200, 27017, 49152, 502, 1400, 6668, 7125, 8008, 8009,
-        8123, 9191, 9192, 9999, 32400, 34567, 37777, 53282, 81,
+        8123, 9191, 9192, 9999, 32400, 34567, 37777, 53282, 81, 3689, 4070, 5001, 7000, 8880,
+        55442, 55443, 62078,
     ]
 }
 
-/// Extended port list (140 ports; see `extended_port_count`).
+/// Extended port list (146 ports; see `extended_port_count`).
 fn extended_ports() -> Vec<u16> {
     let mut ports = common_ports();
     ports.extend_from_slice(&[
@@ -633,7 +642,7 @@ mod tests {
     #[test]
     fn common_port_count() {
         let ports = common_ports();
-        assert_eq!(ports.len(), 58);
+        assert_eq!(ports.len(), 66);
         let mut unique = ports.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -642,7 +651,7 @@ mod tests {
 
     #[test]
     fn extended_port_count() {
-        assert_eq!(extended_ports().len(), 140);
+        assert_eq!(extended_ports().len(), 146);
     }
 
     /// Every port a scanner declares in `relevant_ports` must be discoverable

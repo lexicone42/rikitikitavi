@@ -856,6 +856,9 @@ fn classify_by_ports(open_ports: &[u16]) -> Option<(DeviceType, Option<&'static 
     if has(62078) {
         return Some((DeviceType::Phone, Some("ios_lockdownd")));
     }
+    if has(55442) && has(55443) {
+        return Some((DeviceType::Speaker, Some("amazon_echo")));
+    }
     if has(5000) && has(5001) {
         return Some((DeviceType::Nas, None));
     }
@@ -1655,6 +1658,32 @@ mod tests {
     #[test]
     fn test_classify_by_ports_desktop() {
         assert_eq!(port_type(&[3389]), Some(DeviceType::Desktop));
+    }
+
+    #[test]
+    fn classify_by_ports_echo() {
+        assert_eq!(
+            classify_by_ports(&[4070, 55442, 55443]),
+            Some((DeviceType::Speaker, Some("amazon_echo")))
+        );
+        assert_eq!(classify_by_ports(&[55442]), None);
+    }
+
+    /// A port outside the default range never changes the verdict, alone or
+    /// paired with a default port.
+    #[test]
+    fn classify_by_ports_uses_only_default_range_ports() {
+        let common = rikitikitavi_scanners::ports::common_ports();
+        for port in (1..=u16::MAX).filter(|p| !common.contains(p)) {
+            assert_eq!(classify_by_ports(&[port]), None, "port {port}");
+            for &known in &common {
+                assert_eq!(
+                    classify_by_ports(&[port, known]),
+                    classify_by_ports(&[known]),
+                    "ports {port}+{known}"
+                );
+            }
+        }
     }
 
     #[test]

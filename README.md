@@ -85,7 +85,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | Scanner | What it checks |
 |---------|---------------|
 | **Network Discovery** | Interface enumeration, ARP cache, device count |
-| **Port Scanner** | TCP connect scan of 58 common ports across all LAN hosts |
+| **Port Scanner** | TCP connect scan of 66 common ports across all LAN hosts |
 | **Device Fingerprinting** | MAC OUI vendor lookup, port-based device classification |
 | **DNS Security** | Resolver config, DNSSEC validation, DNS rebinding, cross-resolver checks |
 | **Router Security** | Admin panel exposure, HTTPS enforcement, UPnP |
