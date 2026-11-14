@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rikitikitavi_models::ScanResults;
+use rikitikitavi_models::{ScanKind, ScanResults};
 use std::path::PathBuf;
 
 /// Maximum number of scan history files to retain.
@@ -7,6 +7,8 @@ const MAX_HISTORY: usize = 10;
 
 /// Scan history as `scan-YYYYMMDD-HHMMSS.json` files under the XDG data dir
 /// (`~/.local/share/rikitikitavi/scans/`); ordered by filename, pruned to `MAX_HISTORY`.
+///
+/// [`ScanKind::Verify`] results use a `verify-` prefix and are pruned separately.
 pub struct ScanHistory {
     data_dir: PathBuf,
 }
@@ -28,30 +30,39 @@ impl ScanHistory {
         rikitikitavi_core::fs::create_private_dir(&self.data_dir)
             .with_context(|| format!("creating scan history dir: {}", self.data_dir.display()))?;
 
-        let filename = format!("scan-{}.json", results.scanned_at.format("%Y%m%d-%H%M%S"));
+        let filename = format!(
+            "{}{}.json",
+            file_prefix(results.kind),
+            results.scanned_at.format("%Y%m%d-%H%M%S")
+        );
         let path = self.data_dir.join(filename);
         let json = serde_json::to_string_pretty(results).context("serializing scan results")?;
         rikitikitavi_core::fs::write_private(&path, json.as_bytes())
             .with_context(|| format!("writing scan file: {}", path.display()))?;
-        self.prune()?;
+        self.prune_kind(results.kind)?;
         Ok(path)
     }
 
-    /// Load the most recent scan from history. Returns `None` if no scans exist.
+    /// Load the most recent full scan; files of another kind are skipped. `None` if none exist.
     pub fn load_latest(&self) -> Result<Option<ScanResults>> {
-        let scans = self.list_scans()?;
-        let Some(latest) = scans.last() else {
-            return Ok(None);
-        };
-        let json = std::fs::read_to_string(latest)
-            .with_context(|| format!("reading scan file: {}", latest.display()))?;
-        let results: ScanResults = serde_json::from_str(&json)
-            .with_context(|| format!("parsing scan file: {}", latest.display()))?;
-        Ok(Some(results))
+        for path in self.list_scans()?.iter().rev() {
+            let json = std::fs::read_to_string(path)
+                .with_context(|| format!("reading scan file: {}", path.display()))?;
+            let results: ScanResults = serde_json::from_str(&json)
+                .with_context(|| format!("parsing scan file: {}", path.display()))?;
+            if results.kind == ScanKind::Full {
+                return Ok(Some(results));
+            }
+        }
+        Ok(None)
     }
 
-    /// List all scan files, sorted chronologically (oldest first).
+    /// List all full-scan files, sorted chronologically (oldest first).
     pub fn list_scans(&self) -> Result<Vec<PathBuf>> {
+        self.list_prefixed(file_prefix(ScanKind::Full))
+    }
+
+    fn list_prefixed(&self, prefix: &str) -> Result<Vec<PathBuf>> {
         if !self.data_dir.exists() {
             return Ok(Vec::new());
         }
@@ -63,16 +74,20 @@ impl ScanHistory {
                 p.extension().is_some_and(|ext| ext == "json")
                     && p.file_name()
                         .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("scan-"))
+                        .is_some_and(|n| n.starts_with(prefix))
             })
             .collect();
         entries.sort();
         Ok(entries)
     }
 
-    /// Remove oldest scans to stay within `MAX_HISTORY`.
+    /// Remove oldest full scans to stay within `MAX_HISTORY`.
     pub fn prune(&self) -> Result<()> {
-        let scans = self.list_scans()?;
+        self.prune_kind(ScanKind::Full)
+    }
+
+    fn prune_kind(&self, kind: ScanKind) -> Result<()> {
+        let scans = self.list_prefixed(file_prefix(kind))?;
         if scans.len() > MAX_HISTORY {
             let to_remove = scans.len() - MAX_HISTORY;
             for path in scans.iter().take(to_remove) {
@@ -81,6 +96,13 @@ impl ScanHistory {
             }
         }
         Ok(())
+    }
+}
+
+const fn file_prefix(kind: ScanKind) -> &'static str {
+    match kind {
+        ScanKind::Full => "scan-",
+        ScanKind::Verify => "verify-",
     }
 }
 
@@ -225,5 +247,59 @@ mod tests {
         std::fs::write(dir.path().join("other.json"), "{}").unwrap();
 
         assert!(history.list_scans().unwrap().is_empty());
+    }
+
+    fn at(day: u32) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(&format!("2026-01-{day:02}T12:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn verify_results_neither_load_as_latest_nor_prune_full_scans() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ScanHistory::with_dir(dir.path().to_path_buf());
+        let mut full = sample_results();
+        full.scanned_at = at(1);
+        full.risk_score = 7.0;
+        history.save(&full).unwrap();
+        for day in 2..=(2 + u32::try_from(MAX_HISTORY).unwrap()) {
+            let mut v = sample_results();
+            v.kind = ScanKind::Verify;
+            v.scanned_at = at(day);
+            history.save(&v).unwrap();
+        }
+        let latest = history.load_latest().unwrap().unwrap();
+        assert_eq!(latest.kind, ScanKind::Full);
+        assert!((latest.risk_score - 7.0).abs() < f64::EPSILON);
+        assert_eq!(history.list_scans().unwrap().len(), 1);
+        assert_eq!(history.list_prefixed("verify-").unwrap().len(), MAX_HISTORY);
+    }
+
+    #[test]
+    fn load_latest_skips_a_verify_kind_file_named_as_a_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ScanHistory::with_dir(dir.path().to_path_buf());
+        let mut full = sample_results();
+        full.scanned_at = at(1);
+        history.save(&full).unwrap();
+        let mut v = sample_results();
+        v.kind = ScanKind::Verify;
+        v.findings.clear();
+        let json = serde_json::to_string(&v).unwrap();
+        std::fs::write(dir.path().join("scan-20260105-120000.json"), json).unwrap();
+        let latest = history.load_latest().unwrap().unwrap();
+        assert_eq!(latest.findings.len(), 1);
+    }
+
+    #[test]
+    fn history_file_without_kind_loads_as_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ScanHistory::with_dir(dir.path().to_path_buf());
+        let json = r#"{"findings":[],"devices":[],"attack_paths":[],"risk_score":3.0,
+            "scan_duration_secs":1,"scanned_at":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(dir.path().join("scan-20260101-000000.json"), json).unwrap();
+        let latest = history.load_latest().unwrap().unwrap();
+        assert_eq!(latest.kind, ScanKind::Full);
     }
 }

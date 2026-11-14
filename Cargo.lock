@@ -2716,6 +2716,7 @@ dependencies = [
  "rikitikitavi-unifi",
  "serde",
  "serde-saphyr",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-opentelemetry",

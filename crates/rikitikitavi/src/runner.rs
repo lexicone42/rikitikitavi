@@ -198,7 +198,7 @@ pub fn fill_macs_from_arp(devices: &mut [Device], arp: &[rikitikitavi_network::A
 }
 
 /// ARP-cache IPs whose MAC is excluded.
-fn arp_ips_of_excluded_macs(exclusions: &ExclusionSet) -> HashSet<IpAddr> {
+pub fn arp_ips_of_excluded_macs(exclusions: &ExclusionSet) -> HashSet<IpAddr> {
     if exclusions.is_empty() {
         return HashSet::new();
     }
@@ -499,6 +499,69 @@ async fn run_scanner_within(
     }
 }
 
+/// One scanner run for `verify`.
+#[derive(Debug)]
+pub enum ReplayOutcome {
+    Completed(Vec<Finding>),
+    Failed(String),
+    TimedOut,
+}
+
+/// Run `scanner` once under the [`run_scanner_bounded`] budget. Errors and timeouts are not
+/// folded into partial results.
+pub async fn replay_scanner(scanner: &dyn Scanner, ctx: &ScanContext) -> ReplayOutcome {
+    let budget = Duration::from_secs(
+        scanner
+            .estimated_duration_secs()
+            .saturating_mul(4)
+            .clamp(60, 600),
+    );
+    replay_scanner_within(scanner, ctx, budget).await
+}
+
+async fn replay_scanner_within(
+    scanner: &dyn Scanner,
+    ctx: &ScanContext,
+    budget: Duration,
+) -> ReplayOutcome {
+    let span = tracing::info_span!(
+        "replay",
+        id = scanner.id(),
+        budget_secs = budget.as_secs(),
+        outcome = tracing::field::Empty,
+    );
+    let mut collected = Vec::new();
+    let outcome = tokio::time::timeout(budget, scanner.scan_collecting(ctx, &mut collected))
+        .instrument(span.clone())
+        .await;
+    let replay = match outcome {
+        Ok(Ok(())) => ReplayOutcome::Completed(collected),
+        Ok(Err(e)) => ReplayOutcome::Failed(e.to_string()),
+        Err(_) => ReplayOutcome::TimedOut,
+    };
+    span.record(
+        "outcome",
+        match replay {
+            ReplayOutcome::Completed(_) => "ok",
+            ReplayOutcome::Failed(_) => "error",
+            ReplayOutcome::TimedOut => "timeout",
+        },
+    );
+    replay
+}
+
+/// Root span for `verify`; the caller records `resolved`, `still_present`, `inconclusive`.
+pub fn verify_span(findings: usize, hosts: usize) -> tracing::Span {
+    tracing::info_span!(
+        "verify",
+        findings,
+        hosts,
+        resolved = tracing::field::Empty,
+        still_present = tracing::field::Empty,
+        inconclusive = tracing::field::Empty,
+    )
+}
+
 /// Run all applicable scanners in two phases: `network`, `ports`, `device` run first
 /// and populate `discovered_devices`; the remaining scanners then run concurrently.
 /// Bounded by `scan.timeout_seconds` (0 = unbounded).
@@ -746,6 +809,7 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         risk_score,
         scan_duration_secs: duration,
         scanned_at: Utc::now(),
+        ..ScanResults::default()
     })
 }
 

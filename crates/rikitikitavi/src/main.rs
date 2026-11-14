@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod runner;
 mod telemetry;
+mod verify;
 
 use cli::{Cli, Command};
 
@@ -19,6 +20,7 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         Command::Scan(args) => cmd_scan(args, &loaded).await,
+        Command::Verify(args) => cmd_verify(args, &loaded).await,
         #[cfg(feature = "tui")]
         Command::Tui(args) => cmd_tui(args, app_config).await,
         Command::Report(args) => {
@@ -375,6 +377,89 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_verify(args: cli::VerifyArgs, loaded: &config::LoadedConfig) -> Result<()> {
+    use anyhow::Context as _;
+    use rikitikitavi_models::config::ScanIntensity;
+
+    let app_config = &loaded.config;
+    config::validate_scan_config(&app_config.scan)?;
+
+    let (intensity, capped) =
+        effective_intensity(false, args.aggressive, app_config.scan.intensity);
+    if capped {
+        eprintln!(
+            "Note: config intensity 'aggressive' capped at 'active'; pass --aggressive to replay login checks."
+        );
+    }
+    anyhow::ensure!(
+        intensity != ScanIntensity::Passive,
+        "verify needs scan.intensity 'active' (config is 'passive'); passive checks cannot tell fixed from skipped"
+    );
+
+    let history = rikitikitavi_analysis::ScanHistory::new()
+        .context("could not determine the scan history directory")?;
+    let baseline = history
+        .load_latest()?
+        .context("no saved full scan; run `rikitikitavi scan` first")?;
+
+    let selection = verify::Selection {
+        min_severity: args.severity.map(Into::into),
+        ips: args.ip,
+        findings: args.finding,
+    };
+    let selected = verify::select(&baseline.findings, &selection)?;
+
+    let registry = rikitikitavi_scanners::ScannerRegistry::new();
+    let lookup = |id: &str| registry.get(id);
+    let read_arp = || {
+        rikitikitavi_network::read_arp_cache()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e.ip)
+            .collect()
+    };
+    let env = verify::VerifyEnv {
+        config: rikitikitavi_models::config::ScanConfig {
+            intensity,
+            attack_paths: false,
+            parallelism: app_config.scan.effective_parallelism(),
+            ..app_config.scan.clone()
+        },
+        gateway: rikitikitavi_network::detect_gateway().ok().flatten(),
+        lookup: &lookup,
+        liveness_timeout: std::time::Duration::from_secs(1),
+        read_arp: &read_arp,
+    };
+    let report = verify::verify(&baseline, &selected, &env).await?;
+
+    let rendered = match args.format {
+        cli::VerifyFormatArg::Json => {
+            let mut s = serde_json::to_string_pretty(&report)?;
+            s.push('\n');
+            s.into_bytes()
+        }
+        cli::VerifyFormatArg::Text => {
+            let mut buf = Vec::new();
+            verify::write_text(&mut buf, &report, &baseline)?;
+            buf
+        }
+    };
+    if let Some(path) = args.output.as_ref() {
+        rikitikitavi_core::fs::write_private(path, &rendered)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    } else {
+        use std::io::Write as _;
+        tolerate_broken_pipe(std::io::stdout().lock().write_all(&rendered))?;
+    }
+
+    let code = report.exit_code();
+    if code != 0 {
+        telemetry::shutdown();
+        std::process::exit(code);
+    }
     Ok(())
 }
 

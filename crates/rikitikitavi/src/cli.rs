@@ -35,6 +35,15 @@ pub enum Command {
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
 
+    /// Re-check findings from the last full scan against only the affected hosts.
+    #[command(after_help = "Exit codes:\n  \
+        0  every verified finding is resolved (or none were selected)\n  \
+        1  error\n  \
+        3  at least one finding is still present\n  \
+        4  none still present, but some are inconclusive (host offline, scanner \
+        error or timeout, or the finding cannot be replayed by a unicast probe)")]
+    Verify(VerifyArgs),
+
     /// Generate a report from the last scan.
     Report(ReportArgs),
 
@@ -167,6 +176,60 @@ pub struct ScanArgs {
     #[cfg(feature = "unifi")]
     #[arg(long)]
     pub unifi_local: bool,
+}
+
+#[derive(Args)]
+pub struct VerifyArgs {
+    /// Only findings at or above this severity [default: low, or none with --finding].
+    #[arg(long)]
+    pub severity: Option<SeverityArg>,
+
+    /// Only findings on these hosts (repeatable or comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub ip: Vec<std::net::IpAddr>,
+
+    /// Only these findings, by fingerprint or finding id (repeatable or comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub finding: Vec<String>,
+
+    /// Allow replaying login checks (`credentials` findings).
+    #[arg(long)]
+    pub aggressive: bool,
+
+    /// Output format.
+    #[arg(long, default_value = "text")]
+    pub format: VerifyFormatArg,
+
+    /// Write the report to this file instead of stdout.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum VerifyFormatArg {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SeverityArg {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl From<SeverityArg> for rikitikitavi_core::Severity {
+    fn from(arg: SeverityArg) -> Self {
+        match arg {
+            SeverityArg::Info => Self::Info,
+            SeverityArg::Low => Self::Low,
+            SeverityArg::Medium => Self::Medium,
+            SeverityArg::High => Self::High,
+            SeverityArg::Critical => Self::Critical,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -482,6 +545,42 @@ mod tests {
         assert_eq!(args.fail_on, FailOnArg::Never);
         assert!(matches!(args.network, NetworkArg::Auto));
     }
+    #[test]
+    fn verify_parses_filters() {
+        let cli = Cli::try_parse_from([
+            "rikitikitavi",
+            "verify",
+            "--severity",
+            "high",
+            "--ip",
+            "10.0.0.1,10.0.0.2",
+            "--finding",
+            "00000000000000ab",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let Command::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.severity, Some(SeverityArg::High));
+        assert_eq!(args.ip.len(), 2);
+        assert_eq!(args.finding, ["00000000000000ab"]);
+        assert_eq!(args.format, VerifyFormatArg::Json);
+        assert!(!args.aggressive);
+        assert!(Cli::try_parse_from(["rikitikitavi", "verify", "--ip", "nope"]).is_err());
+    }
+
+    #[test]
+    fn verify_defaults() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "verify"]).unwrap();
+        let Command::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.severity.is_none() && args.ip.is_empty() && args.finding.is_empty());
+        assert_eq!(args.format, VerifyFormatArg::Text);
+    }
+
     #[test]
     fn log_format_defaults_to_text_and_accepts_json() {
         let cli = Cli::try_parse_from(["rikitikitavi", "version"]).unwrap();
