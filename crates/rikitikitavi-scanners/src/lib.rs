@@ -52,6 +52,7 @@ pub mod sadp;
 pub mod services;
 pub mod smb;
 pub mod snmp;
+pub mod spotify_zc;
 pub mod ssl;
 pub mod tr069;
 pub mod tuya;

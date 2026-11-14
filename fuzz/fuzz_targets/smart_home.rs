@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use rikitikitavi_scanners::{cast, kasa, tuya};
+use rikitikitavi_scanners::{cast, kasa, spotify_zc, tuya};
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
@@ -12,4 +12,6 @@ fuzz_target!(|data: &[u8]| {
     tuya::fuzz::datagram(data);
     let _ = tuya::fuzz::json(data);
     let _ = tuya::fuzz::broadcast(&text);
+    let _ = spotify_zc::fuzz::get_info(&text);
+    let _ = spotify_zc::fuzz::cpath(&text);
 });

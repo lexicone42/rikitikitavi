@@ -666,6 +666,7 @@ pub const SERVICE_QUERIES: &[&str] = &[
     "_smoip._tcp.local",
     "_stream-magic._tcp.local",
     "_rio._tcp.local",
+    "_spotify-connect._tcp.local",
     // Home automation hubs, bridges and coordinators.
     "_hap._tcp.local",
     "_hap._udp.local",
@@ -758,9 +759,19 @@ const QUERY_BATCH: usize = 12;
 /// Send PTR queries for [`SERVICE_QUERIES`] and collect responses until
 /// `timeout_secs` (minimum 1) elapses or [`MAX_MDNS_RECORDS`] are collected.
 pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
-    let services = tokio::task::spawn_blocking(move || discover_services_blocking(timeout_secs))
-        .await
-        .map_err(|e| anyhow::anyhow!("mDNS discovery task failed: {e}"))?;
+    discover_service_types(SERVICE_QUERIES, timeout_secs).await
+}
+
+/// [`discover_services`] restricted to `queries`. Returned services may include
+/// other types the responders volunteer.
+pub async fn discover_service_types(
+    queries: &'static [&'static str],
+    timeout_secs: u64,
+) -> Result<Vec<MdnsService>> {
+    let services =
+        tokio::task::spawn_blocking(move || discover_services_blocking(queries, timeout_secs))
+            .await
+            .map_err(|e| anyhow::anyhow!("mDNS discovery task failed: {e}"))?;
     Ok(services)
 }
 
@@ -769,7 +780,7 @@ pub async fn discover_services(timeout_secs: u64) -> Result<Vec<MdnsService>> {
 /// Queries go out in batches of [`QUERY_BATCH`] rather than one burst, with a
 /// slice of the remaining budget spent reading after each batch; the tail of the
 /// budget is left for the last batch's answers.
-fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
+fn discover_services_blocking(queries: &[&str], timeout_secs: u64) -> Vec<MdnsService> {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => {
@@ -781,10 +792,10 @@ fn discover_services_blocking(timeout_secs: u64) -> Vec<MdnsService> {
     let deadline = Instant::now() + discovery_timeout(timeout_secs);
     let dest = SocketAddr::new(IpAddr::V4(MDNS_MULTICAST), MDNS_PORT);
 
-    let batches = SERVICE_QUERIES.len().div_ceil(QUERY_BATCH);
+    let batches = queries.len().div_ceil(QUERY_BATCH);
     let mut all_records: Vec<(IpAddr, DnsRecord)> = Vec::new();
 
-    for (i, batch) in SERVICE_QUERIES.chunks(QUERY_BATCH).enumerate() {
+    for (i, batch) in queries.chunks(QUERY_BATCH).enumerate() {
         for &svc_name in batch {
             let query = build_mdns_query(svc_name, TYPE_PTR);
             if socket.send_to(&query, dest).is_err() {

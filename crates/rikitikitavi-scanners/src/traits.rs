@@ -101,6 +101,7 @@ impl ScannerRegistry {
                 Box::new(crate::print3d::Print3dScanner),
                 Box::new(crate::ddwrt_upnp::DdwrtUpnpScanner),
                 Box::new(crate::lan_client_exposure::LanClientExposureScanner),
+                Box::new(crate::spotify_zc::SpotifyZcScanner),
             ],
         }
     }
