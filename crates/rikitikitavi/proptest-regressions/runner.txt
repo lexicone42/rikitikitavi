@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d80a60ef1f7f5b5d8cfc01a561bcb33619a399a4f98e6a4c76297a62ab9a24f5 # shrinks to findings = [Finding { id: 69466074-7eec-4d60-8ecc-3f5332ba7493, scanner: "ports", title: "title", description: "description text here", severity: Info, confidence: Probable, affected_ip: Some(10.0.0.1), affected_mac: None, affected_hostname: None, affected_port: Some(8), affected_service: None, remediation: None, cwe_id: None, cve_ids: [], is_kev: false, epss: None, standards: [], references: [], evidence: None, device_hint: None, discovered_at: 2026-11-15T01:09:52.614389602Z }, Finding { id: 8f046f52-3ee6-475f-b809-7ac3912be0b5, scanner: "ports", title: "title", description: "description text here", severity: Low, confidence: Probable, affected_ip: Some(10.0.0.1), affected_mac: None, affected_hostname: None, affected_port: Some(8), affected_service: None, remediation: None, cwe_id: None, cve_ids: [], is_kev: false, epss: None, standards: [], references: [], evidence: None, device_hint: None, discovered_at: 2026-11-15T01:09:52.614392576Z }]

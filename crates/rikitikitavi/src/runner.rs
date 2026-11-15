@@ -850,7 +850,8 @@ const RESTATEMENTS: &[((&str, &str), (&str, &str))] = &[
 ///
 /// The `ports` group goes when another scanner reports on the port at equal or
 /// higher severity. [`RESTATEMENTS`] pairs lose their first member. Everything
-/// else is kept, so distinct findings from different scanners coexist.
+/// else is kept, so distinct findings from different scanners coexist. Findings
+/// with the same fingerprint collapse to the most severe.
 fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::BTreeMap;
 
@@ -920,6 +921,9 @@ fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
             .then_with(|| a.scanner.cmp(&b.scanner))
             .then_with(|| a.title.cmp(&b.title))
     });
+    // Sorted by severity, so the highest of a fingerprint survives.
+    let mut seen = HashSet::new();
+    result.retain(|f| seen.insert(f.fingerprint()));
     result
 }
 
@@ -2219,6 +2223,21 @@ mod tests {
                 .collect()
         };
         assert_eq!(key(&forward), key(&reverse));
+    }
+
+    #[test]
+    fn dedup_collapses_identical_fingerprints() {
+        let addr = ip("192.168.1.220");
+        let serial = || {
+            Finding::new(
+                "mdns",
+                "UPnP exposes serial number on 192.168.1.220",
+                "d",
+                Severity::Low,
+            )
+            .with_ip(addr)
+        };
+        assert_eq!(deduplicate_findings(vec![serial(), serial()]).len(), 1);
     }
 
     #[test]

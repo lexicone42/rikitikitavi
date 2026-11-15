@@ -237,9 +237,10 @@ fn mitigated(f: &Finding) -> bool {
 
 fn unauth_control(f: &Finding) -> bool {
     let title = f.title.to_ascii_lowercase();
-    f.severity >= Severity::Medium
-        && title.contains("control")
-        && (title.contains("unauthenticated") || title.contains("without auth"))
+    let stated = title.contains("control")
+        && (title.contains("unauthenticated") || title.contains("without auth"));
+    // Any Medium+ `kasa` finding comes from an unauthenticated `get_sysinfo` reply.
+    f.severity >= Severity::Medium && (stated || f.scanner == "kasa")
 }
 
 struct Placed<'a> {
