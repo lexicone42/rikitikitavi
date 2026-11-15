@@ -36,6 +36,9 @@ pub struct Device {
     pub last_seen: DateTime<Utc>,
     /// Operating system guess.
     pub os_guess: Option<String>,
+    /// Sources that reported this device, e.g. `arp`, `sweep`, `unifi_clients`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_by: Vec<String>,
 }
 
 /// Declares [`DeviceType`] once: variant, wire name, human label. `ALL`,
@@ -158,6 +161,14 @@ impl Device {
             first_seen: now,
             last_seen: now,
             os_guess: None,
+            seen_by: Vec::new(),
+        }
+    }
+
+    /// Record `source` in `seen_by` once.
+    pub fn mark_seen_by(&mut self, source: &str) {
+        if !self.seen_by.iter().any(|s| s == source) {
+            self.seen_by.push(source.to_owned());
         }
     }
 
@@ -333,6 +344,23 @@ mod tests {
         );
         assert_eq!(device.hostname.as_deref(), Some("myhost"));
         assert_eq!(device.device_type, DeviceType::Router);
+    }
+
+    #[test]
+    fn seen_by_dedups_and_old_json_loads() {
+        let mut device = Device::new("192.168.1.5".parse().unwrap());
+        device.mark_seen_by("arp");
+        device.mark_seen_by("unifi_clients");
+        device.mark_seen_by("arp");
+        assert_eq!(device.seen_by, ["arp", "unifi_clients"]);
+
+        let mut old = serde_json::to_value(Device::new("10.0.0.2".parse().unwrap())).unwrap();
+        assert!(old.get("seen_by").is_none());
+        old.as_object_mut().unwrap().remove("seen_by");
+        let loaded: Device = serde_json::from_value(old).unwrap();
+        assert!(loaded.seen_by.is_empty());
+        let back: Device = serde_json::from_value(serde_json::to_value(&device).unwrap()).unwrap();
+        assert_eq!(back.seen_by, device.seen_by);
     }
 
     #[test]

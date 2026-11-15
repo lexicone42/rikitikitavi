@@ -250,7 +250,11 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         return Ok(());
     }
 
-    let mut results = runner::run_scan(&mut ctx).await?;
+    let controller = app_config.unifi.scan_controller();
+    if controller.is_some() && cfg!(feature = "unifi") && !args.quiet {
+        println!("Importing the UniFi controller client list (unifi.controller in config)");
+    }
+    let mut results = runner::run_scan(&mut ctx, controller).await?;
 
     // Declarative user rules run over the collected facts, before reporting.
     if let Some(rules) = rules.as_ref() {
@@ -1260,7 +1264,7 @@ async fn tui_scan(
         discovered_devices: Vec::new(),
     };
     runner::discover_hosts(&mut ctx).await?;
-    runner::run_scan(&mut ctx).await
+    runner::run_scan(&mut ctx, None).await
 }
 
 /// Apply a finished re-scan to `app`: store results or the error, and clear `scanning`.

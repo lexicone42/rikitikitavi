@@ -1,4 +1,5 @@
 pub mod api;
+pub mod clients;
 pub mod deployment;
 pub mod firmware;
 pub mod local;

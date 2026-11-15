@@ -17,8 +17,9 @@ scan:
   network_mode: { type: auto }   # reserved
 
 unifi:
-  mode: auto                     # auto | local | remote | cloud
-  controller:
+  mode: auto                     # auto | local | remote | cloud | disabled
+  controller:                    # with url and api_token (or username + password) set, `scan` imports the
+                                 # controller's client list (read-only); `mode: disabled` turns that off
     url: null                    # https://192.168.1.1
     username: null
     password: null               # stored in plaintext; chmod 600 this file

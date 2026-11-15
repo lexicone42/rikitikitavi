@@ -5,7 +5,7 @@ use rikitikitavi_analysis::{
     calculate_risk_score, generate_attack_paths, generate_priority_actions,
 };
 use rikitikitavi_core::Perspective;
-use rikitikitavi_models::config::ExclusionSet;
+use rikitikitavi_models::config::{ExclusionSet, UniFiControllerConfig};
 use rikitikitavi_models::device::{OpenPort, PortProtocol};
 use rikitikitavi_models::{
     Device, DeviceHint, DeviceType, Finding, MacAddr, ScanContext, ScanResults,
@@ -67,6 +67,7 @@ pub fn discover_network(ctx: &mut ScanContext) -> Vec<Device> {
         .iter()
         .map(|entry| {
             let mut dev = Device::new(entry.ip).with_mac(&entry.mac);
+            dev.mark_seen_by("arp");
             if ctx.gateway == Some(entry.ip) {
                 dev = dev.with_device_type(DeviceType::Router);
             }
@@ -131,8 +132,11 @@ pub async fn active_host_discovery(
 
     let mut added = 0;
     for ip in found {
-        if !ctx.discovered_devices.iter().any(|d| d.ip == ip) {
+        if let Some(dev) = ctx.discovered_devices.iter_mut().find(|d| d.ip == ip) {
+            dev.mark_seen_by("sweep");
+        } else {
             let mut dev = Device::new(ip);
+            dev.mark_seen_by("sweep");
             if ctx.gateway == Some(ip) {
                 dev = dev.with_device_type(DeviceType::Router);
             }
@@ -565,8 +569,13 @@ pub fn verify_span(findings: usize, hosts: usize) -> tracing::Span {
 
 /// Run all applicable scanners in two phases: `network`, `ports`, `device` run first
 /// and populate `discovered_devices`; the remaining scanners then run concurrently.
-/// Bounded by `scan.timeout_seconds` (0 = unbounded).
-pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
+/// Bounded by `scan.timeout_seconds` (0 = unbounded). With `controller` set (see
+/// [`UniFiConfig::scan_controller`](rikitikitavi_models::config::UniFiConfig::scan_controller))
+/// the controller's client list is imported; without the `unifi` feature it is ignored.
+pub async fn run_scan(
+    ctx: &mut ScanContext,
+    controller: Option<&UniFiControllerConfig>,
+) -> Result<ScanResults> {
     let secs = ctx.config.timeout_seconds;
     let limit = (secs > 0).then(|| Duration::from_secs(secs));
     let span = tracing::info_span!(
@@ -577,7 +586,7 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
         findings = tracing::field::Empty,
         risk_score = tracing::field::Empty,
     );
-    let result = bounded(limit, run_scan_inner(ctx))
+    let result = bounded(limit, run_scan_inner(ctx, controller))
         .instrument(span.clone())
         .await;
     if let Ok(results) = &result {
@@ -589,7 +598,10 @@ pub async fn run_scan(ctx: &mut ScanContext) -> Result<ScanResults> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
+async fn run_scan_inner(
+    ctx: &mut ScanContext,
+    controller: Option<&UniFiControllerConfig>,
+) -> Result<ScanResults> {
     let start = Instant::now();
     let registry = ScannerRegistry::new();
     // Recog pattern sets compile in ~1.7 s; overlap that with phase 1.
@@ -655,6 +667,10 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
 
     let rdns_task = spawn_rdns(ctx, &exclusions, &excluded_mac_ips);
     let nbns_task = spawn_nbns(ctx, &exclusions, &excluded_mac_ips);
+    #[cfg(feature = "unifi")]
+    let unifi_task = controller.map(spawn_unifi_clients);
+    #[cfg(not(feature = "unifi"))]
+    let _ = controller;
 
     // Phase 2: deep analysis, concurrent
     let phase2_filtered = filter_phase2(phase2, ctx, &exclusions, &excluded_mac_ips);
@@ -693,6 +709,26 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "unifi")]
+    if let Some((span, task)) = unifi_task
+        && let Ok(clients) = task.await
+    {
+        let (found, matched) = unifi_client_findings(
+            &clients,
+            &ctx.discovered_devices,
+            &all_findings,
+            &exclusions,
+            &excluded_mac_ips,
+        );
+        span.record("matched", matched.len());
+        for device in &mut ctx.discovered_devices {
+            if matched.contains(&device.ip) {
+                device.mark_seen_by(UNIFI_CLIENTS_SCANNER);
+            }
+        }
+        all_findings.extend(found);
     }
 
     let rdns_outcome = match rdns_task {
@@ -1441,6 +1477,206 @@ fn nbns_findings(
     out
 }
 
+/// Scanner id of `UniFi` controller client findings.
+const UNIFI_CLIENTS_SCANNER: &str = "unifi_clients";
+
+/// Entries listed in the unseen-clients finding.
+#[cfg(feature = "unifi")]
+const UNIFI_UNSEEN_LISTED: usize = 20;
+
+#[cfg(feature = "unifi")]
+type ControllerClient = rikitikitavi_unifi::clients::ControllerClient;
+
+/// Fetch the controller inventory under the `unifi_clients` span; a failure logs and yields none.
+#[cfg(feature = "unifi")]
+fn spawn_unifi_clients(
+    controller: &UniFiControllerConfig,
+) -> (
+    tracing::Span,
+    tokio::task::JoinHandle<Vec<ControllerClient>>,
+) {
+    use rikitikitavi_unifi::clients;
+
+    let cfg = controller.clone();
+    let span = tracing::info_span!(
+        "unifi_clients",
+        clients = tracing::field::Empty,
+        matched = tracing::field::Empty,
+    );
+    let task = tokio::spawn(
+        async move {
+            let fetched =
+                tokio::time::timeout(clients::FETCH_TIMEOUT, clients::fetch_inventory(&cfg)).await;
+            let clients = match fetched {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "UniFi client import failed");
+                    Vec::new()
+                }
+                Err(_) => {
+                    tracing::warn!("UniFi client import timed out");
+                    Vec::new()
+                }
+            };
+            tracing::Span::current().record("clients", clients.len());
+            clients
+        }
+        .instrument(span.clone()),
+    );
+    (span, task)
+}
+
+/// One `unifi_clients` finding per discovered device matched by MAC (by IP only for a
+/// MAC-less device and a connected client), plus one finding listing connected clients
+/// that matched nothing. Excluded clients appear in neither. Returns the findings and
+/// the matched device IPs.
+#[cfg(feature = "unifi")]
+fn unifi_client_findings(
+    clients: &[ControllerClient],
+    devices: &[Device],
+    findings: &[Finding],
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> (Vec<Finding>, HashSet<IpAddr>) {
+    let ip_excluded = |ip: IpAddr| exclusions.excludes_ip(ip) || excluded_mac_ips.contains(&ip);
+    let named: HashSet<IpAddr> = findings
+        .iter()
+        .filter(|f| f.device_hint.as_ref().is_some_and(|h| h.hostname.is_some()))
+        .filter_map(|f| f.affected_ip)
+        .collect();
+    let mut out = Vec::new();
+    let mut matched = HashSet::new();
+    let mut unseen = Vec::new();
+    for client in clients.iter().filter(|c| {
+        !c.mac.is_some_and(|m| exclusions.excludes_mac(m))
+            && ![c.ip, c.fixed_ip].into_iter().flatten().any(ip_excluded)
+    }) {
+        let mut hit = false;
+        for device in devices.iter().filter(|d| {
+            !exclusions.excludes_device(d)
+                && !excluded_mac_ips.contains(&d.ip)
+                && d.mac.map_or_else(
+                    || client.connected && client.ip == Some(d.ip),
+                    |m| client.mac == Some(m),
+                )
+        }) {
+            hit = true;
+            matched.insert(device.ip);
+            out.push(unifi_client_finding(
+                client,
+                device,
+                named.contains(&device.ip),
+            ));
+        }
+        if !hit && client.connected {
+            unseen.push(client);
+        }
+    }
+    out.sort_by_key(|f| f.affected_ip);
+    out.extend(unseen_clients_finding(unseen));
+    (out, matched)
+}
+
+/// The alias always goes on the hint; the controller hostname only when no other hint
+/// names the device. The type comes from the alias, else the hostname.
+#[cfg(feature = "unifi")]
+fn unifi_client_finding(client: &ControllerClient, device: &Device, named: bool) -> Finding {
+    use std::fmt::Write as _;
+
+    let ip = device.ip;
+    let mut hint = DeviceHint::new();
+    if let Some(alias) = &client.alias {
+        hint = hint.with_hostname(alias);
+    } else if let Some(hostname) = &client.hostname
+        && device.hostname.is_none()
+        && !named
+    {
+        hint = hint.with_hostname(hostname);
+    }
+    let mut description = format!("The UniFi controller lists {ip}");
+    if let Some(name) = client.display_name() {
+        let _ = write!(description, " as {name}");
+    }
+    if let Some(network) = &client.network {
+        let _ = write!(description, " on network {network}");
+    }
+    description.push_str(if client.connected {
+        " and reports it connected."
+    } else {
+        " among its known clients."
+    });
+    if let Some(note) = &client.note {
+        let _ = write!(description, " Controller note: {note}.");
+    }
+    for name in [client.alias.as_deref(), client.hostname.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        hint = type_from_hostname(name, device, hint, &mut description);
+        if hint.device_type.is_some() {
+            break;
+        }
+    }
+    let title = client.display_name().map_or_else(
+        || format!("UniFi client {ip}"),
+        |name| format!("UniFi client {name} for {ip}"),
+    );
+    let mut finding = Finding::new(
+        UNIFI_CLIENTS_SCANNER,
+        &title,
+        &description,
+        rikitikitavi_core::Severity::Info,
+    )
+    .with_ip(ip)
+    .with_confidence(rikitikitavi_core::Confidence::Confirmed)
+    .with_evidence(client.evidence())
+    .with_device_hint(hint);
+    if let Some(mac) = client.mac {
+        finding = finding.with_mac(mac);
+    }
+    finding
+}
+
+/// Count of connected clients the scan did not discover, listing up to
+/// [`UNIFI_UNSEEN_LISTED`] as name, IP and network.
+#[cfg(feature = "unifi")]
+fn unseen_clients_finding(mut unseen: Vec<&ControllerClient>) -> Option<Finding> {
+    if unseen.is_empty() {
+        return None;
+    }
+    unseen.sort_by_key(|c| (c.ip, c.mac));
+    let count = unseen.len();
+    let mut entries: Vec<String> = unseen
+        .iter()
+        .take(UNIFI_UNSEEN_LISTED)
+        .map(|c| {
+            let name = c.display_name().map_or_else(
+                || c.mac.map(|m| m.to_string()).unwrap_or_default(),
+                str::to_owned,
+            );
+            let ip = c.ip.map_or_else(|| "no IP".to_owned(), |ip| ip.to_string());
+            let network = c.network.as_deref().unwrap_or("unknown network");
+            format!("{name} ({ip}, {network})")
+        })
+        .collect();
+    if count > UNIFI_UNSEEN_LISTED {
+        entries.push(format!("and {} more", count - UNIFI_UNSEEN_LISTED));
+    }
+    Some(
+        Finding::new(
+            UNIFI_CLIENTS_SCANNER,
+            &format!("{count} UniFi client(s) not seen by this scan"),
+            &format!(
+                "The UniFi controller reports {count} connected client(s) that discovery did \
+                 not find, for example on another VLAN or behind client isolation: {}.",
+                entries.join("; ")
+            ),
+            rikitikitavi_core::Severity::Info,
+        )
+        .with_confidence(rikitikitavi_core::Confidence::Confirmed),
+    )
+}
+
 /// Strip a `.local` suffix; return `None` for empty or UUID-style hostnames.
 fn clean_hostname(raw: &str) -> Option<String> {
     let cleaned = raw.strip_suffix(".local").unwrap_or(raw).trim();
@@ -1508,6 +1744,7 @@ fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
         "device" => (1, 0),
         RDNS_SCANNER => (1, 1),
         NBNS_SCANNER => (1, 2),
+        UNIFI_CLIENTS_SCANNER => (1, 3),
         "mdns" => {
             // `mdns` hints carrying a vendor come from UPnP.
             if hint.vendor.is_some() {
@@ -1517,7 +1754,7 @@ fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
                 (3, u8::from(qualified))
             }
         }
-        _ => (1, 3),
+        _ => (1, 4),
     }
 }
 
@@ -1535,7 +1772,8 @@ fn hint_order_key(rank: (u8, u8), hint: &DeviceHint) -> (u8, u8, &str, &str, &st
 }
 
 /// Merge `DeviceHint`s from findings into devices; higher rank overwrites lower.
-/// Tier: `device`/other = 1 (`device` < `dns_ptr` < `nbns` < other within it), `services` = 2,
+/// Tier: `device`/other = 1 (`device` < `dns_ptr` < `nbns` < `unifi_clients` < other within it),
+/// `services` = 2,
 /// `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
 /// Within the `mdns` tier a name-glob or TXT-predicate match outranks a bare
 /// service-type match; anything still equal is ordered by hint content, never by
@@ -1654,7 +1892,15 @@ fn dedup_devices(devices: &mut Vec<Device>) {
 
     let mut keep: Vec<usize> = best.into_values().collect();
     keep.sort_unstable();
-    *devices = keep.into_iter().map(|i| devices[i].clone()).collect();
+    let mut kept: Vec<Device> = keep.into_iter().map(|i| devices[i].clone()).collect();
+    for device in devices.iter() {
+        if let Some(k) = kept.iter_mut().find(|k| k.ip == device.ip) {
+            for source in &device.seen_by {
+                k.mark_seen_by(source);
+            }
+        }
+    }
+    *devices = kept;
 }
 
 /// Identity fields shared by devices behind one MAC.
@@ -2693,6 +2939,276 @@ mod tests {
         assert!(probe(RDNS_SCANNER) < probe(NBNS_SCANNER));
         assert!(probe(NBNS_SCANNER) < probe("kasa"));
         assert!(probe(NBNS_SCANNER) < probe("services"));
+    }
+
+    #[test]
+    fn unifi_hint_ranks_between_nbns_and_protocol_scanners() {
+        let probe = |scanner: &str| {
+            hint_rank(
+                &Finding::new(scanner, "t", "d", Severity::Info),
+                &DeviceHint::new().with_hostname("x"),
+            )
+        };
+        assert!(probe(NBNS_SCANNER) < probe(UNIFI_CLIENTS_SCANNER));
+        assert!(probe(UNIFI_CLIENTS_SCANNER) < probe("kasa"));
+        assert!(probe(UNIFI_CLIENTS_SCANNER) < probe("services"));
+        assert!(probe(UNIFI_CLIENTS_SCANNER) < probe("mdns"));
+    }
+
+    #[cfg(feature = "unifi")]
+    fn controller_client(mac: &str, ip: Option<&str>) -> ControllerClient {
+        ControllerClient {
+            mac: mac.parse().ok(),
+            ip: ip.map(|a| a.parse().unwrap()),
+            connected: true,
+            ..ControllerClient::default()
+        }
+    }
+
+    #[cfg(feature = "unifi")]
+    fn named_hint(scanner: &str, addr: &str, name: &str) -> Finding {
+        Finding::new(scanner, "t", "d", Severity::Info)
+            .with_ip(ip(addr))
+            .with_device_hint(DeviceHint::new().with_hostname(name))
+    }
+
+    #[cfg(feature = "unifi")]
+    #[test]
+    fn unifi_alias_beats_mdns_name_and_hostname_beats_ptr() {
+        let dev = |addr: &str, mac: Option<&str>| {
+            let d = Device::new(ip(addr));
+            match mac {
+                Some(m) => d.with_mac(m),
+                None => d,
+            }
+        };
+        let mut devices = vec![
+            dev("192.168.1.10", Some("aa:bb:cc:00:00:10")),
+            dev("192.168.1.11", Some("aa:bb:cc:00:00:11")),
+            dev("192.168.1.12", Some("aa:bb:cc:00:00:12")),
+            dev("192.168.1.13", None),
+        ];
+        let mut findings = vec![
+            named_hint("mdns", "192.168.1.10", "Living-Room-TV.local"),
+            named_hint("mdns", "192.168.1.11", "Office-Printer.local"),
+        ];
+        let clients = vec![
+            ControllerClient {
+                alias: Some("Family TV".to_owned()),
+                hostname: Some("lgwebostv".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:10", Some("192.168.1.10"))
+            },
+            ControllerClient {
+                hostname: Some("HP4B1C2D".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:11", Some("192.168.1.11"))
+            },
+            ControllerClient {
+                hostname: Some("nas-box".to_owned()),
+                dev_cat: Some(44),
+                os_name: Some(56),
+                ..controller_client("aa:bb:cc:00:00:12", Some("10.9.9.9"))
+            },
+            ControllerClient {
+                hostname: Some("sensor".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:13", Some("192.168.1.13"))
+            },
+        ];
+        let (found, matched) = unifi_client_findings(
+            &clients,
+            &devices,
+            &findings,
+            &ExclusionSet::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(found.len(), 4);
+        assert_eq!(matched.len(), 4);
+        assert!(found.iter().all(|f| f.scanner == UNIFI_CLIENTS_SCANNER
+            && f.confidence == rikitikitavi_core::Confidence::Confirmed));
+        assert!(found[1].device_hint.as_ref().unwrap().hostname.is_none());
+        let ev = found[2].evidence.as_deref().unwrap();
+        assert!(
+            ev.contains("dev_cat=44") && ev.contains("os_name=56"),
+            "{ev}"
+        );
+        findings.extend(found);
+        let ptr = rdns_findings(
+            &rdns_outcome(&[("192.168.1.12", "dhcp-12"), ("192.168.1.13", "dhcp-13")]),
+            &devices,
+            &findings,
+        );
+        assert!(
+            ptr.iter()
+                .all(|f| f.device_hint.as_ref().unwrap().hostname.is_none())
+        );
+        findings.extend(ptr);
+        post_enrich_devices(&mut devices, &findings);
+        let names: Vec<_> = devices.iter().map(|d| d.hostname.as_deref()).collect();
+        assert_eq!(
+            names,
+            [
+                Some("Family TV"),
+                Some("Office-Printer"),
+                Some("nas-box"),
+                Some("sensor")
+            ]
+        );
+    }
+
+    #[cfg(feature = "unifi")]
+    #[test]
+    fn unifi_type_from_name_loses_to_protocol_scanner() {
+        let mut ap = Device::new(ip("192.168.1.41")).with_mac("aa:bb:cc:00:00:41");
+        ap.vendor = Some("Ubiquiti".to_owned());
+        let mut devices = vec![ap];
+        let clients = vec![ControllerClient {
+            hostname: Some("U7Pro".to_owned()),
+            ..controller_client("aa:bb:cc:00:00:41", Some("192.168.1.41"))
+        }];
+        let (found, _) = unifi_client_findings(
+            &clients,
+            &devices,
+            &[],
+            &ExclusionSet::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            found[0].device_hint.as_ref().unwrap().device_type,
+            Some(DeviceType::AccessPoint)
+        );
+        let mut findings = found;
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].device_type, DeviceType::AccessPoint);
+        findings.push(
+            Finding::new("kasa", "t", "d", Severity::Info)
+                .with_ip(ip("192.168.1.41"))
+                .with_device_hint(DeviceHint::new().with_device_type(DeviceType::SmartPlug)),
+        );
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].device_type, DeviceType::SmartPlug);
+    }
+
+    #[cfg(feature = "unifi")]
+    #[test]
+    fn unifi_excluded_clients_appear_in_no_finding() {
+        let devices = vec![
+            Device::new(ip("192.168.1.20")).with_mac("aa:bb:cc:00:00:20"),
+            Device::new(ip("192.168.1.21")).with_mac("aa:bb:cc:00:00:21"),
+        ];
+        let exclusions = ExclusionSet::parse(
+            &["10.20.0.0/24".to_owned()],
+            &["aa:bb:cc:00:00:20".to_owned(), "192.168.1.30".to_owned()],
+        )
+        .unwrap();
+        let clients = vec![
+            ControllerClient {
+                alias: Some("secret-mac".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:20", Some("192.168.1.20"))
+            },
+            ControllerClient {
+                alias: Some("secret-ip".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:30", Some("192.168.1.30"))
+            },
+            ControllerClient {
+                alias: Some("secret-net".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:31", Some("10.20.0.7"))
+            },
+            ControllerClient {
+                alias: Some("secret-arp".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:32", Some("192.168.1.32"))
+            },
+            ControllerClient {
+                alias: Some("kept".to_owned()),
+                ..controller_client("aa:bb:cc:00:00:21", Some("192.168.1.21"))
+            },
+        ];
+        let by_mac = HashSet::from([ip("192.168.1.32")]);
+        let (found, matched) = unifi_client_findings(&clients, &devices, &[], &exclusions, &by_mac);
+        assert_eq!(matched, HashSet::from([ip("192.168.1.21")]));
+        assert_eq!(found.len(), 1);
+        let text = format!("{found:?}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("kept"));
+    }
+
+    #[cfg(feature = "unifi")]
+    #[test]
+    fn unifi_unseen_clients_listed_once_and_capped() {
+        let devices = vec![Device::new(ip("192.168.1.2")).with_mac("aa:bb:cc:00:01:02")];
+        let mut clients: Vec<ControllerClient> = (0..25u8)
+            .map(|i| ControllerClient {
+                hostname: Some(format!("iot-{i:02}")),
+                network: Some("IoT".to_owned()),
+                ..controller_client(
+                    &format!("aa:bb:cc:00:02:{i:02x}"),
+                    Some(&format!("10.20.0.{}", i + 10)),
+                )
+            })
+            .collect();
+        clients.push(ControllerClient {
+            alias: Some("Old laptop".to_owned()),
+            connected: false,
+            ..controller_client("aa:bb:cc:00:03:01", None)
+        });
+        let (found, matched) = unifi_client_findings(
+            &clients,
+            &devices,
+            &[],
+            &ExclusionSet::default(),
+            &HashSet::new(),
+        );
+        assert!(matched.is_empty());
+        assert_eq!(found.len(), 1);
+        let summary = &found[0];
+        assert!(summary.affected_ip.is_none());
+        assert!(summary.title.starts_with("25 "), "{}", summary.title);
+        let text = &summary.description;
+        assert!(text.contains(": iot-00 (10.20.0.10, IoT); "), "{text}");
+        assert!(
+            text.contains("iot-19") && !text.contains("iot-20"),
+            "{text}"
+        );
+        assert!(text.ends_with("and 5 more."), "{text}");
+        assert!(!text.contains("Old laptop"));
+    }
+
+    #[cfg(feature = "unifi")]
+    #[test]
+    fn unifi_ip_fallback_only_for_mac_less_devices() {
+        let devices = vec![
+            Device::new(ip("192.168.1.50")),
+            Device::new(ip("192.168.1.51")).with_mac("aa:bb:cc:00:00:99"),
+        ];
+        let clients = vec![
+            controller_client("aa:bb:cc:00:00:50", Some("192.168.1.50")),
+            controller_client("aa:bb:cc:00:00:51", Some("192.168.1.51")),
+            ControllerClient {
+                connected: false,
+                ..controller_client("aa:bb:cc:00:00:52", Some("192.168.1.50"))
+            },
+        ];
+        let (found, matched) = unifi_client_findings(
+            &clients,
+            &devices,
+            &[],
+            &ExclusionSet::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(matched, HashSet::from([ip("192.168.1.50")]));
+        assert_eq!(found.len(), 2);
+        assert!(found[1].title.starts_with("1 UniFi client"));
+    }
+
+    #[test]
+    fn dedup_devices_unions_seen_by() {
+        let mut a = Device::new(ip("192.168.1.60"));
+        a.mark_seen_by("arp");
+        let mut b = Device::new(ip("192.168.1.60")).with_device_type(DeviceType::Nas);
+        b.mark_seen_by("sweep");
+        let mut devices = vec![a, b];
+        dedup_devices(&mut devices);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_type, DeviceType::Nas);
+        assert_eq!(devices[0].seen_by, ["sweep", "arp"]);
     }
 
     #[test]

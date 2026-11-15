@@ -12,6 +12,10 @@ use crate::models::{
 /// Body cap for the unauthenticated probe.
 const PROBE_BODY_MAX: usize = 64 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default body cap for authenticated API responses.
+pub const API_BODY_MAX: usize = 16 * 1024 * 1024;
+/// Bytes of a non-success response body kept for the error message.
+const ERROR_BODY_MAX: usize = 256;
 
 /// Standard `UniFi` API JSON envelope.
 #[derive(Debug, Deserialize)]
@@ -82,6 +86,34 @@ pub struct UniFiClient {
     authenticated: bool,
     /// If set, use Bearer token auth instead of session cookies.
     bearer_token: Option<String>,
+    body_max: usize,
+}
+
+/// Body of `resp`; an error once it exceeds `max` bytes.
+async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    if resp
+        .content_length()
+        .is_some_and(|n| usize::try_from(n).map_or(true, |n| n > max))
+    {
+        bail!("response body exceeds {max} bytes");
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("failed to read response body")? {
+        if buf.len() + chunk.len() > max {
+            bail!("response body exceeds {max} bytes");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// First [`ERROR_BODY_MAX`] bytes of `resp` without control characters.
+async fn error_snippet(resp: reqwest::Response) -> String {
+    read_body_capped(resp, ERROR_BODY_MAX)
+        .await
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 impl UniFiClient {
@@ -131,7 +163,15 @@ impl UniFiClient {
             layout: ApiLayout::Classic,
             authenticated: false,
             bearer_token: None,
+            body_max: API_BODY_MAX,
         })
+    }
+
+    /// Override the API response body cap.
+    #[must_use]
+    pub const fn with_body_max(mut self, max: usize) -> Self {
+        self.body_max = max;
+        self
     }
 
     /// Force a layout instead of detecting it at login.
@@ -272,13 +312,14 @@ impl UniFiClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_snippet(resp).await;
             bail!("API request {path} returned {status}: {body}");
         }
 
-        let envelope: ApiResponse<T> = resp
-            .json()
+        let body = read_capped(resp, self.body_max)
             .await
+            .with_context(|| format!("failed to read response from {path}"))?;
+        let envelope: ApiResponse<T> = serde_json::from_slice(&body)
             .with_context(|| format!("failed to parse response from {path}"))?;
 
         if envelope.meta.rc != "ok" {
@@ -304,11 +345,17 @@ impl UniFiClient {
         self.api_get(&self.site_path("stat/device")).await
     }
 
-    /// Get all active clients.
+    /// Connected clients (`stat/sta`), or known clients (`rest/user`) when `historical`.
+    /// Non-object entries are dropped.
     pub async fn get_clients(&self, historical: bool) -> Result<Vec<UniFiClientInfo>> {
         tracing::debug!(site = %self.site, historical, "fetching clients");
         let suffix = if historical { "rest/user" } else { "stat/sta" };
-        self.api_get(&self.site_path(suffix)).await
+        let raw: Vec<serde_json::Value> = self.api_get(&self.site_path(suffix)).await?;
+        Ok(raw
+            .into_iter()
+            .filter(serde_json::Value::is_object)
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect())
     }
 
     /// Get network configurations.
@@ -349,7 +396,8 @@ impl UniFiClient {
             bail!("IDS events request failed: {}", resp.status());
         }
 
-        let envelope: ApiResponse<IdsEvent> = resp.json().await?;
+        let body = read_capped(resp, self.body_max).await?;
+        let envelope: ApiResponse<IdsEvent> = serde_json::from_slice(&body)?;
         if envelope.meta.rc != "ok" {
             bail!("IDS events API returned rc={}", envelope.meta.rc);
         }
@@ -669,6 +717,48 @@ mod tests {
         assert!(err.contains("401") && err.contains("classic: 401"), "{err}");
         assert!(!client.is_authenticated());
         assert!(client.bearer_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_clients_tolerates_odd_entries_and_caps_body() {
+        let sta = r#"{"meta":{"rc":"ok"},"data":[{"mac":"aa:bb:cc:00:00:01","ip":"10.0.0.2",
+            "hostname":7,"extra":{"x":1}},"junk",42,{"ip":"10.0.0.3"}]}"#;
+        let user = format!(
+            r#"{{"meta":{{"rc":"ok"}},"data":[{{"mac":"aa:bb:cc:00:00:01","name":"{}"}}]}}"#,
+            "n".repeat(4096)
+        );
+        let base = spawn_server(move |_, path, _| match path {
+            "/api/self/sites" => http_response(200, "", EMPTY_OK),
+            "/api/s/default/stat/sta" => http_response(200, "", sta),
+            "/api/s/default/rest/user" => http_response(200, "", &user),
+            _ => http_response(404, "", "{}"),
+        })
+        .await;
+        let mut client = UniFiClient::new(&base, "default")
+            .unwrap()
+            .with_body_max(1024);
+        client.login_token("k1").await.unwrap();
+        let active = client.get_clients(false).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].mac.as_deref(), Some("aa:bb:cc:00:00:01"));
+        assert!(active[0].hostname.is_none());
+        let err = client.get_clients(true).await.unwrap_err();
+        assert!(format!("{err:#}").contains("exceeds 1024 bytes"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn error_body_is_truncated_and_stripped() {
+        let body = format!("\u{1b}[2J{}", "e".repeat(10_000));
+        let base = spawn_server(move |_, path, _| match path {
+            "/api/self/sites" => http_response(200, "", EMPTY_OK),
+            _ => http_response(500, "", &body),
+        })
+        .await;
+        let mut client = UniFiClient::new(&base, "default").unwrap();
+        client.login_token("k1").await.unwrap();
+        let err = client.get_clients(false).await.unwrap_err().to_string();
+        assert!(!err.contains('\u{1b}'), "{err}");
+        assert!(err.len() < ERROR_BODY_MAX + 100, "{}", err.len());
     }
 
     const LOGIN_REQUIRED: &str =

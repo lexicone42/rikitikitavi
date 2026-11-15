@@ -234,6 +234,21 @@ pub struct UniFiConfig {
     pub cloud: Option<UniFiCloudConfig>,
 }
 
+impl UniFiConfig {
+    /// Controller section usable by `scan`: mode not `disabled`, a URL, and an API token
+    /// or a username and password. `None` means `scan` makes no controller request.
+    #[must_use]
+    pub fn scan_controller(&self) -> Option<&UniFiControllerConfig> {
+        let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if matches!(self.mode, UniFiMode::Disabled) {
+            return None;
+        }
+        self.controller.as_ref().filter(|c| {
+            set(&c.url) && (set(&c.api_token) || (set(&c.username) && set(&c.password)))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UniFiMode {
@@ -564,6 +579,50 @@ mod tests {
         assert_eq!(cfg.scan.timeout_seconds, defaults.scan.timeout_seconds);
         assert_eq!(cfg.scan.perspective, defaults.scan.perspective);
         assert!(cfg.scan.excluded_devices.is_empty() && cfg.scan.excluded_networks.is_empty());
+        assert!(cfg.unifi.scan_controller().is_none());
         assert_eq!(cfg.unifi.controller.unwrap().site, "default");
+    }
+
+    #[test]
+    fn scan_controller_requires_url_and_credentials() {
+        let parse = |yaml: &str| serde_saphyr::from_str::<AppConfig>(yaml).unwrap().unifi;
+        assert!(
+            parse("scan:\n  parallelism: 8\n")
+                .scan_controller()
+                .is_none()
+        );
+        assert!(
+            parse("unifi:\n  controller:\n    url: https://192.168.1.1\n")
+                .scan_controller()
+                .is_none()
+        );
+        assert!(
+            parse("unifi:\n  controller:\n    api_token: k\n")
+                .scan_controller()
+                .is_none()
+        );
+        assert!(
+            parse("unifi:\n  controller:\n    url: https://192.168.1.1\n    username: admin\n")
+                .scan_controller()
+                .is_none()
+        );
+        assert!(
+            parse("unifi:\n  controller:\n    url: https://192.168.1.1\n    api_token: \"  \"\n")
+                .scan_controller()
+                .is_none()
+        );
+
+        let token = parse(
+            "unifi:\n  controller:\n    url: https://192.168.1.1\n    api_token: k\n    site: home\n",
+        );
+        assert_eq!(token.scan_controller().unwrap().site, "home");
+        let password = parse(
+            "unifi:\n  controller:\n    url: https://192.168.1.1\n    username: a\n    password: p\n",
+        );
+        assert!(password.scan_controller().is_some());
+        let disabled = parse(
+            "unifi:\n  mode: disabled\n  controller:\n    url: https://192.168.1.1\n    api_token: k\n",
+        );
+        assert!(disabled.scan_controller().is_none());
     }
 }

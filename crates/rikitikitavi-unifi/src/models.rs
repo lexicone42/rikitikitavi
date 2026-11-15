@@ -131,17 +131,76 @@ impl From<DeviceState> for i64 {
     }
 }
 
-/// Client from `/api/s/{site}/stat/sta` or `rest/user`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Client from `/api/s/{site}/stat/sta` (connected) or `rest/user` (known). Every field is
+/// optional; a value of an unexpected JSON type reads as absent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UniFiClientInfo {
-    pub mac: String,
-    pub hostname: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub mac: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
     pub ip: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub hostname: Option<String>,
+    /// Alias set in the controller UI.
+    #[serde(deserialize_with = "lenient_str")]
+    pub name: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub note: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub fixed_ip: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub oui: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
     pub network: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_str")]
+    pub essid: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub ap_mac: Option<String>,
+    #[serde(deserialize_with = "lenient_str")]
+    pub sw_mac: Option<String>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub sw_port: Option<i64>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub vlan: Option<i64>,
+    #[serde(deserialize_with = "lenient_bool")]
     pub is_wired: bool,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_bool")]
     pub is_guest: bool,
+    #[serde(deserialize_with = "lenient_int")]
+    pub dev_cat: Option<i64>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub dev_family: Option<i64>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub dev_vendor: Option<i64>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub dev_id: Option<i64>,
+    #[serde(deserialize_with = "lenient_int")]
+    pub os_name: Option<i64>,
+}
+
+fn lenient_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+fn lenient_int<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    })
+}
+
+fn lenient_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::Number(n) => n.as_i64().is_some_and(|n| n != 0),
+        serde_json::Value::String(s) => s.eq_ignore_ascii_case("true") || s == "1",
+        _ => false,
+    })
 }
 
 /// WLAN from `/api/s/{site}/rest/wlanconf`.
