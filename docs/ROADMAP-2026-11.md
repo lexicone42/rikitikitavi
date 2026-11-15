@@ -12,7 +12,9 @@ Shipped: Top 12 items 1-12 (Plex2Shell, Kasa firmware table, reverse DNS, remedi
 
 Also shipped: NT-09 (UniFi SAB-069 floors; Protect AI Key skipped, nothing identifies one), ID-08 (NBSTAT), ID-11 (MA-M/MA-S).
 
-Open: NT-08/RE-04 (tvOS currency), ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-14, RE-06 (OSV). Dedup now drops only restatements (it used to keep one scanner's findings per port).
+NT-08/RE-04 (tvOS floors and EOL) and FIX-14 (AirPlay posture) shipped too; HomePod and macOS currency did not.
+
+Open: ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-13, RE-06 (OSV). Dedup now drops only restatements (it used to keep one scanner's findings per port).
 
 ## Executive summary
 

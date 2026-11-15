@@ -35,6 +35,10 @@
 - UniFi SAB-069 fixed-version floors (CVE-2026-77555 and five siblings): checked
   against firmware on the credentialed and on-device paths; without
   credentials an identified gateway gets one Info advisory naming the floors.
+- Apple TV: `osvers` from AirPlay checked against six KEV fix versions
+  (tvOS 15.2 to 26.3) and the tvOS end-of-life table; models that cannot run
+  tvOS 27 are told to replace. AirPlay receivers that advertise no password,
+  PIN or pairing requirement get a Low finding.
 - Plex: one verdict for the Plex2Shell chain below 1.43.3.10861 (four KEV CVEs).
 - Kasa: fixed-firmware table per model and hardware version from TP-Link FAQ
   5342 and 5267 (CVE-2026-108473, CVE-2026-76784); the fix names the build.
