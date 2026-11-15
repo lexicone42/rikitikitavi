@@ -19,11 +19,17 @@ Referenced in `crates/rikitikitavi-analysis/src/standards.rs` for finding tags.
   copyrightable expression. The one-line category labels in `standards.rs` are this project's
   own factual restatements; no OWASP descriptive prose, table, wording or arrangement was copied.
 
-## IEEE MA-L (OUI) registry
+## IEEE MA-L, MA-M and MA-S registries
 
-Embedded in `crates/rikitikitavi-scanners/src/oui_db.rs` (regenerate with `scripts/gen_oui_db.py`).
+Embedded in `crates/rikitikitavi-scanners/src/oui_db.rs` (regenerate with
+`uv run python -I scripts/gen_oui_db.py --fetch <empty-dir>`).
 
-- Source: https://standards-oui.ieee.org/oui/oui.csv
+- Sources: https://standards-oui.ieee.org/oui/oui.csv (MA-L, 24-bit),
+  https://standards-oui.ieee.org/oui28/mam.csv (MA-M, 28-bit),
+  https://standards-oui.ieee.org/oui36/oui36.csv (MA-S, 36-bit)
+- Snapshot taken: 2026-11-14
+- Entries: MA-L 40,055, MA-M 6,688, MA-S 7,280. Rows owned by "IEEE Registration
+  Authority" (442 MA-L parent blocks, 1 MA-S row) are omitted.
 - Terms: IEEE public listing, used for vendor lookup only
 
 ## CISA Vulnrichment (SSVC decision points and CWE assignments)

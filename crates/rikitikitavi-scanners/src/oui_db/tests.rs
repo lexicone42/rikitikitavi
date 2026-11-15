@@ -36,11 +36,45 @@ fn test_lookup_cisco() {
 }
 
 #[test]
-fn test_db_is_sorted() {
-    for window in OUI_DB.windows(2) {
+fn test_lookup_ma_m() {
+    assert_eq!(ieee_oui_lookup("04:a1:6f:10:4a:d4"), Some("iENSO"));
+    assert_eq!(ieee_oui_lookup("DC-44-27-1A-BB-CC"), Some("Tesla,Inc."));
+}
+
+#[test]
+fn test_lookup_ma_s() {
+    assert_eq!(ieee_oui_lookup("70b3.d59f.0abc"), Some("FUJICOM"));
+}
+
+#[test]
+fn test_lookup_subdivided_block_without_assignment() {
+    // 70:B3:D5 is an MA-S parent block; 70B3D59F3 is a Registration Authority row.
+    assert_eq!(ieee_oui_lookup("70:b3:d5:9f:3a:bc"), None);
+}
+
+#[test]
+fn test_lookup_short_input_skips_longer_tables() {
+    assert_eq!(ieee_oui_lookup("04:a1:6f"), None);
+    assert_eq!(ieee_oui_lookup("04:a1:6f:1"), Some("iENSO"));
+}
+
+#[test]
+fn test_no_registration_authority_rows() {
+    let names = OUI_DB
+        .iter()
+        .map(|e| e.1)
+        .chain(MAM_DB.iter().map(|e| e.1))
+        .chain(MAS_DB.iter().map(|e| e.1));
+    for name in names {
+        assert_ne!(name, "IEEE Registration Authority");
+    }
+}
+
+fn assert_strictly_sorted<K: Ord + std::fmt::Debug>(name: &str, table: &[(K, &str)]) {
+    for window in table.windows(2) {
         assert!(
             window[0].0 < window[1].0,
-            "OUI_DB not sorted: {:?} >= {:?}",
+            "{name} not sorted or not unique: {:?} >= {:?}",
             window[0].0,
             window[1].0
         );
@@ -48,8 +82,34 @@ fn test_db_is_sorted() {
 }
 
 #[test]
+fn test_db_is_sorted() {
+    assert_strictly_sorted("OUI_DB", OUI_DB);
+    assert_strictly_sorted("MAM_DB", MAM_DB);
+    assert_strictly_sorted("MAS_DB", MAS_DB);
+}
+
+#[test]
+fn test_keys_fit_prefix_width() {
+    assert!(MAM_DB.iter().all(|e| e.0 < 1 << 28));
+    assert!(MAS_DB.iter().all(|e| e.0 < 1 << 36));
+}
+
+#[test]
 fn test_db_has_entries() {
-    assert!(OUI_DB.len() > 30_000, "expected >30K OUI entries");
+    assert!(OUI_DB.len() > 30_000, "expected >30K MA-L entries");
+    assert!(MAM_DB.len() > 5_000, "expected >5K MA-M entries");
+    assert!(MAS_DB.len() > 5_000, "expected >5K MA-S entries");
+}
+
+#[test]
+fn test_longest_prefix_wins() {
+    let ma_l = &[([0x11, 0x22, 0x33], "L")];
+    let ma_m = &[(0x112_2334, "M")];
+    let ma_s = &[(0x1_1223_3445, "S")];
+    assert_eq!(lookup_in(ma_l, ma_m, ma_s, "11:22:33:44:5f:ff"), Some("S"));
+    assert_eq!(lookup_in(ma_l, ma_m, ma_s, "11:22:33:46:00:00"), Some("M"));
+    assert_eq!(lookup_in(ma_l, ma_m, ma_s, "11:22:33:50:00:00"), Some("L"));
+    assert_eq!(lookup_in(ma_l, ma_m, ma_s, "11:22:34:44:50:00"), None);
 }
 
 #[test]
@@ -96,6 +156,45 @@ proptest! {
         prop_assert!(!vendor.is_empty());
         let mac = render_mac([oui[0], oui[1], oui[2], 0, 0, 0], 0, 0);
         prop_assert_eq!(ieee_oui_lookup(&mac), Some(vendor));
+    }
+
+    /// Every MA-M entry is found by any MAC inside its block.
+    #[test]
+    fn prop_ma_m_entry_lookup(idx in 0..MAM_DB.len(), low in 0..(1_u64 << 20)) {
+        let (prefix, vendor) = MAM_DB[idx];
+        let mac = (u64::from(prefix) << 20 | low).to_be_bytes();
+        let text = render_mac([mac[2], mac[3], mac[4], mac[5], mac[6], mac[7]], 0, 0);
+        prop_assert_eq!(ieee_oui_lookup(&text), Some(vendor), "{}", text);
+    }
+
+    /// Every MA-S entry is found by any MAC inside its block.
+    #[test]
+    fn prop_ma_s_entry_lookup(idx in 0..MAS_DB.len(), low in 0..(1_u64 << 12)) {
+        let (prefix, vendor) = MAS_DB[idx];
+        let mac = (prefix << 12 | low).to_be_bytes();
+        let text = render_mac([mac[2], mac[3], mac[4], mac[5], mac[6], mac[7]], 0, 0);
+        prop_assert_eq!(ieee_oui_lookup(&text), Some(vendor), "{}", text);
+    }
+
+    /// With overlapping blocks the longest matching prefix wins; lookup never panics.
+    #[test]
+    fn prop_longest_prefix_wins(mac in any::<[u8; 6]>(), style in 0..4_u8) {
+        let value = mac.iter().fold(0_u64, |acc, &b| acc << 8 | u64::from(b));
+        let ma_l = &[([mac[0], mac[1], mac[2]], "L")];
+        let ma_m = &[(u32::try_from(value >> 20).unwrap(), "M")];
+        let ma_s = &[(value >> 12, "S")];
+        let text = render_mac(mac, style, 0);
+        prop_assert_eq!(lookup_in(ma_l, ma_m, ma_s, &text), Some("S"));
+        prop_assert_eq!(lookup_in(ma_l, ma_m, &[], &text), Some("M"));
+        prop_assert_eq!(lookup_in(ma_l, &[], &[], &text), Some("L"));
+        prop_assert_eq!(lookup_in(&[], &[], &[], &text), None);
+        let _ = ieee_oui_lookup(&text);
+    }
+
+    /// `ieee_oui_lookup` never panics on arbitrary input.
+    #[test]
+    fn prop_lookup_no_panic(s in ".*") {
+        let _ = ieee_oui_lookup(&s);
     }
 
     /// Colon, dash, dotted, bare and any-case renderings parse to the same OUI and vendor.

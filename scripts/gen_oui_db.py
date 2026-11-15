@@ -1,20 +1,99 @@
 #!/usr/bin/env python3
-"""Generate oui_db.rs from IEEE OUI CSV.
+"""Generate oui_db.rs from the IEEE MA-L, MA-M and MA-S registries.
 
-Reads the IEEE MA-L OUI database (standards-oui.ieee.org/oui/oui.csv)
-and produces a sorted Rust array with binary-search lookup.
+Usage:
+    uv run python -I scripts/gen_oui_db.py --fetch <empty-dir> \\
+        > crates/rikitikitavi-scanners/src/oui_db.rs
+    uv run python -I scripts/gen_oui_db.py --input-dir <dir-with-csvs> > ...
+
+`--fetch` downloads oui.csv, mam.csv and oui36.csv into a new or empty
+directory (generic User-Agent, retry with backoff: the IEEE server returns
+HTTP 418 intermittently). Input is untrusted: prefixes are validated as hex of
+the exact registry length, names lose control characters and are capped.
+
+Rows owned by "IEEE Registration Authority" are skipped in all three registries.
 """
 
+import argparse
 import csv
 import datetime
+import os
 import sys
+import time
 import unicodedata
-from collections import defaultdict
+import urllib.error
+import urllib.request
 
-def parse_hex(assignment: str) -> tuple[int, int, int]:
-    """Parse 6-char hex assignment into 3 bytes."""
+SOURCES = [
+    # (registry, file name, URL, hex digits)
+    ("MA-L", "oui.csv", "https://standards-oui.ieee.org/oui/oui.csv", 6),
+    ("MA-M", "mam.csv", "https://standards-oui.ieee.org/oui28/mam.csv", 7),
+    ("MA-S", "oui36.csv", "https://standards-oui.ieee.org/oui36/oui36.csv", 9),
+]
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) oui-table-generator/1.0"
+MAX_DOWNLOAD = 64 * 1024 * 1024
+MAX_NAME_CHARS = 96
+HEX = set("0123456789ABCDEF")
+PARENT_ORG = "IEEE Registration Authority"
+
+
+def fetch(url: str, dest: str) -> None:
+    delay = 2.0
+    for attempt in range(6):
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/csv,*/*"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = resp.read(MAX_DOWNLOAD + 1)
+            if len(data) > MAX_DOWNLOAD:
+                sys.exit(f"{url}: larger than {MAX_DOWNLOAD} bytes")
+            with open(dest, "xb") as f:
+                f.write(data)
+            return
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"{url}: attempt {attempt + 1} failed: {e}", file=sys.stderr)
+            time.sleep(delay)
+            delay *= 2
+    sys.exit(f"{url}: giving up")
+
+
+def parse_prefix(assignment: str, digits: int) -> int | None:
     h = assignment.strip().upper()
-    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    if len(h) != digits or not set(h) <= HEX:
+        return None
+    return int(h, 16)
+
+
+def clean_name(raw: str) -> str:
+    name = "".join(
+        " " if c in "\t\r\n" else c
+        for c in raw
+        if c in "\t\r\n" or unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Co", "Cn")
+    )
+    return name.strip()[:MAX_NAME_CHARS].strip()
+
+
+def read_registry(path: str, registry: str, digits: int) -> dict[int, str]:
+    entries: dict[int, str] = {}
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            if len(row) < 3 or row[0].strip() != registry:
+                continue
+            prefix = parse_prefix(row[1], digits)
+            if prefix is None or prefix in entries:
+                continue
+            org = clean_name(row[2])
+            if org == PARENT_ORG:
+                continue
+            vendor = clean_name(normalize_vendor(org))
+            if vendor:
+                entries[prefix] = vendor
+    return entries
+
+
+def rust_str(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
 
 def normalize_vendor(name: str) -> str:
     """Clean up vendor name for readability."""
@@ -165,129 +244,148 @@ def normalize_vendor(name: str) -> str:
     name = "".join(c for c in name if unicodedata.category(c) != "Cf")
     return name
 
-def main():
-    entries = []
-    seen_oui = set()
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--fetch", metavar="DIR", help="download the CSVs into this new or empty directory")
+    src.add_argument("--input-dir", metavar="DIR", help="read previously downloaded CSVs from this directory")
+    args = ap.parse_args()
 
-    with open("/tmp/oui.csv", "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)  # Skip header
+    directory = args.fetch or args.input_dir
+    if args.fetch:
+        os.makedirs(directory, exist_ok=True)
+        if os.listdir(directory):
+            sys.exit(f"{directory}: not empty")
+        for _, name, url, _ in SOURCES:
+            fetch(url, os.path.join(directory, name))
 
-        for row in reader:
-            if len(row) < 3:
-                continue
-            registry, assignment, org_name = row[0], row[1], row[2]
-            if registry != "MA-L":
-                continue
-            if len(assignment.strip()) != 6:
-                continue
+    tables = {
+        registry: read_registry(os.path.join(directory, name), registry, digits)
+        for registry, name, _, digits in SOURCES
+    }
+    ma_l = sorted(tables["MA-L"].items())
+    ma_m = sorted(tables["MA-M"].items())
+    ma_s = sorted(tables["MA-S"].items())
+    unique_vendors = len({v for t in tables.values() for v in t.values()})
+    print(f"MA-L {len(ma_l)}, MA-M {len(ma_m)}, MA-S {len(ma_s)}, unique vendors {unique_vendors}", file=sys.stderr)
 
-            try:
-                b0, b1, b2 = parse_hex(assignment)
-            except (ValueError, IndexError):
-                continue
-
-            oui = (b0, b1, b2)
-            if oui in seen_oui:
-                continue
-            seen_oui.add(oui)
-
-            vendor = normalize_vendor(org_name)
-            if not vendor:
-                continue
-
-            entries.append((b0, b1, b2, vendor))
-
-    # Sort by OUI bytes for binary search
-    entries.sort(key=lambda e: (e[0], e[1], e[2]))
-
-    # Count unique vendors
-    unique_vendors = len(set(e[3] for e in entries))
-
-    print(f"// Auto-generated from IEEE MA-L OUI database", file=sys.stderr)
-    print(f"// Entries: {len(entries)}, unique vendors: {unique_vendors}", file=sys.stderr)
-
-    # Generate Rust source
     out = sys.stdout
     today = datetime.date.today().isoformat()
-    out.write(f"""//! IEEE OUI (MA-L) database — auto-generated.
+    out.write(f"""//! IEEE MAC address block registries (MA-L, MA-M, MA-S), auto-generated.
 //!
-//! Source: <https://standards-oui.ieee.org/oui/oui.csv>
+//! Sources:
+//! - <https://standards-oui.ieee.org/oui/oui.csv>
+//! - <https://standards-oui.ieee.org/oui28/mam.csv>
+//! - <https://standards-oui.ieee.org/oui36/oui36.csv>
+//!
 //! Generated: {today}
-//! Entries: {len(entries):,} | Unique vendors: {unique_vendors:,}
+//! Entries: MA-L {len(ma_l):,} | MA-M {len(ma_m):,} | MA-S {len(ma_s):,} | Unique vendors: {unique_vendors:,}
 //!
-//! Each entry is a 3-byte OUI prefix paired with a vendor name.
-//! The array is sorted by OUI bytes for `binary_search` (O(log n) ≈ 16 comparisons).
+//! Rows owned by "IEEE Registration Authority" are omitted. Each table is sorted
+//! by prefix for `binary_search`.
 
-/// Look up a MAC address in the IEEE OUI database.
+/// Look up a MAC address in the IEEE registries.
 ///
-/// Accepts any common MAC format: `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF`,
-/// `aabb.ccdd.eeff`, or raw `aabbccddeeff`. Only the first 3 octets matter.
+/// Accepts `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF`, `aabb.ccdd.eeff` or
+/// `aabbccddeeff`. Hex digits are read up to the first other character; six are
+/// required, seven enable the MA-M table and nine the MA-S table.
 ///
-/// Returns the vendor/organization name if found.
+/// Returns the vendor of the longest matching prefix: MA-S (36 bits), then MA-M
+/// (28 bits), then MA-L (24 bits).
 pub fn ieee_oui_lookup(mac: &str) -> Option<&'static str> {{
-    let bytes = parse_mac_prefix(mac)?;
-    OUI_DB
-        .binary_search_by_key(&bytes, |(oui, _)| *oui)
+    lookup_in(OUI_DB, MAM_DB, MAS_DB, mac)
+}}
+
+fn lookup_in(
+    ma_l: &[([u8; 3], &'static str)],
+    ma_m: &[(u32, &'static str)],
+    ma_s: &[(u64, &'static str)],
+    mac: &str,
+) -> Option<&'static str> {{
+    let (nibbles, count) = parse_nibbles(mac);
+    if count >= 9
+        && let Some(vendor) = find(ma_s, &prefix_value(&nibbles[..9]))
+    {{
+        return Some(vendor);
+    }}
+    if count >= 7
+        && let Ok(key) = u32::try_from(prefix_value(&nibbles[..7]))
+        && let Some(vendor) = find(ma_m, &key)
+    {{
+        return Some(vendor);
+    }}
+    find(ma_l, &parse_mac_prefix(mac)?)
+}}
+
+fn find<K: Ord>(table: &[(K, &'static str)], key: &K) -> Option<&'static str> {{
+    table
+        .binary_search_by(|(k, _)| k.cmp(key))
         .ok()
-        .map(|idx| OUI_DB[idx].1)
+        .map(|idx| table[idx].1)
+}}
+
+fn prefix_value(nibbles: &[u8]) -> u64 {{
+    nibbles.iter().fold(0, |acc, &n| acc << 4 | u64::from(n))
+}}
+
+/// Up to nine hex digit values from `s`, skipping `:`, `-` and `.`, stopping at
+/// any other character. Returns the digits and how many were read.
+fn parse_nibbles(s: &str) -> ([u8; 9], usize) {{
+    let mut out = [0u8; 9];
+    let mut count = 0;
+    for c in s.bytes() {{
+        if count == out.len() {{
+            break;
+        }}
+        out[count] = match c {{
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            b':' | b'-' | b'.' => continue,
+            _ => break,
+        }};
+        count += 1;
+    }}
+    (out, count)
 }}
 
 /// Parse the first 3 octets of a MAC address string into bytes.
 fn parse_mac_prefix(s: &str) -> Option<[u8; 3]> {{
-    // Extract up to 6 hex digits, skipping separators
-    let mut hex = [0u8; 6];
-    let mut count = 0;
-    for c in s.bytes() {{
-        if count >= 6 {{
-            break;
-        }}
-        match c {{
-            b'0'..=b'9' => {{
-                hex[count] = c - b'0';
-                count += 1;
-            }}
-            b'a'..=b'f' => {{
-                hex[count] = c - b'a' + 10;
-                count += 1;
-            }}
-            b'A'..=b'F' => {{
-                hex[count] = c - b'A' + 10;
-                count += 1;
-            }}
-            b':' | b'-' | b'.' => {{}}
-            _ => return None,
-        }}
-    }}
-    if count < 6 {{
-        return None;
-    }}
-    Some([
-        hex[0] << 4 | hex[1],
-        hex[2] << 4 | hex[3],
-        hex[4] << 4 | hex[5],
-    ])
+    let (n, count) = parse_nibbles(s);
+    (count >= 6).then(|| [n[0] << 4 | n[1], n[2] << 4 | n[3], n[4] << 4 | n[5]])
 }}
 
-/// Sorted array of (OUI prefix bytes, vendor name).
-/// Binary search: O(log {len(entries):,}) ≈ {len(entries).bit_length()} comparisons.
-///
-/// `rustfmt::skip` keeps this generated table one-entry-per-line; without it
-/// rustfmt wraps long vendor rows and produces thousands of lines of churn.
+/// MA-L: (24-bit OUI bytes, vendor), sorted.
 #[rustfmt::skip]
 static OUI_DB: &[([u8; 3], &str)] = &[
 """)
+    for prefix, vendor in ma_l:
+        b0, b1, b2 = prefix >> 16, (prefix >> 8) & 0xFF, prefix & 0xFF
+        out.write(f'    ([0x{b0:02X}, 0x{b1:02X}, 0x{b2:02X}], "{rust_str(vendor)}"),\n')
+    out.write("""];
 
-    for b0, b1, b2, vendor in entries:
-        # Escape any special chars in vendor name
-        escaped = vendor.replace("\\", "\\\\").replace('"', '\\"')
-        out.write(f'    ([0x{b0:02X}, 0x{b1:02X}, 0x{b2:02X}], "{escaped}"),\n')
+/// MA-M: (28-bit prefix as integer, vendor), sorted.
+#[rustfmt::skip]
+#[allow(clippy::unreadable_literal)]
+static MAM_DB: &[(u32, &str)] = &[
+""")
+    for prefix, vendor in ma_m:
+        out.write(f'    (0x{prefix:07X}, "{rust_str(vendor)}"),\n')
+    out.write("""];
 
+/// MA-S: (36-bit prefix as integer, vendor), sorted.
+#[rustfmt::skip]
+#[allow(clippy::unreadable_literal)]
+static MAS_DB: &[(u64, &str)] = &[
+""")
+    for prefix, vendor in ma_s:
+        out.write(f'    (0x{prefix:09X}, "{rust_str(vendor)}"),\n')
     out.write("""];
 
 #[cfg(test)]
 mod tests;
 """)
+
 
 if __name__ == "__main__":
     main()
