@@ -1517,12 +1517,14 @@ async fn cmd_unifi_scan(
 ) -> Result<()> {
     use rikitikitavi_unifi::UniFiClient;
 
+    let mut local_findings = Vec::new();
     let url = if local {
         if let Some(env) = rikitikitavi_unifi::UniFiEnvironment::detect() {
             println!("Detected UniFi device: {:?}", env.device_type);
             if let Some(ver) = &env.unifi_os_version {
                 println!("  UniFi OS: {ver}");
             }
+            local_findings = env.firmware_findings();
             "https://localhost".to_owned()
         } else {
             anyhow::bail!("Not running on a UniFi device. Use --controller for remote mode.");
@@ -1549,7 +1551,7 @@ async fn cmd_unifi_scan(
 
     println!("Running UniFi security audit...\n");
 
-    let mut all_findings = Vec::new();
+    let mut all_findings = local_findings;
 
     match client.get_wlans().await {
         Ok(wlans) => {
@@ -1589,6 +1591,7 @@ async fn cmd_unifi_scan(
                     name, dev.model, dev.firmware_version, ip
                 );
             }
+            all_findings.extend(rikitikitavi_unifi::scanner::audit_devices(&devices));
         }
         Err(e) => println!("  Failed to fetch devices: {e}"),
     }

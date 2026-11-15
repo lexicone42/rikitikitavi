@@ -731,6 +731,11 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     // Added after dedup so the Medium does not evict the rsync inventory finding.
     all_findings.extend(correlated);
     apply_product_remediation(&mut all_findings, &ctx.discovered_devices, ctx.gateway);
+    #[cfg(feature = "unifi")]
+    all_findings.extend(rikitikitavi_unifi::firmware::uncredentialed_advisory(
+        &ctx.discovered_devices,
+        ctx.gateway,
+    ));
 
     // KEV before scoring.
     let kev_count = rikitikitavi_analysis::enrich_exploit_intelligence(&mut all_findings);
