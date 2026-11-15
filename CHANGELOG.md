@@ -26,6 +26,15 @@
 - Reverse-DNS device naming through the gateway resolver (RFC 1918 resolvers
   only), with a hostname table and the Home Assistant DHCP hostname matchers
   for typing. On the test LAN, named devices rose from 18 to 59 of 71.
+- NetBIOS NBSTAT naming pass (unicast UDP 137, private addresses only). A
+  self-reported name ranks above a PTR name, except macOS's generated
+  `MAC-xxxxxx` form.
+- Vendor lookup uses the IEEE MA-M (6,688) and MA-S (7,280) registries, longest
+  prefix first. MA-L drops its 442 "IEEE Registration Authority" parent rows
+  (40,055 entries).
+- UniFi SAB-069 fixed-version floors (CVE-2026-77555 and five siblings): checked
+  against firmware on the credentialed and on-device paths; without
+  credentials an identified gateway gets one Info advisory naming the floors.
 - Plex: one verdict for the Plex2Shell chain below 1.43.3.10861 (four KEV CVEs).
 - Kasa: fixed-firmware table per model and hardware version from TP-Link FAQ
   5342 and 5267 (CVE-2026-108473, CVE-2026-76784); the fix names the build.
@@ -58,7 +67,7 @@
 - YAML parsing moved from `serde_yaml_ng` (on the archived `unsafe-libyaml`) to
   the pure-Rust `serde-saphyr`, for config, rule files and remediation templates.
 - MSRV raised to 1.89 (required by `uuid`). Unused workspace dependencies removed.
-- KEV catalog 2026.11.13 (1,781 entries), IEEE OUI table (40,497) and the
+- KEV catalog 2026.11.13 (1,781 entries), the IEEE OUI table and the
   endoflife.date table regenerated.
 
 ## 0.4.0 — 2026-09-20
