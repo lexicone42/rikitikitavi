@@ -260,7 +260,7 @@ pub enum UniFiMode {
     Disabled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UniFiControllerConfig {
     pub url: Option<String>,
@@ -270,6 +270,20 @@ pub struct UniFiControllerConfig {
     /// Controller site name; defaults to `default`.
     pub site: String,
     pub insecure: bool,
+}
+
+impl std::fmt::Debug for UniFiControllerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("UniFiControllerConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &redacted(&self.password))
+            .field("api_token", &redacted(&self.api_token))
+            .field("site", &self.site)
+            .field("insecure", &self.insecure)
+            .finish()
+    }
 }
 
 impl Default for UniFiControllerConfig {
@@ -569,6 +583,18 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn controller_debug_redacts_secrets() {
+        let cfg = UniFiControllerConfig {
+            password: Some("hunter2".to_owned()),
+            api_token: Some("tok-123".to_owned()),
+            ..UniFiControllerConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("hunter2") && !shown.contains("tok-123"));
+        assert!(shown.contains("<redacted>"));
+    }
+
     #[test]
     fn example_config_parses_and_matches_defaults() {
         let cfg: AppConfig =

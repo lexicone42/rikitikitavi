@@ -39,6 +39,17 @@
   (tvOS 15.2 to 26.3) and the tvOS end-of-life table; models that cannot run
   tvOS 27 are told to replace. AirPlay receivers that advertise no password,
   PIN or pairing requirement get a Low finding.
+- `segment-plan` subcommand: proposes Trusted / IoT / Infrastructure zones from
+  the last scan, with per-device reasons, an allow-rule table built from the
+  ports seen open, and the mDNS services that must cross zones. Text only.
+- UniFi client import: when `unifi.controller` credentials are in the config,
+  `scan` reads the controller's client list and uses owner-set aliases and
+  hostnames to name devices (alias > scanner names > controller hostname >
+  NetBIOS > PTR). Connected clients the scan did not see are summarised in one
+  finding. `mode: disabled` turns it off. Devices carry `seen_by`.
+- Authenticated UniFi API responses are capped at 16 MiB; controller
+  credentials are redacted from `Debug` output.
+- Findings with the same fingerprint collapse to the most severe.
 - Plex: one verdict for the Plex2Shell chain below 1.43.3.10861 (four KEV CVEs).
 - Kasa: fixed-firmware table per model and hardware version from TP-Link FAQ
   5342 and 5267 (CVE-2026-108473, CVE-2026-76784); the fix names the build.

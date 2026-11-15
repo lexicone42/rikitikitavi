@@ -260,6 +260,10 @@ host, a scanner error, or a finding that cannot be replayed directly (mDNS,
 UPnP, ARP) is inconclusive, never resolved. Exit codes: 0 all resolved,
 3 some still present, 4 only inconclusive left.
 
+`rikitikitavi segment-plan -o segment-plan.md` proposes Trusted / IoT /
+Infrastructure zones from the last scan, with the allow rules and mDNS
+services each zone needs. It is a proposal: it never configures a device.
+
 An accept-file entry is `{fingerprint, reason, accepted_on, expires,
 compensating}`. Accepted findings stay in the report with their reason but
 leave the risk score, grades and `--fail-on`. Past `expires` the entry is
@@ -354,6 +358,7 @@ Commands:
   tui         Launch interactive terminal UI
   verify      Re-check findings from the last full scan on the affected hosts only
   fix-plan    Markdown fix checklist from the last full scan
+  segment-plan  Zone and firewall-rule proposal from the last full scan
   report      Print the last saved scan (--latest); other modes not yet implemented
   unifi       UniFi controller commands
   aws         AWS Security Lake commands (not yet implemented; every subcommand exits non-zero)

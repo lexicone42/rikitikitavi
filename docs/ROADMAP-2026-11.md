@@ -14,7 +14,9 @@ Also shipped: NT-09 (UniFi SAB-069 floors; Protect AI Key skipped, nothing ident
 
 NT-08/RE-04 (tvOS floors and EOL) and FIX-14 (AirPlay posture) shipped too; HomePod and macOS currency did not.
 
-Open: ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-13, RE-06 (OSV). Dedup now drops only restatements (it used to keep one scanner's findings per port).
+ID-12 (UniFi client import; `dev_cat` codes kept raw, no sourced meaning) and FIX-06 (`segment-plan`) shipped as well.
+
+Open: FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-13, RE-06 (OSV). Dedup now drops only restatements (it used to keep one scanner's findings per port).
 
 ## Executive summary
 
