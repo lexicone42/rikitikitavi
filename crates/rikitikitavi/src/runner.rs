@@ -695,16 +695,23 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
         }
     }
 
+    let rdns_outcome = match rdns_task {
+        Some(task) => task.await.ok(),
+        None => None,
+    };
+    let ptr_named: HashSet<IpAddr> = rdns_outcome
+        .iter()
+        .flat_map(|o| o.names.keys().map(|ip| IpAddr::V4(*ip)))
+        .collect();
+
     if let Some(task) = nbns_task
         && let Ok(outcome) = task.await
     {
-        let nb = nbns_findings(&outcome, &ctx.discovered_devices, &all_findings);
+        let nb = nbns_findings(&outcome, &ctx.discovered_devices, &all_findings, &ptr_named);
         all_findings.extend(nb);
     }
 
-    if let Some(task) = rdns_task
-        && let Ok(outcome) = task.await
-    {
+    if let Some(outcome) = rdns_outcome {
         let ptr = rdns_findings(&outcome, &ctx.discovered_devices, &all_findings);
         all_findings.extend(ptr);
     }
@@ -1361,6 +1368,12 @@ fn spawn_nbns(
     ))
 }
 
+/// macOS default SMB name: `MAC-` and six hex digits.
+fn is_generated_netbios_name(name: &str) -> bool {
+    name.strip_prefix("MAC-")
+        .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// One `nbns` hint finding per device that reported a unique `<00>` name. The
 /// hostname is left off when another hint already names the host. `UNIT_ID` goes
 /// into the evidence only.
@@ -1368,6 +1381,7 @@ fn nbns_findings(
     outcome: &rikitikitavi_network::nbns::NbnsOutcome,
     devices: &[Device],
     findings: &[Finding],
+    ptr_named: &HashSet<IpAddr>,
 ) -> Vec<Finding> {
     use std::fmt::Write as _;
 
@@ -1384,7 +1398,8 @@ fn nbns_findings(
             let ip = IpAddr::V4(*ip);
             let device = devices.iter().find(|d| d.ip == ip)?;
             let mut hint = DeviceHint::new();
-            if device.hostname.is_none() && !named.contains(&ip) {
+            let yields_to_ptr = is_generated_netbios_name(name) && ptr_named.contains(&ip);
+            if device.hostname.is_none() && !named.contains(&ip) && !yields_to_ptr {
                 hint = hint.with_hostname(name);
             }
             let mut description = format!("{ip} reports NetBIOS name {name}");
@@ -2585,6 +2600,24 @@ mod tests {
     }
 
     #[test]
+    fn generated_netbios_name_yields_to_a_ptr_name() {
+        let mac = ip("192.168.0.50");
+        let devices = vec![Device::new(mac)];
+        let outcome = nbns_outcome(&[("192.168.0.50", "MAC-04B06C", None)]);
+        let hostname = |ptr: &HashSet<IpAddr>| {
+            nbns_findings(&outcome, &devices, &[], ptr)[0]
+                .device_hint
+                .as_ref()
+                .and_then(|h| h.hostname.clone())
+        };
+        assert_eq!(hostname(&HashSet::new()).as_deref(), Some("MAC-04B06C"));
+        assert_eq!(hostname(&HashSet::from([mac])), None);
+        assert!(is_generated_netbios_name("MAC-04B06C"));
+        assert!(!is_generated_netbios_name("MAC-MINI"));
+        assert!(!is_generated_netbios_name("MACBOOK"));
+    }
+
+    #[test]
     fn nbns_name_beats_ptr_name_and_types_via_hostname() {
         let mut nas = Device::new(ip("192.168.1.40"));
         nas.mac = Some("00:11:32:aa:bb:cc".parse().unwrap());
@@ -2603,6 +2636,7 @@ mod tests {
             ]),
             &devices,
             &findings,
+            &HashSet::new(),
         );
         assert_eq!(nb.len(), 2);
         assert_eq!(nb[0].scanner, NBNS_SCANNER);
