@@ -1,5 +1,6 @@
 pub mod api;
 pub mod deployment;
+pub mod firmware;
 pub mod local;
 pub mod models;
 pub mod persist;

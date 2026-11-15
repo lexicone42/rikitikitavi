@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
+use rikitikitavi_models::Finding;
+
+use crate::firmware::{GatewayFamily, sab069_finding};
 use crate::models::UniFiDevice;
 
 /// Detected `UniFi` environment when running on-device.
@@ -46,11 +49,23 @@ impl UniFiEnvironment {
         tracing::debug!("UniFi on-device detection is only supported on Linux");
         None
     }
+
+    /// SAB-069 finding when the device family is mapped and `unifi_os_version` is below its floor.
+    pub fn firmware_findings(&self) -> Vec<Finding> {
+        let Some(family) = GatewayFamily::from_device(self.device_type) else {
+            return Vec::new();
+        };
+        let Some(version) = self.unifi_os_version.as_deref() else {
+            return Vec::new();
+        };
+        sab069_finding(family, version, &format!("{:?}", self.device_type))
+            .into_iter()
+            .collect()
+    }
 }
 
-#[cfg(any(target_os = "linux", test))]
-/// Board name → `UniFiDevice` mapping.
-fn classify_board(board_name: &str) -> UniFiDevice {
+/// Board name or model code → `UniFiDevice` mapping.
+pub(crate) fn classify_board(board_name: &str) -> UniFiDevice {
     let name = board_name.trim().to_lowercase();
     match name.as_str() {
         "udm" | "unifi-dream-machine" => UniFiDevice::DreamMachine,
@@ -195,6 +210,41 @@ mod tests {
     #[test]
     fn test_classify_board_unknown() {
         assert_eq!(classify_board("something-random"), UniFiDevice::Unknown);
+    }
+
+    fn env(device_type: UniFiDevice, version: Option<&str>) -> UniFiEnvironment {
+        UniFiEnvironment {
+            device_type,
+            unifi_os_version: version.map(ToOwned::to_owned),
+            network_app_version: None,
+            is_on_device: true,
+            has_local_db_access: false,
+            has_controller_access: true,
+        }
+    }
+
+    #[test]
+    fn firmware_findings_on_device() {
+        let below = env(UniFiDevice::DreamMachinePro, Some("4.0.6.6754")).firmware_findings();
+        assert_eq!(below.len(), 1);
+        assert!(below[0].title.contains("DreamMachinePro"));
+        let at_floor = env(UniFiDevice::CloudGatewayUltra, Some("5.1.31"));
+        assert!(at_floor.firmware_findings().is_empty());
+        assert!(
+            env(UniFiDevice::DreamRouter, None)
+                .firmware_findings()
+                .is_empty()
+        );
+        assert!(
+            env(UniFiDevice::DreamRouter, Some("n/a"))
+                .firmware_findings()
+                .is_empty()
+        );
+        assert!(
+            env(UniFiDevice::CloudKeyGen2Plus, Some("1.0.0"))
+                .firmware_findings()
+                .is_empty()
+        );
     }
 
     #[test]

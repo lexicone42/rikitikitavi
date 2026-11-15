@@ -4,7 +4,7 @@ use rikitikitavi_models::{Finding, Remediation, ScanContext};
 use rikitikitavi_scanners::Scanner;
 
 use crate::api::UniFiClient;
-use crate::models::{FirewallRule, WlanConfig};
+use crate::models::{AdoptedDevice, FirewallRule, WlanConfig};
 
 /// `UniFi` scanner: audits WLAN configs, firewall rules, device firmware, and IDS events
 /// via the controller API.
@@ -241,6 +241,11 @@ pub fn audit_firewall_rules(rules: &[FirewallRule]) -> Vec<Finding> {
     findings
 }
 
+/// SAB-069 firmware findings for devices from `/api/s/{site}/stat/device`.
+pub fn audit_devices(devices: &[AdoptedDevice]) -> Vec<Finding> {
+    crate::firmware::audit_adopted_devices(devices)
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Scanner for UniFiScanner {
@@ -278,6 +283,7 @@ impl Scanner for UniFiScanner {
                 ),
                 Severity::Info,
             ));
+            findings.extend(env.firmware_findings());
         }
 
         let controller_url = if local_env.is_some() {
