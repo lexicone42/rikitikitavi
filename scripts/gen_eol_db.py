@@ -86,6 +86,7 @@ PRODUCTS = [
     "php",  # http_audit.rs check_powered_by_eol, `X-Powered-By: PHP/8.1.2`
     "debian",  # services.rs check_os_eol, SSH banner `+debNuM` suffix
     "ubuntu",  # services.rs check_os_eol, via the bundled OpenSSH version
+    "tvos",  # mdns/airplay.rs tvos_eol_finding, AirPlay TXT `osvers`
 ]
 
 # Tracked upstream and probed by this workspace, but NOT embedded: nothing joins

@@ -4,7 +4,7 @@
 //! Licence: MIT — <https://github.com/endoflife-date/endoflife.date/blob/master/LICENSE>.
 //! The copyright and permission notices it requires are reproduced verbatim in
 //! THIRD-PARTY-NOTICES.md at the repository root.
-//! Products: 8 | Cycles: 166 | Table: 28,521 bytes of source
+//! Products: 9 | Cycles: 178 | Table: 30,388 bytes of source
 //!
 //! Regenerate with `uv run python scripts/gen_eol_db.py`.
 //!
@@ -135,7 +135,7 @@ static EOL_CYCLES: &[EolCycle] = &[
     EolCycle { product: "apache-http-server", cycle: "1.3", codename: None, eol_from: Some("2010-02-03"), eoas_from: None, is_eol: true, latest: Some("1.3.42") },
     EolCycle { product: "apache-http-server", cycle: "2.0", codename: None, eol_from: Some("2013-07-10"), eoas_from: None, is_eol: true, latest: Some("2.0.65") },
     EolCycle { product: "apache-http-server", cycle: "2.2", codename: None, eol_from: Some("2017-07-11"), eoas_from: None, is_eol: true, latest: Some("2.2.34") },
-    EolCycle { product: "apache-http-server", cycle: "2.4", codename: None, eol_from: None, eoas_from: None, is_eol: false, latest: Some("2.4.70") },
+    EolCycle { product: "apache-http-server", cycle: "2.4", codename: None, eol_from: None, eoas_from: None, is_eol: false, latest: Some("2.4.71") },
     EolCycle { product: "debian", cycle: "1.1", codename: Some("Buzz"), eol_from: Some("1996-12-12"), eoas_from: Some("1996-12-12"), is_eol: true, latest: Some("1.1") },
     EolCycle { product: "debian", cycle: "1.2", codename: Some("Rex"), eol_from: Some("1997-10-23"), eoas_from: Some("1997-10-23"), is_eol: true, latest: Some("1.2") },
     EolCycle { product: "debian", cycle: "1.3", codename: Some("Bo"), eol_from: Some("1998-12-08"), eoas_from: Some("1998-12-08"), is_eol: true, latest: Some("1.3.1 r.6") },
@@ -253,6 +253,18 @@ static EOL_CYCLES: &[EolCycle] = &[
     EolCycle { product: "python", cycle: "3.7", codename: None, eol_from: Some("2023-06-27"), eoas_from: Some("2020-06-27"), is_eol: true, latest: Some("3.7.17") },
     EolCycle { product: "python", cycle: "3.8", codename: None, eol_from: Some("2024-10-07"), eoas_from: Some("2021-05-03"), is_eol: true, latest: Some("3.8.20") },
     EolCycle { product: "python", cycle: "3.9", codename: None, eol_from: Some("2025-10-31"), eoas_from: Some("2022-05-17"), is_eol: true, latest: Some("3.9.25") },
+    EolCycle { product: "tvos", cycle: "10", codename: None, eol_from: Some("2017-09-19"), eoas_from: None, is_eol: true, latest: Some("10.2.2") },
+    EolCycle { product: "tvos", cycle: "11", codename: None, eol_from: Some("2018-09-17"), eoas_from: None, is_eol: true, latest: Some("11.4.1") },
+    EolCycle { product: "tvos", cycle: "12", codename: None, eol_from: Some("2019-09-24"), eoas_from: None, is_eol: true, latest: Some("12.4.1") },
+    EolCycle { product: "tvos", cycle: "13", codename: None, eol_from: Some("2020-09-16"), eoas_from: None, is_eol: true, latest: Some("13.4.8") },
+    EolCycle { product: "tvos", cycle: "14", codename: None, eol_from: Some("2021-09-20"), eoas_from: None, is_eol: true, latest: Some("14.7") },
+    EolCycle { product: "tvos", cycle: "15", codename: None, eol_from: Some("2022-09-12"), eoas_from: None, is_eol: true, latest: Some("15.6") },
+    EolCycle { product: "tvos", cycle: "16", codename: None, eol_from: Some("2023-09-18"), eoas_from: None, is_eol: true, latest: Some("16.6") },
+    EolCycle { product: "tvos", cycle: "17", codename: None, eol_from: Some("2024-09-16"), eoas_from: None, is_eol: true, latest: Some("17.6.1") },
+    EolCycle { product: "tvos", cycle: "18", codename: None, eol_from: Some("2025-09-15"), eoas_from: None, is_eol: true, latest: Some("18.6") },
+    EolCycle { product: "tvos", cycle: "26", codename: None, eol_from: Some("2026-09-14"), eoas_from: None, is_eol: true, latest: Some("26.6.1") },
+    EolCycle { product: "tvos", cycle: "27", codename: None, eol_from: None, eoas_from: None, is_eol: false, latest: Some("27.2.1") },
+    EolCycle { product: "tvos", cycle: "9", codename: None, eol_from: Some("2016-09-13"), eoas_from: None, is_eol: true, latest: Some("9.2.2") },
     EolCycle { product: "ubuntu", cycle: "10.04", codename: Some("Lucid Lynx"), eol_from: Some("2013-05-09"), eoas_from: Some("2013-05-09"), is_eol: true, latest: Some("10.04.4") },
     EolCycle { product: "ubuntu", cycle: "10.10", codename: Some("Maverick Meerkat"), eol_from: Some("2012-04-10"), eoas_from: Some("2012-04-10"), is_eol: true, latest: Some("10.10") },
     EolCycle { product: "ubuntu", cycle: "11.04", codename: Some("Natty Narwhal"), eol_from: Some("2012-10-28"), eoas_from: Some("2012-10-28"), is_eol: true, latest: Some("11.04") },
@@ -303,13 +315,14 @@ static EOL_CYCLES: &[EolCycle] = &[
 /// One supported cycle per product, sorted by product.
 #[rustfmt::skip]
 static CURRENT_CYCLES: &[CurrentCycle] = &[
-    CurrentCycle { product: "apache-http-server", cycle: "2.4", latest: Some("2.4.70"), is_lts: false, other_supported: false },
+    CurrentCycle { product: "apache-http-server", cycle: "2.4", latest: Some("2.4.71"), is_lts: false, other_supported: false },
     CurrentCycle { product: "debian", cycle: "13", latest: Some("13.7"), is_lts: false, other_supported: true },
     CurrentCycle { product: "eclipse-jetty", cycle: "12.1", latest: Some("12.1.15"), is_lts: false, other_supported: true },
     CurrentCycle { product: "nginx", cycle: "1.31", latest: Some("1.31.8"), is_lts: false, other_supported: true },
     CurrentCycle { product: "openssl", cycle: "3.5", latest: Some("3.5.9"), is_lts: true, other_supported: true },
     CurrentCycle { product: "php", cycle: "8.5", latest: Some("8.5.12"), is_lts: false, other_supported: true },
     CurrentCycle { product: "python", cycle: "3.15", latest: Some("3.15.2"), is_lts: false, other_supported: true },
+    CurrentCycle { product: "tvos", cycle: "27", latest: Some("27.2.1"), is_lts: false, other_supported: false },
     CurrentCycle { product: "ubuntu", cycle: "26.04", latest: Some("26.04.1"), is_lts: true, other_supported: true },
 ];
 

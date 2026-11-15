@@ -16,6 +16,8 @@ use crate::ha_discovery_db::{
 };
 use crate::http_util::unauthenticated_probe_client;
 
+pub mod airplay;
+
 // ── UPnP device description parsing ─────────────────────────────────
 
 /// Parsed `UPnP` device description fields from `device.xml`.
@@ -864,6 +866,13 @@ fn classify_mdns_service(service: &MdnsService) -> Vec<Finding> {
             DeviceType::MediaPlayer
         };
         let hint = identity.hint(airplay_type);
+        if svc_type.contains("_airplay._tcp") {
+            findings.extend(airplay::airplay_findings(
+                service,
+                &hint,
+                &crate::services::today(),
+            ));
+        }
         findings.push(
             Finding::new(
                 "mdns",
