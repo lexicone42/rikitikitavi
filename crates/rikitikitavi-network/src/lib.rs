@@ -3,6 +3,7 @@ pub mod epss;
 pub mod external;
 pub mod interfaces;
 pub mod mdns;
+pub mod nbns;
 pub mod rdns;
 pub mod sweep;
 pub mod wifi;

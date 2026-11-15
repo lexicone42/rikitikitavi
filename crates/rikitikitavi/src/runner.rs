@@ -654,6 +654,7 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     let _ = recog_warm.await;
 
     let rdns_task = spawn_rdns(ctx, &exclusions, &excluded_mac_ips);
+    let nbns_task = spawn_nbns(ctx, &exclusions, &excluded_mac_ips);
 
     // Phase 2: deep analysis, concurrent
     let phase2_filtered = filter_phase2(phase2, ctx, &exclusions, &excluded_mac_ips);
@@ -692,6 +693,13 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
                 );
             }
         }
+    }
+
+    if let Some(task) = nbns_task
+        && let Ok(outcome) = task.await
+    {
+        let nb = nbns_findings(&outcome, &ctx.discovered_devices, &all_findings);
+        all_findings.extend(nb);
     }
 
     if let Some(task) = rdns_task
@@ -1211,9 +1219,6 @@ fn rdns_findings(
     devices: &[Device],
     findings: &[Finding],
 ) -> Vec<Finding> {
-    use rikitikitavi_scanners::ha_discovery_db;
-    use rikitikitavi_scanners::hostname_db::classify_hostname;
-
     let named: HashSet<IpAddr> = findings
         .iter()
         .filter(|f| f.device_hint.as_ref().is_some_and(|h| h.hostname.is_some()))
@@ -1230,37 +1235,7 @@ fn rdns_findings(
                 hint = hint.with_hostname(name);
             }
             let mut description = format!("The local resolver's PTR record for {ip} is {name}.");
-            if let Some(rule) = classify_hostname(name, device.vendor.as_deref()) {
-                hint = hint
-                    .with_device_type(rule.device_type)
-                    .with_device_subtype(rule.subtype);
-                let _ = std::fmt::Write::write_fmt(
-                    &mut description,
-                    format_args!(
-                        " The name matches hostname pattern `{}` ({}).",
-                        rule.pattern,
-                        rule.device_type.label()
-                    ),
-                );
-            } else {
-                let mac = device.mac.as_ref().map(ToString::to_string);
-                let typed = ha_discovery_db::dhcp_hostname_hits(name, mac.as_deref())
-                    .into_iter()
-                    .map(|hit| (hit.domain, ha_discovery_db::domain_device_type(hit.domain)))
-                    .find(|(_, device_type)| *device_type != DeviceType::Unknown);
-                if let Some((domain, device_type)) = typed {
-                    hint = hint
-                        .with_device_type(device_type)
-                        .with_device_subtype(domain);
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut description,
-                        format_args!(
-                            " The name matches the Home Assistant `{domain}` DHCP matcher ({}).",
-                            device_type.label()
-                        ),
-                    );
-                }
-            }
+            let hint = type_from_hostname(name, device, hint, &mut description);
             Some(
                 Finding::new(
                     RDNS_SCANNER,
@@ -1272,6 +1247,175 @@ fn rdns_findings(
                 .with_confidence(rikitikitavi_core::Confidence::Probable)
                 .with_device_hint(hint),
             )
+        })
+        .collect();
+    out.sort_by_key(|f| f.affected_ip);
+    out
+}
+
+/// Adds a type to `hint` from `hostname_db`, else from the HA DHCP hostname
+/// matchers, and appends the matching rule to `description`.
+fn type_from_hostname(
+    name: &str,
+    device: &Device,
+    hint: DeviceHint,
+    description: &mut String,
+) -> DeviceHint {
+    use rikitikitavi_scanners::ha_discovery_db;
+    use rikitikitavi_scanners::hostname_db::classify_hostname;
+    use std::fmt::Write as _;
+
+    if let Some(rule) = classify_hostname(name, device.vendor.as_deref()) {
+        let _ = write!(
+            description,
+            " The name matches hostname pattern `{}` ({}).",
+            rule.pattern,
+            rule.device_type.label()
+        );
+        return hint
+            .with_device_type(rule.device_type)
+            .with_device_subtype(rule.subtype);
+    }
+    let mac = device.mac.as_ref().map(ToString::to_string);
+    let typed = ha_discovery_db::dhcp_hostname_hits(name, mac.as_deref())
+        .into_iter()
+        .map(|hit| (hit.domain, ha_discovery_db::domain_device_type(hit.domain)))
+        .find(|(_, device_type)| *device_type != DeviceType::Unknown);
+    let Some((domain, device_type)) = typed else {
+        return hint;
+    };
+    let _ = write!(
+        description,
+        " The name matches the Home Assistant `{domain}` DHCP matcher ({}).",
+        device_type.label()
+    );
+    hint.with_device_type(device_type)
+        .with_device_subtype(domain)
+}
+
+/// Scanner id of `NetBIOS` node status hint findings.
+const NBNS_SCANNER: &str = "nbns";
+
+/// NBSTAT targets: private IPv4 devices, minus exclusions, that have TCP 139 or
+/// 445 open or no hostname yet. `None` below Active intensity or with no target.
+fn nbns_plan(
+    ctx: &ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> Option<Vec<std::net::Ipv4Addr>> {
+    use rikitikitavi_models::config::ScanIntensity;
+
+    if !ctx.config.intensity.at_least(ScanIntensity::Active) {
+        return None;
+    }
+    let targets: Vec<std::net::Ipv4Addr> = ctx
+        .discovered_devices
+        .iter()
+        .filter(|d| {
+            d.hostname.is_none()
+                || d.open_ports
+                    .iter()
+                    .any(|p| p.protocol == PortProtocol::Tcp && matches!(p.port, 139 | 445))
+        })
+        .filter_map(|d| match d.ip {
+            IpAddr::V4(ip)
+                if rikitikitavi_network::nbns::is_queryable(ip)
+                    && !exclusions.excludes_ip(d.ip)
+                    && !excluded_mac_ips.contains(&d.ip) =>
+            {
+                Some(ip)
+            }
+            _ => None,
+        })
+        .collect();
+    (!targets.is_empty()).then_some(targets)
+}
+
+/// Start the NBSTAT pass planned by [`nbns_plan`] under the `nbns` span.
+fn spawn_nbns(
+    ctx: &ScanContext,
+    exclusions: &ExclusionSet,
+    excluded_mac_ips: &HashSet<IpAddr>,
+) -> Option<tokio::task::JoinHandle<rikitikitavi_network::nbns::NbnsOutcome>> {
+    use rikitikitavi_network::nbns;
+
+    let targets = nbns_plan(ctx, exclusions, excluded_mac_ips)?;
+    let span = tracing::info_span!(
+        "nbns",
+        queried = tracing::field::Empty,
+        resolved = tracing::field::Empty,
+    );
+    Some(tokio::spawn(
+        async move {
+            let outcome = nbns::node_status(&targets, &nbns::NbnsConfig::default()).await;
+            let span = tracing::Span::current();
+            span.record("queried", outcome.queried);
+            span.record("resolved", outcome.resolved());
+            tracing::info!(
+                answered = outcome.nodes.len(),
+                "NetBIOS node status complete"
+            );
+            outcome
+        }
+        .instrument(span),
+    ))
+}
+
+/// One `nbns` hint finding per device that reported a unique `<00>` name. The
+/// hostname is left off when another hint already names the host. `UNIT_ID` goes
+/// into the evidence only.
+fn nbns_findings(
+    outcome: &rikitikitavi_network::nbns::NbnsOutcome,
+    devices: &[Device],
+    findings: &[Finding],
+) -> Vec<Finding> {
+    use std::fmt::Write as _;
+
+    let named: HashSet<IpAddr> = findings
+        .iter()
+        .filter(|f| f.device_hint.as_ref().is_some_and(|h| h.hostname.is_some()))
+        .filter_map(|f| f.affected_ip)
+        .collect();
+    let mut out: Vec<Finding> = outcome
+        .nodes
+        .iter()
+        .filter_map(|(ip, node)| {
+            let name = node.hostname.as_deref()?;
+            let ip = IpAddr::V4(*ip);
+            let device = devices.iter().find(|d| d.ip == ip)?;
+            let mut hint = DeviceHint::new();
+            if device.hostname.is_none() && !named.contains(&ip) {
+                hint = hint.with_hostname(name);
+            }
+            let mut description = format!("{ip} reports NetBIOS name {name}");
+            if let Some(wg) = &node.workgroup {
+                let _ = write!(description, " in workgroup {wg}");
+            }
+            description.push('.');
+            let hint = type_from_hostname(name, device, hint, &mut description);
+            let mut finding = Finding::new(
+                NBNS_SCANNER,
+                &format!("NetBIOS name {name} for {ip}"),
+                &description,
+                rikitikitavi_core::Severity::Info,
+            )
+            .with_ip(ip)
+            .with_confidence(rikitikitavi_core::Confidence::Probable)
+            .with_device_hint(hint);
+            if let Some(m) = node.unit_id {
+                let mut evidence = format!(
+                    "UNIT_ID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                );
+                if node.unit_id_is_local() {
+                    evidence.push_str(" (locally administered)");
+                }
+                if device.mac.is_some_and(|d| d.octets() != m) {
+                    evidence.push_str(" (differs from ARP MAC)");
+                }
+                finding = finding.with_evidence(evidence);
+            }
+            Some(finding)
         })
         .collect();
     out.sort_by_key(|f| f.affected_ip);
@@ -1344,6 +1488,7 @@ fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
         "services" => (2, 0),
         "device" => (1, 0),
         RDNS_SCANNER => (1, 1),
+        NBNS_SCANNER => (1, 2),
         "mdns" => {
             // `mdns` hints carrying a vendor come from UPnP.
             if hint.vendor.is_some() {
@@ -1353,7 +1498,7 @@ fn hint_rank(finding: &Finding, hint: &DeviceHint) -> (u8, u8) {
                 (3, u8::from(qualified))
             }
         }
-        _ => (1, 2),
+        _ => (1, 3),
     }
 }
 
@@ -1371,7 +1516,7 @@ fn hint_order_key(rank: (u8, u8), hint: &DeviceHint) -> (u8, u8, &str, &str, &st
 }
 
 /// Merge `DeviceHint`s from findings into devices; higher rank overwrites lower.
-/// Tier: `device`/other = 1 (`device` < `dns_ptr` < other within it), `services` = 2,
+/// Tier: `device`/other = 1 (`device` < `dns_ptr` < `nbns` < other within it), `services` = 2,
 /// `mdns` = 3, `mdns` with vendor (`UPnP`) = 4.
 /// Within the `mdns` tier a name-glob or TXT-predicate match outranks a bare
 /// service-type match; anything still equal is ordered by hint content, never by
@@ -2418,6 +2563,120 @@ mod tests {
 
         ctx.config.intensity = rikitikitavi_models::config::ScanIntensity::Passive;
         assert!(rdns_plan(&ctx, &ExclusionSet::default(), &HashSet::new(), resolv).is_none());
+    }
+
+    fn nbns_outcome(
+        entries: &[(&str, &str, Option<[u8; 6]>)],
+    ) -> rikitikitavi_network::nbns::NbnsOutcome {
+        rikitikitavi_network::nbns::NbnsOutcome {
+            nodes: entries
+                .iter()
+                .map(|(a, n, mac)| {
+                    let node = rikitikitavi_network::nbns::NodeStatus {
+                        hostname: Some((*n).to_owned()),
+                        workgroup: Some("WORKGROUP".to_owned()),
+                        unit_id: *mac,
+                    };
+                    (a.parse().unwrap(), node)
+                })
+                .collect(),
+            queried: entries.len(),
+        }
+    }
+
+    #[test]
+    fn nbns_name_beats_ptr_name_and_types_via_hostname() {
+        let mut nas = Device::new(ip("192.168.1.40"));
+        nas.mac = Some("00:11:32:aa:bb:cc".parse().unwrap());
+        let mut ap = Device::new(ip("192.168.1.41"));
+        ap.vendor = Some("Ubiquiti".to_owned());
+        let mut devices = vec![nas, ap];
+        let mut findings = vec![oui_finding("192.168.1.41", "Ubiquiti", DeviceType::Switch)];
+        let nb = nbns_findings(
+            &nbns_outcome(&[
+                (
+                    "192.168.1.40",
+                    "RUDIGER",
+                    Some([0x02, 0x11, 0x32, 0xaa, 0xbb, 0xcc]),
+                ),
+                ("192.168.1.41", "U7Pro", None),
+            ]),
+            &devices,
+            &findings,
+        );
+        assert_eq!(nb.len(), 2);
+        assert_eq!(nb[0].scanner, NBNS_SCANNER);
+        assert_eq!(nb[0].confidence, rikitikitavi_core::Confidence::Probable);
+        let ev = nb[0].evidence.as_deref().unwrap();
+        assert!(ev.contains("locally administered") && ev.contains("differs from ARP MAC"));
+        assert!(nb[0].description.contains("workgroup WORKGROUP"));
+        assert_eq!(
+            nb[1].device_hint.as_ref().unwrap().device_type,
+            Some(DeviceType::AccessPoint)
+        );
+        findings.extend(nb);
+        let ptr = rdns_findings(
+            &rdns_outcome(&[("192.168.1.40", "dhcp-lease-name")]),
+            &devices,
+            &findings,
+        );
+        assert!(ptr[0].device_hint.as_ref().unwrap().hostname.is_none());
+        findings.extend(ptr);
+        post_enrich_devices(&mut devices, &findings);
+        assert_eq!(devices[0].hostname.as_deref(), Some("RUDIGER"));
+        assert_eq!(devices[0].mac, Some("00:11:32:aa:bb:cc".parse().unwrap()));
+        assert_eq!(devices[1].device_type, DeviceType::AccessPoint);
+    }
+
+    #[test]
+    fn nbns_hint_ranks_between_ptr_and_scanners() {
+        let probe = |scanner: &str| {
+            hint_rank(
+                &Finding::new(scanner, "t", "d", Severity::Info),
+                &DeviceHint::new().with_hostname("x"),
+            )
+        };
+        assert!(probe("device") < probe(RDNS_SCANNER));
+        assert!(probe(RDNS_SCANNER) < probe(NBNS_SCANNER));
+        assert!(probe(NBNS_SCANNER) < probe("kasa"));
+        assert!(probe(NBNS_SCANNER) < probe("services"));
+    }
+
+    #[test]
+    fn nbns_plan_targets_unnamed_or_smb_hosts_only() {
+        let mut ctx = ctx_with(None, Perspective::Unauthenticated);
+        let mut named = Device::new(ip("192.168.1.20"));
+        named.hostname = Some("tv".to_owned());
+        let mut named_smb = Device::new(ip("192.168.1.21"));
+        named_smb.hostname = Some("nas".to_owned());
+        named_smb.open_ports.push(OpenPort {
+            port: 445,
+            protocol: PortProtocol::Tcp,
+            service: None,
+            version: None,
+            banner: None,
+        });
+        ctx.discovered_devices = vec![
+            named,
+            named_smb,
+            Device::new(ip("192.168.1.22")),
+            Device::new(ip("192.168.1.23")),
+            Device::new(ip("192.168.9.9")),
+            Device::new(ip("8.8.8.8")),
+        ];
+        let exclusions = ExclusionSet::parse(&["192.168.9.0/24".to_owned()], &[]).unwrap();
+        let by_mac = HashSet::from([ip("192.168.1.23")]);
+        let targets = nbns_plan(&ctx, &exclusions, &by_mac).unwrap();
+        assert_eq!(
+            targets,
+            vec![
+                std::net::Ipv4Addr::new(192, 168, 1, 21),
+                std::net::Ipv4Addr::new(192, 168, 1, 22),
+            ]
+        );
+
+        ctx.config.intensity = rikitikitavi_models::config::ScanIntensity::Passive;
+        assert!(nbns_plan(&ctx, &ExclusionSet::default(), &HashSet::new()).is_none());
     }
 
     /// mDNS hints for a host advertising both `_http._tcp` (shelly, name glob) and
