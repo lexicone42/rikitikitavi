@@ -47,6 +47,10 @@ pub enum Command {
     /// Markdown fix checklist from the last full scan (Do now / This weekend / Replace / Accepted).
     FixPlan(FixPlanArgs),
 
+    /// Markdown network-segmentation proposal from the last full scan (zones, allow rules,
+    /// mDNS proxy list). Text only; configures nothing.
+    SegmentPlan(SegmentPlanArgs),
+
     /// Generate a report from the last scan.
     Report(ReportArgs),
 
@@ -224,6 +228,13 @@ pub struct FixPlanArgs {
     #[arg(long)]
     pub accept_file: Option<PathBuf>,
 
+    /// Write the plan to this file (mode 0600) instead of stdout.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct SegmentPlanArgs {
     /// Write the plan to this file (mode 0600) instead of stdout.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
@@ -591,6 +602,23 @@ mod tests {
             panic!("expected fix-plan command");
         };
         assert_eq!(args.output.unwrap(), PathBuf::from("plan.md"));
+    }
+
+    #[test]
+    fn segment_plan_parses() {
+        let cli = Cli::try_parse_from(["rikitikitavi", "segment-plan"]).unwrap();
+        let Command::SegmentPlan(args) = cli.command else {
+            panic!("expected segment-plan command");
+        };
+        assert!(args.output.is_none());
+        let cli = Cli::try_parse_from(["rikitikitavi", "segment-plan", "-o", "zones.md"]).unwrap();
+        let Command::SegmentPlan(args) = cli.command else {
+            panic!("expected segment-plan command");
+        };
+        assert_eq!(args.output.unwrap(), PathBuf::from("zones.md"));
+        assert!(
+            Cli::try_parse_from(["rikitikitavi", "segment-plan", "--accept-file", "a"]).is_err()
+        );
     }
 
     #[test]

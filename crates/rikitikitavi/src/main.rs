@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
         Command::Scan(args) => cmd_scan(args, &loaded).await,
         Command::Verify(args) => cmd_verify(args, &loaded).await,
         Command::FixPlan(args) => cmd_fix_plan(&args),
+        Command::SegmentPlan(args) => cmd_segment_plan(&args),
         #[cfg(feature = "tui")]
         Command::Tui(args) => cmd_tui(args, app_config).await,
         Command::Report(args) => {
@@ -419,6 +420,49 @@ fn cmd_fix_plan(args: &cli::FixPlanArgs) -> Result<()> {
         tolerate_broken_pipe(write!(std::io::stdout().lock(), "{plan}"))?;
     }
     Ok(())
+}
+
+fn latest_full_scan(
+    history: &rikitikitavi_analysis::ScanHistory,
+) -> Result<rikitikitavi_models::ScanResults> {
+    use anyhow::Context as _;
+    history
+        .load_latest()?
+        .context("no saved full scan; run `rikitikitavi scan` first")
+}
+
+fn cmd_segment_plan(args: &cli::SegmentPlanArgs) -> Result<()> {
+    use anyhow::Context as _;
+    let history = rikitikitavi_analysis::ScanHistory::new()
+        .context("could not determine the scan history directory")?;
+    let results = latest_full_scan(&history)?;
+    let generated = format!(
+        "Generated {} from the scan of {}.",
+        chrono::Local::now().format("%Y-%m-%d %H:%M"),
+        results.scanned_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    if let Some(path) = args.output.as_ref() {
+        rikitikitavi_export::export_segment_plan(&results, Some(&generated), path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("Segmentation plan written to {}", path.display());
+    } else {
+        use std::io::Write as _;
+        let plan = rikitikitavi_export::render_segment_plan(&results, Some(&generated));
+        tolerate_broken_pipe(write!(std::io::stdout().lock(), "{plan}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod segment_plan_tests {
+    #[test]
+    fn missing_history_is_a_clear_error() {
+        let dir =
+            std::env::temp_dir().join(format!("rikitikitavi-no-history-{}", std::process::id()));
+        let history = rikitikitavi_analysis::ScanHistory::with_dir(dir.join("absent"));
+        let err = super::latest_full_scan(&history).unwrap_err();
+        assert!(err.to_string().contains("no saved full scan"), "{err}");
+    }
 }
 
 async fn cmd_verify(args: cli::VerifyArgs, loaded: &config::LoadedConfig) -> Result<()> {
