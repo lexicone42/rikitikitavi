@@ -814,57 +814,108 @@ async fn run_scan_inner(ctx: &mut ScanContext) -> Result<ScanResults> {
     })
 }
 
-/// Deduplicate findings keyed by `(affected_ip, affected_port)`.
-///
-/// Findings lacking IP or port are kept as-is. Per key, all findings from the
-/// scanner group ranked highest by [`dedup_rank`] are kept.
-fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
-    use std::collections::HashMap;
+/// `(scanner, title prefix)` dropped when `(scanner, title prefix)` is on the same (ip, port).
+const RESTATEMENTS: &[((&str, &str), (&str, &str))] = &[
+    (
+        ("http_audit", "Missing HSTS header"),
+        ("ssl", "HTTPS without HSTS"),
+    ),
+    (
+        ("http_audit", "Server version disclosure"),
+        ("services", "HTTP server version disclosure"),
+    ),
+];
 
-    // Group by (ip, port, scanner).
-    let mut by_scanner: HashMap<(IpAddr, u16, String), Vec<Finding>> = HashMap::new();
-    let mut unkeyed: Vec<Finding> = Vec::new();
+/// Drop restatements per `(affected_ip, affected_port)`; findings lacking either are kept.
+///
+/// The `ports` group goes when another scanner reports on the port at equal or
+/// higher severity. [`RESTATEMENTS`] pairs lose their first member. Everything
+/// else is kept, so distinct findings from different scanners coexist.
+fn deduplicate_findings(findings: Vec<Finding>) -> Vec<Finding> {
+    use std::collections::BTreeMap;
+
+    let mut by_port: BTreeMap<(IpAddr, u16), BTreeMap<String, Vec<Finding>>> = BTreeMap::new();
+    let mut result: Vec<Finding> = Vec::new();
 
     for finding in findings {
         if let (Some(ip), Some(port)) = (finding.affected_ip, finding.affected_port) {
-            let key = (ip, port, finding.scanner.clone());
-            by_scanner.entry(key).or_default().push(finding);
+            by_port
+                .entry((ip, port))
+                .or_default()
+                .entry(finding.scanner.clone())
+                .or_default()
+                .push(finding);
         } else {
-            unkeyed.push(finding);
+            result.push(finding);
         }
     }
 
-    // Per (ip, port), keep only the best scanner's group.
-    let mut by_port: HashMap<(IpAddr, u16), Vec<(String, Vec<Finding>)>> = HashMap::new();
-    for ((ip, port, scanner), group) in by_scanner {
-        by_port
-            .entry((ip, port))
-            .or_default()
-            .push((scanner, group));
-    }
+    for (_key, by_scanner) in by_port {
+        let mut groups: Vec<(String, Vec<Finding>)> = by_scanner.into_iter().collect();
+        apply_port_verdicts(&mut groups);
 
-    let mut result: Vec<Finding> = unkeyed;
-    for (_key, mut scanner_groups) in by_port {
-        apply_port_verdicts(&mut scanner_groups);
-        let mut groups = scanner_groups.into_iter();
-        // A `by_port` entry exists only because a group was pushed into it.
-        let Some(mut winner) = groups.next() else {
-            continue;
-        };
-        for group in groups {
-            if dedup_rank(&group) > dedup_rank(&winner) {
-                winner = group;
+        let severity_of = |group: &[Finding]| group.iter().map(|f| f.severity).max();
+        let deeper_max = groups
+            .iter()
+            .filter(|(scanner, _)| scanner != "ports")
+            .filter_map(|(_, group)| severity_of(group))
+            .max();
+        let mut kept: Vec<Finding> = Vec::new();
+        for (scanner, group) in groups {
+            if scanner == "ports" && deeper_max.is_some_and(|d| Some(d) >= severity_of(&group)) {
+                log_dropped(&group);
+            } else {
+                kept.extend(group);
             }
         }
-        result.extend(winner.1);
+
+        let restated: Vec<bool> = kept
+            .iter()
+            .map(|f| {
+                RESTATEMENTS
+                    .iter()
+                    .any(|((scanner, title), (by, by_title))| {
+                        f.scanner == *scanner
+                            && f.title.starts_with(title)
+                            && kept
+                                .iter()
+                                .any(|o| o.scanner == *by && o.title.starts_with(by_title))
+                    })
+            })
+            .collect();
+        for (finding, restated) in kept.into_iter().zip(restated) {
+            if restated {
+                log_dropped(std::slice::from_ref(&finding));
+            } else {
+                result.push(finding);
+            }
+        }
     }
 
-    result.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    result.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.affected_ip.cmp(&b.affected_ip))
+            .then_with(|| a.affected_port.cmp(&b.affected_port))
+            .then_with(|| a.scanner.cmp(&b.scanner))
+            .then_with(|| a.title.cmp(&b.title))
+    });
     result
 }
 
+fn log_dropped(findings: &[Finding]) {
+    for dropped in findings {
+        tracing::debug!(
+            scanner = %dropped.scanner,
+            severity = ?dropped.severity,
+            title = %dropped.title,
+            "dropped by dedup"
+        );
+    }
+}
+
 /// Verdicts from deeper scanners on one (ip, port) that override the `ports` group:
-/// a Confirmed MQTT auth-enforced result caps `ports` findings at Low and records it;
+/// a Confirmed MQTT auth-enforced result caps `ports` findings at Low and is folded into them;
 /// an identified Denon/Marantz receiver's control-port finding drops the `ports` group.
 fn apply_port_verdicts(groups: &mut Vec<(String, Vec<Finding>)>) {
     use rikitikitavi_core::{Confidence, Severity};
@@ -903,6 +954,12 @@ fn apply_port_verdicts(groups: &mut Vec<(String, Vec<Finding>)>) {
                 }
             }
         }
+        if groups.iter().any(|(scanner, _)| scanner == "ports") {
+            for (_, group) in groups.iter_mut().filter(|(scanner, _)| scanner == "mqtt") {
+                group.retain(|f| !f.title.starts_with(mqtt::AUTH_REQUIRED_TITLE));
+            }
+            groups.retain(|(_, group)| !group.is_empty());
+        }
     }
 }
 
@@ -933,46 +990,6 @@ fn apply_product_remediation(
             finding.remediation = rikitikitavi_scanners::remediation::resolve(finding, device);
         }
     }
-}
-
-/// Rank one scanner's findings for an (ip, port): highest severity first, then
-/// highest `detail_score` (non-`ports` scanners get +1), then lowest scanner id.
-fn dedup_rank(
-    (scanner, group): &(String, Vec<Finding>),
-) -> (
-    Option<rikitikitavi_core::Severity>,
-    u32,
-    std::cmp::Reverse<&str>,
-) {
-    let max_severity = group.iter().map(|f| f.severity).max();
-    let max_score = group.iter().map(detail_score).max().unwrap_or(0);
-    let adjusted = if scanner == "ports" {
-        max_score
-    } else {
-        max_score + 1
-    };
-    (max_severity, adjusted, std::cmp::Reverse(scanner.as_str()))
-}
-
-/// Score a finding by how much useful detail it contains.
-const fn detail_score(f: &Finding) -> u32 {
-    let mut score = 0;
-    if f.evidence.is_some() {
-        score += 3;
-    }
-    if f.remediation.is_some() {
-        score += 2;
-    }
-    if f.cwe_id.is_some() {
-        score += 1;
-    }
-    if f.affected_service.is_some() {
-        score += 1;
-    }
-    if f.description.len() > 100 {
-        score += 1;
-    }
-    score
 }
 
 /// Classify device type from open ports, with a free-text subtype naming the
@@ -1918,7 +1935,7 @@ mod tests {
             mqtt_ports_finding(addr),
             mqtt_auth_finding(addr, rikitikitavi_core::Confidence::Probable),
         ]);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert_eq!(result[0].scanner, "ports");
         assert_eq!(result[0].severity, Severity::Medium);
     }
@@ -1988,6 +2005,58 @@ mod tests {
     }
 
     #[test]
+    fn dedup_keeps_distinct_findings_from_different_scanners() {
+        let addr = ip("10.0.0.1");
+        let mut cert = basic_finding("ssl", Severity::Medium, addr, 443);
+        cert.title = "Excessive certificate validity on 10.0.0.1:443".to_owned();
+        let mut header = basic_finding("http_audit", Severity::Low, addr, 443);
+        header.title = "Missing X-Frame-Options on 10.0.0.1:443".to_owned();
+        let open = basic_finding("ports", Severity::Info, addr, 443);
+        let result = deduplicate_findings(vec![open, header, cert]);
+        let scanners: Vec<&str> = result.iter().map(|f| f.scanner.as_str()).collect();
+        assert_eq!(scanners, ["ssl", "http_audit"]);
+    }
+
+    #[test]
+    fn dedup_keeps_ports_finding_that_outranks_deeper_scanners() {
+        let addr = ip("10.0.0.1");
+        let telnet = basic_finding("ports", Severity::High, addr, 23);
+        let advert = basic_finding("mdns", Severity::Info, addr, 23);
+        let result = deduplicate_findings(vec![advert, telnet]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].scanner, "ports");
+    }
+
+    #[test]
+    fn dedup_drops_listed_restatements_only() {
+        let addr = ip("10.0.0.1");
+        let mut hsts = basic_finding("ssl", Severity::Low, addr, 443);
+        hsts.title = "HTTPS without HSTS on 10.0.0.1:443".to_owned();
+        let mut restated = basic_finding("http_audit", Severity::Info, addr, 443);
+        restated.title = "Missing HSTS header on 10.0.0.1:443".to_owned();
+        let result = deduplicate_findings(vec![restated.clone(), hsts]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scanner, "ssl");
+        assert_eq!(deduplicate_findings(vec![restated]).len(), 1);
+    }
+
+    #[test]
+    fn dedup_output_order_is_independent_of_input_order() {
+        let addr = ip("10.0.0.1");
+        let a = basic_finding("ssl", Severity::Low, addr, 443);
+        let b = basic_finding("http_audit", Severity::Low, addr, 443);
+        let c = basic_finding("services", Severity::Low, ip("10.0.0.2"), 22);
+        let forward = deduplicate_findings(vec![a.clone(), b.clone(), c.clone()]);
+        let reverse = deduplicate_findings(vec![c, b, a]);
+        let key = |v: &[Finding]| -> Vec<(String, Option<IpAddr>)> {
+            v.iter()
+                .map(|f| (f.scanner.clone(), f.affected_ip))
+                .collect()
+        };
+        assert_eq!(key(&forward), key(&reverse));
+    }
+
+    #[test]
     fn test_dedup_no_ip_no_dedup() {
         let f1 = Finding::new("network", "title1", "desc", Severity::Info);
         let f2 = Finding::new("network", "title2", "desc", Severity::Info);
@@ -2017,35 +2086,14 @@ mod tests {
     fn dedup_info_group_never_evicts_a_vulnerability() {
         let info = basic_finding("nuclei-detect", Severity::Info, ip("10.0.0.1"), 21)
             .with_evidence("220 ProFTPD")
-            .with_service("ftp")
-            .with_remediation(Remediation {
-                description: "Fix".to_owned(),
-                steps: vec!["Do it".to_owned()],
-                effort: None,
-            });
+            .with_service("ftp");
         let high = basic_finding("services", Severity::High, ip("10.0.0.1"), 21)
             .with_cwe("CWE-319")
             .with_service("ftp");
-        assert!(detail_score(&info) > detail_score(&high));
-
         let result = deduplicate_findings(vec![info, high]);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert_eq!(result[0].scanner, "services");
         assert_eq!(result[0].severity, Severity::High);
-    }
-
-    #[test]
-    fn dedup_tie_break_is_deterministic() {
-        let mut winners = std::collections::HashSet::new();
-        for _ in 0..64 {
-            let a = basic_finding("ssl", Severity::High, ip("10.0.0.20"), 443).with_cwe("CWE-295");
-            let b = basic_finding("http_audit", Severity::High, ip("10.0.0.20"), 443)
-                .with_cwe("CWE-693");
-            let result = deduplicate_findings(vec![a, b]);
-            assert_eq!(result.len(), 1);
-            winners.insert(result[0].scanner.clone());
-        }
-        assert_eq!(winners.len(), 1, "tie-break varied: {winners:?}");
     }
 
     #[test]

@@ -10,7 +10,7 @@ Owner-LAN evidence comes from `scan-20260912-224815.json` (43 devices, 219 findi
 
 Shipped: Top 12 items 1-12 (Plex2Shell, Kasa firmware table, reverse DNS, remediation gate, product-aware remediation, identity ports, Synology advisories and rsync correlation, Hue swversion, Spotify Connect, HA hostname matchers and house table, `verify`), plus NT-06 (PHP2Shell), RE-02 (HA tables), FIX-02 (`fix-plan`) and the FIX-08 accepted-risk ledger.
 
-Open: NT-08/RE-04 (tvOS currency), NT-09 (UniFi SAB-069), ID-08 (NBSTAT), ID-11 (MA-M/MA-S), ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-14, RE-06 (OSV). Also open: `dedup_rank` keeps one scanner's findings per (ip, port), which can hide a second scanner's distinct finding on the same port.
+Open: NT-08/RE-04 (tvOS currency), NT-09 (UniFi SAB-069), ID-08 (NBSTAT), ID-11 (MA-M/MA-S), ID-12 (UniFi client import), FIX-06 (segmentation advisor), FIX-08 `fixPath` key and template `validation:`, FIX-10 to FIX-14, RE-06 (OSV). Dedup now drops only restatements (it used to keep one scanner's findings per port).
 
 ## Executive summary
 

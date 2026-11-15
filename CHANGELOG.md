@@ -36,6 +36,13 @@
   `X-Powered-By` (CVE-2026-109618, CVE-2026-109619).
 - Default ports grew from 58 to 66 (3689, 4070, 5001, 7000, 8880, 55442, 55443,
   62078) so the iOS, NAS, UniFi-controller and new Echo classifier rules fire.
+- Deduplication drops only restatements: the generic `ports` finding when a
+  deeper scanner reports on the port at equal or higher severity, and two
+  listed cross-scanner pairs. Distinct findings from different scanners on one
+  port are all kept; before, one scanner's group won and the rest were dropped
+  (30 Low/Medium findings on the test LAN, e.g. certificate and header
+  findings). Expect them as "new" in the first `--compare-previous` diff.
+  Finding order is now deterministic.
 - An MQTT broker that enforces authentication is reported Low, not Medium.
   An identified Denon/Marantz receiver gets no telnet credential probe; its
   finding is retitled, so its fingerprint changes.
