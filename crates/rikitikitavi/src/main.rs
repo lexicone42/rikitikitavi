@@ -14,7 +14,16 @@ use cli::{Cli, Command};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    telemetry::init(&cli.log_level, cli.log_format);
+    // The TUI owns the terminal; stderr logs would draw over it. `RUST_LOG` still applies.
+    #[cfg(feature = "tui")]
+    let log_level = if matches!(cli.command, Command::Tui(_)) {
+        "off"
+    } else {
+        cli.log_level.as_str()
+    };
+    #[cfg(not(feature = "tui"))]
+    let log_level = cli.log_level.as_str();
+    telemetry::init(log_level, cli.log_format);
 
     let loaded = config::load_config(cli.config.as_deref())?;
     let app_config = &loaded.config;
@@ -1250,81 +1259,111 @@ fn print_comparison_report(diff: &rikitikitavi_analysis::ScanDiff) -> std::io::R
     Ok(())
 }
 
-/// Discovery plus the full scanner run; used by the initial TUI scan and re-scans.
+/// A TUI scan's inputs, owned so each scan can run as its own task.
 #[cfg(feature = "tui")]
-async fn tui_scan(
-    scan_config: rikitikitavi_models::config::ScanConfig,
-) -> Result<rikitikitavi_models::ScanResults> {
+#[derive(Clone)]
+struct TuiScan {
+    config: rikitikitavi_models::config::ScanConfig,
+    controller: Option<rikitikitavi_models::config::UniFiControllerConfig>,
+}
+
+/// Discovery plus the full scanner run.
+#[cfg(feature = "tui")]
+async fn tui_scan(job: TuiScan) -> Result<rikitikitavi_models::ScanResults> {
     let mut ctx = rikitikitavi_models::ScanContext {
         target_network: None,
         gateway: None,
-        perspective: scan_config.perspective,
+        perspective: job.config.perspective,
         network_mode: rikitikitavi_core::NetworkMode::Auto,
-        config: scan_config,
+        config: job.config,
         discovered_devices: Vec::new(),
     };
     runner::discover_hosts(&mut ctx).await?;
-    runner::run_scan(&mut ctx, None).await
+    runner::run_scan(&mut ctx, job.controller.as_ref()).await
 }
 
-/// Apply a finished re-scan to `app`: store results or the error, and clear `scanning`.
+/// Apply the accept ledger and re-grade. Returns the ledger's warnings.
 #[cfg(feature = "tui")]
-fn finish_rescan(
+fn tui_apply_ledger(
+    results: &mut rikitikitavi_models::ScanResults,
+    ledger: Option<&accept::Ledger>,
+) -> Vec<String> {
+    let Some(ledger) = ledger else {
+        return Vec::new();
+    };
+    let before = results.accepted.len();
+    let warnings = accept::apply(ledger, results, chrono::Local::now().date_naive());
+    if results.accepted.len() > before {
+        regrade(results, None);
+    }
+    warnings
+}
+
+/// Apply a finished scan to `app`: store results or report the error, and clear the scanning state.
+#[cfg(feature = "tui")]
+fn finish_scan(
     app: &mut rikitikitavi_tui::App,
     history: Option<&rikitikitavi_analysis::ScanHistory>,
+    ledger: Option<&accept::Ledger>,
     outcome: Result<rikitikitavi_models::ScanResults>,
 ) {
     match outcome {
-        Ok(results) => {
-            if let Some(prev) = app.results.as_ref() {
-                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
-                app.set_scan_diff(diff);
-            }
+        Ok(mut results) => {
+            // History is saved before the ledger is applied, as `scan` does.
             if let Some(h) = history
                 && let Err(e) = h.save(&results)
             {
                 tracing::warn!("failed to save scan history: {e}");
             }
-            app.results = Some(results);
-            app.scan_progress = 1.0;
-            app.status_message = Some("Re-scan complete".to_owned());
+            let warnings = tui_apply_ledger(&mut results, ledger);
+            if let Some(prev) = app.results.as_ref() {
+                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
+                app.set_scan_diff(diff);
+            }
+            let summary = format!(
+                "Scan complete: {} devices, {} findings",
+                results.devices.len(),
+                results.findings.len()
+            );
+            app.set_results(results);
+            app.set_status(warnings.into_iter().next().unwrap_or(summary));
         }
-        Err(e) => {
-            app.status_message = Some(format!("Re-scan failed: {e}"));
-        }
+        Err(e) => app.set_status(format!("Scan failed: {e}")),
     }
-    app.scanning = false;
-    app.scan_status = String::new();
+    app.scan_started = None;
 }
 
-/// Watch mode, idle, no re-scan in flight, and the interval elapsed since the last scan finished.
+/// Watch mode, no scan running, and the interval elapsed since the last scan finished.
 #[cfg(feature = "tui")]
-fn watch_rescan_due(
-    app: &rikitikitavi_tui::App,
-    rescan_in_flight: bool,
-    since_last_scan: std::time::Duration,
-) -> bool {
+fn watch_rescan_due(app: &rikitikitavi_tui::App, since_last_scan: std::time::Duration) -> bool {
     app.config.watch_mode
-        && !app.scanning
-        && !rescan_in_flight
+        && !app.scanning()
         && since_last_scan >= std::time::Duration::from_secs(app.config.watch_interval_secs)
 }
 
+/// Restores the terminal on drop, so error returns leave it usable.
 #[cfg(feature = "tui")]
-#[allow(clippy::too_many_lines)]
+struct TerminalGuard;
+
+#[cfg(feature = "tui")]
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        ratatui::restore();
+    }
+}
+
+#[cfg(feature = "tui")]
 async fn cmd_tui(
     args: cli::TuiArgs,
     app_config: &rikitikitavi_models::config::AppConfig,
 ) -> Result<()> {
-    use crossterm::{execute, terminal};
-    use ratatui::Terminal;
-    use ratatui::backend::CrosstermBackend;
     let ignored = unimplemented_tui_flags(&args);
     if !ignored.is_empty() {
         anyhow::bail!("not yet implemented: {}", ignored.join(", "));
     }
-
     config::validate_scan_config(&app_config.scan)?;
+    let ledger = args.accept_file.as_deref().map(accept::load).transpose()?;
 
     let theme = match args.theme {
         cli::ThemeArg::Dark => rikitikitavi_tui::app::Theme::Dark,
@@ -1332,130 +1371,93 @@ async fn cmd_tui(
         cli::ThemeArg::Hacker => rikitikitavi_tui::app::Theme::Hacker,
         cli::ThemeArg::Accessible => rikitikitavi_tui::app::Theme::Accessible,
     };
-
-    let tui_config = rikitikitavi_tui::TuiConfig {
+    let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig {
         theme,
         watch_mode: args.watch,
         watch_interval_secs: args.interval,
-    };
+    });
 
-    let mut app = rikitikitavi_tui::App::new(tui_config);
-
-    let history = rikitikitavi_analysis::ScanHistory::new();
-    let previous_results = history
-        .as_ref()
-        .and_then(|h| h.load_latest().ok().flatten())
-        .map(backfill_report_cards);
-
-    let perspective = args
-        .perspective
-        .map_or(app_config.scan.perspective, Into::into);
     let (intensity, capped) = effective_intensity(false, false, app_config.scan.intensity);
     if capped {
         eprintln!(
             "Note: config intensity 'aggressive' capped at 'active'; login attempts run only via `scan --aggressive`."
         );
     }
-    let scan_config = rikitikitavi_models::config::ScanConfig {
-        perspective,
-        modules: None,
-        attack_paths: true,
-        intensity,
-        parallelism: app_config.scan.effective_parallelism(),
-        ..app_config.scan.clone()
+    let job = TuiScan {
+        config: rikitikitavi_models::config::ScanConfig {
+            perspective: args
+                .perspective
+                .map_or(app_config.scan.perspective, Into::into),
+            modules: None,
+            attack_paths: true,
+            intensity,
+            parallelism: app_config.scan.effective_parallelism(),
+            ..app_config.scan.clone()
+        },
+        controller: app_config.unifi.scan_controller().cloned(),
     };
 
-    app.scanning = true;
-    match tui_scan(scan_config.clone()).await {
-        Ok(results) => {
-            if let Some(ref prev) = previous_results {
-                let diff = rikitikitavi_analysis::diff_scan_results(prev, &results);
-                app.set_scan_diff(diff);
-            }
-            if let Some(ref h) = history
-                && let Err(e) = h.save(&results)
-            {
-                tracing::warn!("failed to save scan history: {e}");
-            }
-            app.results = Some(results);
-            app.status_message = Some("Initial scan complete".to_owned());
-        }
-        Err(e) => {
-            app.status_message = Some(format!("Initial scan failed: {e}"));
-        }
+    // The last saved scan is shown while the first scan runs.
+    let history = rikitikitavi_analysis::ScanHistory::new();
+    if let Some(mut previous) = history
+        .as_ref()
+        .and_then(|h| h.load_latest().ok().flatten())
+        .map(backfill_report_cards)
+    {
+        tui_apply_ledger(&mut previous, ledger.as_ref());
+        app.set_results(previous);
     }
-    app.scanning = false;
-    app.scan_progress = 1.0;
+
+    // `ratatui::init` installs a panic hook that runs this one after restoring the terminal.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        hook(info);
+    }));
+    let mut terminal = ratatui::init();
+    let _guard = TerminalGuard;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+
+    let mut scan = Some(tokio::spawn(tui_scan(job.clone())));
+    app.scan_started = Some(std::time::Instant::now());
     let mut last_scan_done = std::time::Instant::now();
 
-    terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let mut rescan: Option<tokio::task::JoinHandle<Result<rikitikitavi_models::ScanResults>>> =
-        None;
-
-    loop {
-        if rescan
+    while !app.should_quit {
+        if scan
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
-            && let Some(handle) = rescan.take()
+            && let Some(handle) = scan.take()
         {
             let outcome = handle
                 .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("re-scan task aborted: {e}")));
-            finish_rescan(&mut app, history.as_ref(), outcome);
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task aborted: {e}")));
+            finish_scan(&mut app, history.as_ref(), ledger.as_ref(), outcome);
             last_scan_done = std::time::Instant::now();
         }
 
-        if watch_rescan_due(&app, rescan.is_some(), last_scan_done.elapsed()) {
-            app.scanning = true;
-            "Scanning...".clone_into(&mut app.scan_status);
-            app.status_message = Some(format!(
-                "Watch re-scan (every {}s)",
-                app.config.watch_interval_secs
-            ));
-            rescan = Some(tokio::spawn(tui_scan(scan_config.clone())));
-        }
+        let mut rescan = watch_rescan_due(&app, last_scan_done.elapsed());
 
         app.tick = app.tick.wrapping_add(1);
-        terminal.draw(|frame| rikitikitavi_tui::ui::draw(frame, &mut app))?;
+        terminal.draw(|frame| rikitikitavi_tui::draw(frame, &mut app))?;
 
         if let Some(event) =
             rikitikitavi_tui::events::poll_event(std::time::Duration::from_millis(100))?
         {
-            let rescan_requested = if let Some(key) = rikitikitavi_tui::events::as_key_press(&event)
-            {
-                app.handle_key(key.code)
+            if let Some(key) = rikitikitavi_tui::events::as_key_press(&event) {
+                rescan |= app.handle_key(*key);
             } else if let Some(mouse) = rikitikitavi_tui::events::as_mouse_event(&event) {
-                app.handle_mouse(*mouse)
-            } else {
-                false
-            };
-            if rescan_requested {
-                rescan = Some(tokio::spawn(tui_scan(scan_config.clone())));
+                rescan |= app.handle_mouse(*mouse);
             }
         }
-
-        if app.should_quit {
-            break;
+        if rescan && scan.is_none() {
+            scan = Some(tokio::spawn(tui_scan(job.clone())));
+            app.scan_started = Some(std::time::Instant::now());
         }
     }
 
-    terminal::disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
+    if let Some(handle) = scan {
+        handle.abort();
+    }
     Ok(())
 }
 
@@ -1942,36 +1944,35 @@ mod tests {
 
     #[cfg(feature = "tui")]
     #[test]
-    fn finish_rescan_error_clears_scanning_and_reports() {
+    fn finish_scan_error_clears_scanning_and_reports() {
         let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig::default());
-        app.scanning = true;
-        "Scanning...".clone_into(&mut app.scan_status);
+        app.scan_started = Some(std::time::Instant::now());
 
-        super::finish_rescan(&mut app, None, Err(anyhow::anyhow!("boom")));
+        super::finish_scan(&mut app, None, None, Err(anyhow::anyhow!("boom")));
 
-        assert!(!app.scanning);
-        assert!(app.scan_status.is_empty());
+        assert!(!app.scanning());
         assert!(app.results.is_none());
-        assert_eq!(app.status_message.as_deref(), Some("Re-scan failed: boom"));
-        // A new re-scan is accepted again.
-        assert!(app.handle_key(crossterm::event::KeyCode::Char('s')));
+        assert_eq!(app.status(), Some("Scan failed: boom"));
+        // A new scan is accepted again.
+        assert!(app.handle_key(crossterm::event::KeyCode::Char('s').into()));
     }
 
     #[cfg(feature = "tui")]
     #[test]
-    fn finish_rescan_ok_stores_results_and_clears_scanning() {
+    fn finish_scan_ok_stores_results_and_clears_scanning() {
         let mut app = rikitikitavi_tui::App::new(rikitikitavi_tui::TuiConfig::default());
-        app.scanning = true;
+        app.scan_started = Some(std::time::Instant::now());
 
-        super::finish_rescan(
+        super::finish_scan(
             &mut app,
+            None,
             None,
             Ok(rikitikitavi_models::ScanResults::default()),
         );
 
-        assert!(!app.scanning);
+        assert!(!app.scanning());
         assert!(app.results.is_some());
-        assert_eq!(app.status_message.as_deref(), Some("Re-scan complete"));
+        assert_eq!(app.status(), Some("Scan complete: 0 devices, 0 findings"));
     }
 
     #[test]
@@ -2547,14 +2548,13 @@ mod tests {
             watch_interval_secs: 5,
             ..Default::default()
         });
-        assert!(watch_rescan_due(&app, false, Duration::from_secs(5)));
-        assert!(!watch_rescan_due(&app, false, Duration::from_secs(4)));
-        assert!(!watch_rescan_due(&app, true, Duration::from_secs(60)));
-        app.scanning = true;
-        assert!(!watch_rescan_due(&app, false, Duration::from_secs(60)));
-        app.scanning = false;
+        assert!(watch_rescan_due(&app, Duration::from_secs(5)));
+        assert!(!watch_rescan_due(&app, Duration::from_secs(4)));
+        app.scan_started = Some(std::time::Instant::now());
+        assert!(!watch_rescan_due(&app, Duration::from_secs(60)));
+        app.scan_started = None;
         app.config.watch_mode = false;
-        assert!(!watch_rescan_due(&app, false, Duration::from_secs(60)));
+        assert!(!watch_rescan_due(&app, Duration::from_secs(60)));
     }
 
     #[test]

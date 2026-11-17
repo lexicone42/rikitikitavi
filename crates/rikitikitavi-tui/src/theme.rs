@@ -3,6 +3,7 @@ use ratatui::style::{Color, Style};
 use crate::app::Theme;
 
 /// Resolved color palette for a theme.
+#[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub bg: Color,
     pub fg: Color,
@@ -18,6 +19,7 @@ pub struct Palette {
 }
 
 impl Palette {
+    #[allow(clippy::too_many_lines)]
     pub fn from_theme(theme: Theme) -> Self {
         match theme {
             Theme::Dark => Self {

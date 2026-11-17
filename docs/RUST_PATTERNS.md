@@ -269,31 +269,28 @@ functions (invariants on output), serialization (roundtrip: decode(encode(x)) ==
 
 ## 7. The Borrow Checker Dance: Deferred Mutation
 
-**File**: `crates/rikitikitavi-tui/src/widgets/findings.rs`
+**File**: `crates/rikitikitavi-tui/src/widgets/devices.rs`
 
 ```rust
-pub fn render(frame: &mut Frame, app: &mut App) {
-    let findings = app.findings(); // borrows app immutably
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    // device_rows() borrows app immutably; collect() ends the borrow.
+    let rows: Vec<Row> = app.device_rows().map(|d| /* cells */).collect();
 
-    // ... use findings to build rows, render table ...
-    let table_area = chunks[0]; // save the Rect value
+    let block = panel(table_title(app, rows.len()), &p);
+    let inner = block.inner(area); // Rect is Copy
+    let table = Table::new(rows, widths).block(block);
 
-    frame.render_widget(table, table_area);
-
-    // NOW we can mutate app — the immutable borrow from findings() is done
-    app.hit_regions.list_area = Some(table_area);
-    app.hit_regions.list_header_offset = 2;
+    // No immutable borrow is alive, so both of these may mutate app.
+    frame.render_stateful_widget(table, area, &mut app.devices_state);
+    app.hit_regions.rows = Some(data_rows(inner));
 }
 ```
 
-**Why it's interesting**: `app.findings()` returns `&[Finding]` which borrows
+**Why it's interesting**: `app.device_rows()` yields `&Device` items that borrow
 `app` immutably. While that borrow is alive, you can't mutate `app`. The
-solution isn't to clone the data — it's to structure your code so the mutation
-happens *after* the borrow is no longer needed.
-
-By saving `table_area` as a local `Rect` (which is `Copy`), we capture the
-value we need. After `frame.render_widget()` consumes the last use of
-`findings`, the borrow is released, and we can write to `app.hit_regions`.
+solution isn't to clone the devices — it's to finish reading first: the rows are
+collected into owned `Row` values, and `inner` is a `Copy` `Rect`, so nothing
+still points into `app` when the table state and hit regions are written.
 
 **When to use**: Any time the borrow checker complains about "cannot borrow
 `x` as mutable because it is also borrowed as immutable." Instead of reaching

@@ -285,6 +285,10 @@ pub struct TuiArgs {
     #[arg(long)]
     pub perspective: Option<PerspectiveArg>,
 
+    /// Accepted-risk ledger (YAML, as for `scan --accept-file`).
+    #[arg(long)]
+    pub accept_file: Option<PathBuf>,
+
     /// Network access mode. Not yet implemented: only `auto` is accepted.
     #[arg(long, default_value = "auto")]
     pub network: NetworkArg,

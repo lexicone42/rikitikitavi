@@ -1,35 +1,84 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::time::Instant;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use rikitikitavi_analysis::ScanDiff;
 use rikitikitavi_core::Severity;
-use rikitikitavi_models::{Device, DeviceReportCard, Finding, FindingFingerprint, ScanResults};
+use rikitikitavi_export::segment_plan::{Zone, zone_for};
+use rikitikitavi_models::{
+    Device, DeviceReportCard, Finding, FindingFingerprint, Grade, ScanResults,
+};
 
-/// Which screen the TUI is currently showing.
+use crate::text::short_title;
+use crate::theme::Palette;
+
+/// Top-level tabs, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
     #[default]
-    Dashboard,
-    NetworkMap,
+    Overview,
+    Devices,
     Findings,
+    Actions,
     AttackPaths,
-    TopActions,
-    DeviceDetail,
 }
 
-/// Clickable regions recorded by the last render pass, consumed by `handle_mouse`.
+impl Screen {
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Devices,
+        Self::Findings,
+        Self::Actions,
+        Self::AttackPaths,
+    ];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Devices => "Devices",
+            Self::Findings => "Findings",
+            Self::Actions => "Top actions",
+            Self::AttackPaths => "Attack paths",
+        }
+    }
+
+    /// Tab label for narrow terminals.
+    pub const fn short_title(self) -> &'static str {
+        match self {
+            Self::Actions => "Actions",
+            Self::AttackPaths => "Paths",
+            other => other.title(),
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+
+    const fn has_list(self) -> bool {
+        matches!(self, Self::Devices | Self::Findings)
+    }
+}
+
+/// Full-screen view opened with Enter over the Devices or Findings tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Device(IpAddr),
+    /// Index into `ScanResults::findings`.
+    Finding(usize),
+}
+
+/// Clickable regions recorded by the last render pass.
 #[derive(Debug, Default)]
 pub struct HitRegions {
-    /// Footer tab buttons: (area, screen to switch to).
-    pub footer_tabs: Vec<(Rect, Screen)>,
-    /// The main scrollable list/table area (for row selection).
-    pub list_area: Option<Rect>,
-    /// Number of header rows before the first data row in the list.
-    pub list_header_offset: u16,
+    pub tabs: Vec<(Rect, Screen)>,
+    /// Data rows of the visible table, header and borders excluded.
+    pub rows: Option<Rect>,
 }
 
-/// TUI launch configuration.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
     pub theme: Theme,
@@ -47,7 +96,6 @@ impl Default for TuiConfig {
     }
 }
 
-/// Color theme for the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
     #[default]
@@ -57,366 +105,576 @@ pub enum Theme {
     Accessible,
 }
 
-/// Diff status for a finding relative to the previous scan.
+/// A finding's status relative to the previous scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffStatus {
-    /// Finding was not present in the previous scan.
     New,
-    /// Finding was present with the same severity.
     Unchanged,
-    /// Finding was present but severity changed.
     SeverityChanged,
 }
 
-/// Controls which severity levels are shown in the findings list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SeverityFilter {
-    /// Show only Critical, High, and Medium findings (default).
+    /// Critical, High and Medium.
     #[default]
     ActionableOnly,
-    /// Show all findings including Low and Info.
     All,
 }
 
-/// Rows shown in the dashboard's Recent Findings pane.
-pub const RECENT_FINDINGS_MAX: usize = 12;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceSort {
+    /// Worst grade first.
+    #[default]
+    Grade,
+    Address,
+}
 
-/// Central application state for the TUI.
+/// Ticks (~100 ms each) a status message stays visible.
+const STATUS_TICKS: u64 = 80;
+
 pub struct App {
     pub screen: Screen,
+    pub detail: Option<Detail>,
     pub config: TuiConfig,
+    pub palette: Palette,
     pub results: Option<ScanResults>,
-    pub selected_finding_index: usize,
-    pub selected_device_index: usize,
-    pub selected_device: Option<Device>,
-    pub scanning: bool,
-    pub scan_progress: f64,
-    pub scan_status: String,
+    pub scan_started: Option<Instant>,
     pub should_quit: bool,
-    pub status_message: Option<String>,
-    /// Clickable regions from the last render.
+    pub show_help: bool,
     pub hit_regions: HitRegions,
-    /// Severity filter for findings display.
     pub severity_filter: SeverityFilter,
-    /// Findings table scroll offset + selection.
-    pub findings_table_state: TableState,
-    /// Device list scroll offset + selection (dashboard / network map).
-    pub devices_table_state: TableState,
-    /// Incremented each event-loop iteration (~100ms).
+    pub device_sort: DeviceSort,
+    /// Case-insensitive substring filter on the Devices and Findings tables.
+    pub search: String,
+    pub search_editing: bool,
+    /// Findings table limited to this device (`f` in a device's detail view).
+    pub only_device: Option<IpAddr>,
+    pub findings_state: TableState,
+    pub devices_state: TableState,
+    /// Scroll offset of the text view on screen (detail, top actions, attack paths).
+    pub text_scroll: u16,
+    /// Incremented each event-loop iteration (~100 ms).
     pub tick: u64,
-    /// Diff against previous scan (set after comparison).
     pub scan_diff: Option<ScanDiff>,
-    /// Diff status per finding fingerprint, built by `set_scan_diff`.
-    diff_status_cache: HashMap<FindingFingerprint, DiffStatus>,
+    status: Option<(String, u64)>,
+    diff_status: HashMap<FindingFingerprint, DiffStatus>,
+    /// Indices into `results.findings` after filter and sort.
+    finding_rows: Vec<usize>,
+    /// Indices into `results.devices` after filter and sort.
+    device_rows: Vec<usize>,
+    cards: HashMap<IpAddr, usize>,
+    names: HashMap<IpAddr, String>,
+    zones: HashMap<IpAddr, (Zone, String)>,
 }
 
 impl App {
     pub fn new(config: TuiConfig) -> Self {
-        let mut findings_table_state = TableState::default();
-        findings_table_state.select(Some(0));
-        let mut devices_table_state = TableState::default();
-        devices_table_state.select(Some(0));
         Self {
-            screen: Screen::Dashboard,
+            screen: Screen::Overview,
+            detail: None,
+            palette: Palette::from_theme(config.theme),
             config,
             results: None,
-            selected_finding_index: 0,
-            selected_device_index: 0,
-            selected_device: None,
-            scanning: false,
-            scan_progress: 0.0,
-            scan_status: String::new(),
+            scan_started: None,
             should_quit: false,
-            status_message: None,
+            show_help: false,
             hit_regions: HitRegions::default(),
             severity_filter: SeverityFilter::default(),
-            findings_table_state,
-            devices_table_state,
+            device_sort: DeviceSort::default(),
+            search: String::new(),
+            search_editing: false,
+            only_device: None,
+            findings_state: TableState::default(),
+            devices_state: TableState::default(),
+            text_scroll: 0,
             tick: 0,
             scan_diff: None,
-            diff_status_cache: HashMap::new(),
+            status: None,
+            diff_status: HashMap::new(),
+            finding_rows: Vec::new(),
+            device_rows: Vec::new(),
+            cards: HashMap::new(),
+            names: HashMap::new(),
+            zones: HashMap::new(),
         }
     }
 
-    /// Handle a key; returns true if a re-scan was requested.
-    pub fn handle_key(&mut self, key: crossterm::event::KeyCode) -> bool {
-        use crossterm::event::KeyCode;
+    pub const fn scanning(&self) -> bool {
+        self.scan_started.is_some()
+    }
 
-        match key {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('d') => self.screen = Screen::Dashboard,
-            KeyCode::Char('n') => self.screen = Screen::NetworkMap,
-            KeyCode::Char('f') => self.screen = Screen::Findings,
-            KeyCode::Char('a') => self.screen = Screen::AttackPaths,
-            KeyCode::Char('t') => self.screen = Screen::TopActions,
-            KeyCode::Char('s') if !self.scanning => {
-                self.scanning = true;
-                "Scanning...".clone_into(&mut self.scan_status);
-                self.status_message = Some("Re-scan triggered".to_owned());
-                return true;
+    /// Replace the results, keeping the selected device and finding where they still exist.
+    pub fn set_results(&mut self, results: ScanResults) {
+        let device = self.selected_device().map(|d| d.ip);
+        let finding = self.selected_finding().map(Finding::fingerprint);
+        let detail_finding = match self.detail {
+            Some(Detail::Finding(i)) => self.findings().get(i).map(Finding::fingerprint),
+            _ => None,
+        };
+
+        self.cards = index_by_ip(results.report_cards.iter().map(|c| c.ip));
+        self.names = results
+            .devices
+            .iter()
+            .filter_map(|d| Some((d.ip, d.hostname.clone()?)))
+            .collect();
+        let mut by_ip: HashMap<IpAddr, Vec<&Finding>> = HashMap::new();
+        for f in &results.findings {
+            if let Some(ip) = f.affected_ip {
+                by_ip.entry(ip).or_default().push(f);
             }
+        }
+        self.zones = results
+            .devices
+            .iter()
+            .map(|d| {
+                let findings = by_ip.get(&d.ip).map_or(&[][..], Vec::as_slice);
+                (d.ip, zone_for(d, findings))
+            })
+            .collect();
+        self.results = Some(results);
+        self.rebuild_rows();
+
+        let device_row = device.and_then(|ip| {
+            self.device_rows
+                .iter()
+                .position(|&i| self.devices()[i].ip == ip)
+        });
+        select(&mut self.devices_state, device_row, self.device_rows.len());
+        let finding_row = finding.and_then(|fp| self.finding_row_of(fp));
+        select(
+            &mut self.findings_state,
+            finding_row,
+            self.finding_rows.len(),
+        );
+        self.detail = match self.detail {
+            Some(Detail::Device(ip)) if self.names.contains_key(&ip) || self.has_device(ip) => {
+                Some(Detail::Device(ip))
+            }
+            Some(Detail::Finding(_)) => detail_finding
+                .and_then(|fp| self.findings().iter().position(|f| f.fingerprint() == fp))
+                .map(Detail::Finding),
+            _ => None,
+        };
+    }
+
+    fn has_device(&self, ip: IpAddr) -> bool {
+        self.devices().iter().any(|d| d.ip == ip)
+    }
+
+    fn finding_row_of(&self, fp: FindingFingerprint) -> Option<usize> {
+        self.finding_rows
+            .iter()
+            .position(|&i| self.findings()[i].fingerprint() == fp)
+    }
+
+    /// Recompute the filtered, sorted row lists and clamp both selections.
+    fn rebuild_rows(&mut self) {
+        let needle = self.search.to_lowercase();
+        let mut finding_rows: Vec<usize> = self
+            .findings()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                self.severity_filter == SeverityFilter::All || f.severity >= Severity::Medium
+            })
+            .filter(|(_, f)| self.only_device.is_none_or(|ip| f.affected_ip == Some(ip)))
+            .filter(|(_, f)| needle.is_empty() || self.finding_matches(f, &needle))
+            .map(|(i, _)| i)
+            .collect();
+        finding_rows.sort_by(|&a, &b| {
+            let (a, b) = (&self.findings()[a], &self.findings()[b]);
+            b.severity
+                .cmp(&a.severity)
+                .then(b.is_kev.cmp(&a.is_kev))
+                .then_with(|| short_title(a).cmp(short_title(b)))
+                .then(a.affected_ip.cmp(&b.affected_ip))
+                .then(a.affected_port.cmp(&b.affected_port))
+        });
+
+        let mut device_rows: Vec<usize> = self
+            .devices()
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| needle.is_empty() || self.device_matches(d, &needle))
+            .map(|(i, _)| i)
+            .collect();
+        device_rows.sort_by(|&a, &b| {
+            let (a, b) = (&self.devices()[a], &self.devices()[b]);
+            match self.device_sort {
+                DeviceSort::Address => a.ip.cmp(&b.ip),
+                DeviceSort::Grade => self
+                    .grade_key(a)
+                    .cmp(&self.grade_key(b))
+                    .then(a.ip.cmp(&b.ip)),
+            }
+        });
+
+        self.finding_rows = finding_rows;
+        self.device_rows = device_rows;
+        let (f, d) = (
+            self.findings_state.selected(),
+            self.devices_state.selected(),
+        );
+        select(&mut self.findings_state, f, self.finding_rows.len());
+        select(&mut self.devices_state, d, self.device_rows.len());
+    }
+
+    /// Sort key: F first, ungraded last; more Medium+ findings first within a grade.
+    fn grade_key(&self, d: &Device) -> (u8, std::cmp::Reverse<usize>) {
+        let card = self.report_card(d.ip);
+        let rank = match card.map_or(Grade::NotAssessed, |c| c.grade) {
+            Grade::F => 0,
+            Grade::D => 1,
+            Grade::C => 2,
+            Grade::B => 3,
+            Grade::A => 4,
+            Grade::NotAssessed => 5,
+        };
+        (
+            rank,
+            std::cmp::Reverse(card.map_or(0, DeviceReportCard::actionable)),
+        )
+    }
+
+    fn finding_matches(&self, f: &Finding, needle: &str) -> bool {
+        let ip = f.affected_ip;
+        f.title.to_lowercase().contains(needle)
+            || f.scanner.to_lowercase().contains(needle)
+            || f.cve_ids.iter().any(|c| c.to_lowercase().contains(needle))
+            || ip.is_some_and(|ip| ip.to_string().contains(needle))
+            || ip
+                .and_then(|ip| self.names.get(&ip))
+                .is_some_and(|n| n.to_lowercase().contains(needle))
+    }
+
+    fn device_matches(&self, d: &Device, needle: &str) -> bool {
+        let has = |s: &Option<String>| {
+            s.as_ref()
+                .is_some_and(|s| s.to_lowercase().contains(needle))
+        };
+        d.ip.to_string().contains(needle)
+            || has(&d.hostname)
+            || has(&d.vendor)
+            || has(&d.device_subtype)
+            || d.device_type.label().to_lowercase().contains(needle)
+            || d.mac.is_some_and(|m| m.to_string().contains(needle))
+            || self
+                .zone(d.ip)
+                .is_some_and(|(z, _)| z.label().to_lowercase().contains(needle))
+    }
+
+    /// Handle a key; returns true if a re-scan was requested.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return false;
+        }
+        if self.search_editing {
+            self.handle_search_key(key.code);
+            return false;
+        }
+        if self.show_help {
+            self.show_help = false;
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('1' | 'd') => self.go(Screen::Overview),
+            KeyCode::Char('2' | 'n') => self.go(Screen::Devices),
+            KeyCode::Char('f') if matches!(self.detail, Some(Detail::Device(_))) => {
+                self.show_device_findings();
+            }
+            KeyCode::Char('3' | 'f') => self.go(Screen::Findings),
+            KeyCode::Char('4' | 't') => self.go(Screen::Actions),
+            KeyCode::Char('5' | 'a') => self.go(Screen::AttackPaths),
+            KeyCode::Right | KeyCode::Tab => self.cycle(1),
+            KeyCode::Left | KeyCode::BackTab => self.cycle(Screen::ALL.len() - 1),
+            KeyCode::Char('s') if !self.scanning() => return true,
             KeyCode::Char('l') => {
                 self.severity_filter = match self.severity_filter {
                     SeverityFilter::ActionableOnly => SeverityFilter::All,
                     SeverityFilter::All => SeverityFilter::ActionableOnly,
                 };
-                self.selected_finding_index = 0;
-                self.findings_table_state.select(Some(0));
-                *self.findings_table_state.offset_mut() = 0;
+                self.reset_list_position();
             }
-            KeyCode::Char('e') => {
-                self.export_results();
+            KeyCode::Char('o') => {
+                self.device_sort = match self.device_sort {
+                    DeviceSort::Grade => DeviceSort::Address,
+                    DeviceSort::Address => DeviceSort::Grade,
+                };
+                self.reset_list_position();
             }
-            KeyCode::Enter => {
-                self.enter_detail();
+            KeyCode::Char('/') if self.detail.is_none() => {
+                if !self.screen.has_list() {
+                    self.go(Screen::Findings);
+                }
+                self.search_editing = true;
             }
-            KeyCode::Esc if self.screen == Screen::DeviceDetail => {
-                self.screen = Screen::Dashboard;
-                self.selected_device = None;
+            KeyCode::Char('e') => self.export(),
+            KeyCode::Enter => self.open_detail(),
+            KeyCode::Esc => {
+                if self.detail.take().is_some() {
+                    self.text_scroll = 0;
+                } else if !self.search.is_empty() || self.only_device.is_some() {
+                    self.search.clear();
+                    self.only_device = None;
+                    self.reset_list_position();
+                }
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-20),
-            KeyCode::PageDown => self.move_selection(20),
-            KeyCode::Home => self.move_selection_to(0),
-            KeyCode::End => self.move_selection_to(usize::MAX),
-            KeyCode::Left | KeyCode::BackTab => self.prev_screen(),
-            KeyCode::Right | KeyCode::Tab => self.next_screen(),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_by(1),
+            KeyCode::PageUp => self.scroll_by(-self.page()),
+            KeyCode::PageDown => self.scroll_by(self.page()),
+            KeyCode::Home | KeyCode::Char('g') => self.scroll_by(i64::MIN),
+            KeyCode::End | KeyCode::Char('G') => self.scroll_by(i64::MAX),
             _ => {}
         }
         false
+    }
+
+    fn handle_search_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.search_editing = false,
+            KeyCode::Esc => {
+                self.search_editing = false;
+                self.search.clear();
+            }
+            KeyCode::Backspace => {
+                self.search.pop();
+            }
+            KeyCode::Char(c) => self.search.push(c),
+            _ => return,
+        }
+        self.reset_list_position();
     }
 
     /// Handle a mouse event; returns true if a re-scan was requested.
-    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
-        use crossterm::event::{MouseButton, MouseEventKind};
-
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> bool {
+        let at = (event.column, event.row).into();
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let col = event.column;
-                let row = event.row;
-
-                for &(area, screen) in &self.hit_regions.footer_tabs {
-                    if area.contains((col, row).into()) {
-                        self.screen = screen;
-                        return false;
-                    }
-                }
-
-                if let Some(list_area) = self.hit_regions.list_area
-                    && list_area.contains((col, row).into())
+                if let Some(&(_, screen)) =
+                    self.hit_regions.tabs.iter().find(|(r, _)| r.contains(at))
                 {
-                    let clicked_row = row
-                        .saturating_sub(list_area.y)
-                        .saturating_sub(self.hit_regions.list_header_offset);
-                    let visual_row = clicked_row as usize;
-
-                    match self.screen {
-                        Screen::Findings => {
-                            // Visible row 0 is the table's scroll offset.
-                            let offset = self.findings_table_state.offset();
-                            let idx = offset + visual_row;
-                            let max = self.filtered_findings().len().saturating_sub(1);
-                            self.selected_finding_index = idx.min(max);
-                            self.findings_table_state
-                                .select(Some(self.selected_finding_index));
-                        }
-                        Screen::Dashboard => {
-                            // Rows are `recent_findings()`; select it if the filter shows it.
-                            let idx = self.recent_findings().get(visual_row).and_then(|clicked| {
-                                self.filtered_findings()
-                                    .iter()
-                                    .position(|f| std::ptr::eq(*f, *clicked))
-                            });
-                            if let Some(idx) = idx {
-                                self.selected_finding_index = idx;
-                                self.findings_table_state.select(Some(idx));
-                            }
-                        }
-                        Screen::NetworkMap => {
-                            let offset = self.devices_table_state.offset();
-                            let idx = offset + visual_row;
-                            let max = self
-                                .results
-                                .as_ref()
-                                .map_or(0, |r| r.devices.len().saturating_sub(1));
-                            self.selected_device_index = idx.min(max);
-                            self.devices_table_state
-                                .select(Some(self.selected_device_index));
-                        }
-                        _ => {}
+                    self.go(screen);
+                } else if let Some(row) = self.row_at(event.row, at) {
+                    let state = self.list_state_mut();
+                    if state.selected() == Some(row) {
+                        self.open_detail();
+                    } else {
+                        state.select(Some(row));
                     }
                 }
             }
-
-            // Right click enters detail
             MouseEventKind::Down(MouseButton::Right) => {
-                self.enter_detail();
+                if let Some(row) = self.row_at(event.row, at) {
+                    self.list_state_mut().select(Some(row));
+                    self.open_detail();
+                }
             }
-
-            MouseEventKind::ScrollUp => self.move_selection(-1),
-            MouseEventKind::ScrollDown => self.move_selection(1),
-
+            MouseEventKind::ScrollUp => self.scroll_by(if self.text_view() { -3 } else { -1 }),
+            MouseEventKind::ScrollDown => self.scroll_by(if self.text_view() { 3 } else { 1 }),
             _ => {}
         }
         false
     }
 
-    /// Previous screen tab (Left arrow / Shift+Tab). `DeviceDetail` does not cycle.
-    const fn prev_screen(&mut self) {
-        self.screen = match self.screen {
-            Screen::Dashboard => Screen::TopActions,
-            Screen::NetworkMap => Screen::Dashboard,
-            Screen::Findings => Screen::NetworkMap,
-            Screen::AttackPaths => Screen::Findings,
-            Screen::TopActions => Screen::AttackPaths,
-            Screen::DeviceDetail => Screen::DeviceDetail,
+    /// Table row index under a click, if it lands on a data row.
+    fn row_at(&self, y: u16, at: ratatui::layout::Position) -> Option<usize> {
+        let rows = self.hit_regions.rows.filter(|r| r.contains(at))?;
+        if self.detail.is_some() || !self.screen.has_list() {
+            return None;
+        }
+        let (state, len) = match self.screen {
+            Screen::Devices => (&self.devices_state, self.device_rows.len()),
+            _ => (&self.findings_state, self.finding_rows.len()),
         };
+        let row = state.offset() + usize::from(y - rows.y);
+        (row < len).then_some(row)
     }
 
-    /// Next screen tab (Right arrow / Tab). `DeviceDetail` does not cycle.
-    const fn next_screen(&mut self) {
-        self.screen = match self.screen {
-            Screen::Dashboard => Screen::NetworkMap,
-            Screen::NetworkMap => Screen::Findings,
-            Screen::Findings => Screen::AttackPaths,
-            Screen::AttackPaths => Screen::TopActions,
-            Screen::TopActions => Screen::Dashboard,
-            Screen::DeviceDetail => Screen::DeviceDetail,
+    const fn list_state_mut(&mut self) -> &mut TableState {
+        match self.screen {
+            Screen::Devices => &mut self.devices_state,
+            _ => &mut self.findings_state,
+        }
+    }
+
+    const fn go(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.detail = None;
+        self.text_scroll = 0;
+        self.search_editing = false;
+    }
+
+    fn cycle(&mut self, step: usize) {
+        self.go(Screen::ALL[(self.screen.index() + step) % Screen::ALL.len()]);
+    }
+
+    fn reset_list_position(&mut self) {
+        self.findings_state = TableState::default();
+        self.devices_state = TableState::default();
+        self.rebuild_rows();
+    }
+
+    /// Switch from a device's detail view to the Findings tab filtered to that device.
+    fn show_device_findings(&mut self) {
+        if let Some(Detail::Device(ip)) = self.detail {
+            self.go(Screen::Findings);
+            self.search.clear();
+            self.only_device = Some(ip);
+            self.severity_filter = SeverityFilter::All;
+            self.reset_list_position();
+        }
+    }
+
+    fn open_detail(&mut self) {
+        if self.detail.is_some() {
+            return;
+        }
+        self.detail = match self.screen {
+            Screen::Devices => self.selected_device().map(|d| Detail::Device(d.ip)),
+            Screen::Findings => self
+                .findings_state
+                .selected()
+                .and_then(|row| self.finding_rows.get(row))
+                .map(|&i| Detail::Finding(i)),
+            _ => None,
         };
+        self.text_scroll = 0;
     }
 
-    fn enter_detail(&mut self) {
-        match self.screen {
-            Screen::Dashboard | Screen::NetworkMap => {
-                let devices = self.devices();
-                if self.selected_device_index < devices.len() {
-                    self.selected_device = Some(devices[self.selected_device_index].clone());
-                    self.screen = Screen::DeviceDetail;
-                }
-            }
-            _ => {}
+    /// The screen shows scrolling text, not a table.
+    const fn text_view(&self) -> bool {
+        self.detail.is_some() || !self.screen.has_list()
+    }
+
+    fn page(&self) -> i64 {
+        self.hit_regions
+            .rows
+            .map_or(10, |r| i64::from(r.height.max(2)) - 1)
+    }
+
+    /// Move the table selection, or scroll the text view. Renderers clamp `text_scroll`.
+    fn scroll_by(&mut self, delta: i64) {
+        if self.text_view() {
+            let cur = i64::from(self.text_scroll);
+            let next = cur.saturating_add(delta).clamp(0, i64::from(u16::MAX));
+            self.text_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+            return;
+        }
+        let len = match self.screen {
+            Screen::Devices => self.device_rows.len(),
+            _ => self.finding_rows.len(),
+        };
+        let state = self.list_state_mut();
+        if len == 0 {
+            state.select(None);
+            return;
+        }
+        let cur = i64::try_from(state.selected().unwrap_or(0)).unwrap_or(0);
+        let max = i64::try_from(len - 1).unwrap_or(i64::MAX);
+        let next = cur.saturating_add(delta).clamp(0, max);
+        state.select(Some(usize::try_from(next).unwrap_or(0)));
+    }
+
+    /// Write the results JSON, fix plan and segmentation plan to the working directory.
+    fn export(&mut self) {
+        let Some(results) = &self.results else {
+            self.set_status("No results to export");
+            return;
+        };
+        let stem = format!(
+            "rikitikitavi-{}",
+            results.scanned_at.format("%Y%m%d-%H%M%S")
+        );
+        let generated = results.scanned_at.format("%Y-%m-%d %H:%M UTC").to_string();
+        let path = |suffix: &str| std::path::PathBuf::from(format!("{stem}{suffix}"));
+        let outcome = rikitikitavi_export::export_json(results, &path(".json"))
+            .and_then(|()| {
+                rikitikitavi_export::export_fix_plan(
+                    results,
+                    Some(&generated),
+                    &path("-fix-plan.md"),
+                )
+            })
+            .and_then(|()| {
+                rikitikitavi_export::export_segment_plan(
+                    results,
+                    Some(&generated),
+                    &path("-segment-plan.md"),
+                )
+            });
+        match outcome {
+            Ok(()) => self.set_status(format!(
+                "Wrote {stem}.json, -fix-plan.md and -segment-plan.md"
+            )),
+            Err(e) => self.set_status(format!("Export failed: {e}")),
         }
     }
 
-    fn export_results(&mut self) {
-        if let Some(results) = &self.results {
-            let path = std::path::PathBuf::from("rikitikitavi-results.json");
-            match rikitikitavi_export::export_json(results, &path) {
-                Ok(()) => {
-                    self.status_message = Some(format!("Exported to {}", path.display()));
-                }
-                Err(e) => {
-                    self.status_message = Some(format!("Export failed: {e}"));
-                }
-            }
-        } else {
-            self.status_message = Some("No results to export".to_owned());
-        }
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.status = Some((message.into(), self.tick));
     }
 
-    fn move_selection(&mut self, delta: i32) {
-        match self.screen {
-            Screen::Findings => {
-                let max = self.filtered_findings().len().saturating_sub(1);
-                if delta < 0 {
-                    self.selected_finding_index = self
-                        .selected_finding_index
-                        .saturating_sub(delta.unsigned_abs() as usize);
-                } else {
-                    self.selected_finding_index = (self.selected_finding_index
-                        + usize::try_from(delta).unwrap_or(0))
-                    .min(max);
-                }
-                self.findings_table_state
-                    .select(Some(self.selected_finding_index));
-            }
-            Screen::Dashboard | Screen::NetworkMap => {
-                let max = self
-                    .results
-                    .as_ref()
-                    .map_or(0, |r| r.devices.len().saturating_sub(1));
-                if delta < 0 {
-                    self.selected_device_index = self
-                        .selected_device_index
-                        .saturating_sub(delta.unsigned_abs() as usize);
-                } else {
-                    self.selected_device_index =
-                        (self.selected_device_index + usize::try_from(delta).unwrap_or(0)).min(max);
-                }
-                self.devices_table_state
-                    .select(Some(self.selected_device_index));
-            }
-            _ => {}
-        }
+    /// Status message, until it expires.
+    pub fn status(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .filter(|(_, at)| self.tick.saturating_sub(*at) < STATUS_TICKS)
+            .map(|(m, _)| m.as_str())
     }
 
-    /// Jump selection to an absolute index (clamped to list bounds).
-    fn move_selection_to(&mut self, target: usize) {
-        match self.screen {
-            Screen::Findings => {
-                let max = self.filtered_findings().len().saturating_sub(1);
-                self.selected_finding_index = target.min(max);
-                self.findings_table_state
-                    .select(Some(self.selected_finding_index));
-            }
-            Screen::Dashboard | Screen::NetworkMap => {
-                let max = self
-                    .results
-                    .as_ref()
-                    .map_or(0, |r| r.devices.len().saturating_sub(1));
-                self.selected_device_index = target.min(max);
-                self.devices_table_state
-                    .select(Some(self.selected_device_index));
-            }
-            _ => {}
-        }
-    }
-
-    /// All findings, or empty when no results.
     pub fn findings(&self) -> &[Finding] {
         self.results.as_ref().map_or(&[], |r| r.findings.as_slice())
     }
 
-    /// Findings after the severity filter, sorted Critical first.
-    pub fn filtered_findings(&self) -> Vec<&Finding> {
-        let mut filtered: Vec<&Finding> = self
-            .findings()
-            .iter()
-            .filter(|f| match self.severity_filter {
-                SeverityFilter::ActionableOnly => {
-                    matches!(
-                        f.severity,
-                        Severity::Critical | Severity::High | Severity::Medium
-                    )
-                }
-                SeverityFilter::All => true,
-            })
-            .collect();
-        filtered.sort_by_key(|f| std::cmp::Reverse(f.severity));
-        filtered
-    }
-
-    /// Findings shown on the dashboard: Critical first, at most `RECENT_FINDINGS_MAX`.
-    pub fn recent_findings(&self) -> Vec<&Finding> {
-        let mut sorted: Vec<&Finding> = self.findings().iter().collect();
-        sorted.sort_by_key(|f| std::cmp::Reverse(f.severity));
-        sorted.truncate(RECENT_FINDINGS_MAX);
-        sorted
-    }
-
-    /// All devices, or empty when no results.
     pub fn devices(&self) -> &[Device] {
         self.results.as_ref().map_or(&[], |r| r.devices.as_slice())
     }
 
-    /// Report card for `ip`, when this scan graded it.
-    pub fn report_card(&self, ip: std::net::IpAddr) -> Option<&DeviceReportCard> {
+    /// Findings shown in the table, in row order.
+    pub fn finding_rows(&self) -> impl ExactSizeIterator<Item = &Finding> {
+        self.finding_rows.iter().map(|&i| &self.findings()[i])
+    }
+
+    /// Devices shown in the table, in row order.
+    pub fn device_rows(&self) -> impl ExactSizeIterator<Item = &Device> {
+        self.device_rows.iter().map(|&i| &self.devices()[i])
+    }
+
+    pub fn selected_finding(&self) -> Option<&Finding> {
+        let row = self.findings_state.selected()?;
+        self.findings().get(*self.finding_rows.get(row)?)
+    }
+
+    pub fn selected_device(&self) -> Option<&Device> {
+        let row = self.devices_state.selected()?;
+        self.devices().get(*self.device_rows.get(row)?)
+    }
+
+    pub fn device(&self, ip: IpAddr) -> Option<&Device> {
+        self.devices().iter().find(|d| d.ip == ip)
+    }
+
+    pub fn report_card(&self, ip: IpAddr) -> Option<&DeviceReportCard> {
         self.results
             .as_ref()?
             .report_cards
-            .iter()
-            .find(|c| c.ip == ip)
+            .get(*self.cards.get(&ip)?)
+    }
+
+    /// Display name for `ip`, when the scan resolved one.
+    pub fn device_name(&self, ip: IpAddr) -> Option<&str> {
+        self.names.get(&ip).map(String::as_str)
+    }
+
+    /// Proposed segmentation zone for `ip` and the reason.
+    pub fn zone(&self, ip: IpAddr) -> Option<(Zone, &str)> {
+        self.zones.get(&ip).map(|(z, r)| (*z, r.as_str()))
     }
 
     /// Store the diff and rebuild the per-finding status cache.
@@ -431,267 +689,24 @@ impl App {
         for f in &diff.unchanged_findings {
             cache.insert(f.fingerprint(), DiffStatus::Unchanged);
         }
-        self.diff_status_cache = cache;
+        self.diff_status = cache;
         self.scan_diff = Some(diff);
     }
 
-    /// Diff status of `finding`, if a diff is loaded and the finding appears in it.
     pub fn finding_diff_status(&self, finding: &Finding) -> Option<DiffStatus> {
-        self.diff_status_cache.get(&finding.fingerprint()).copied()
+        self.diff_status.get(&finding.fingerprint()).copied()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyCode;
+fn index_by_ip(ips: impl Iterator<Item = IpAddr>) -> HashMap<IpAddr, usize> {
+    ips.enumerate().map(|(i, ip)| (ip, i)).collect()
+}
 
-    fn test_app() -> App {
-        App::new(TuiConfig::default())
-    }
-
-    fn left_click(column: u16, row: u16) -> crossterm::event::MouseEvent {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::empty(),
-        }
-    }
-
-    fn device(ip: &str) -> Device {
-        Device::new(ip.parse().unwrap())
-    }
-
-    #[test]
-    fn test_screen_navigation() {
-        let mut app = test_app();
-        assert_eq!(app.screen, Screen::Dashboard);
-
-        app.handle_key(KeyCode::Char('f'));
-        assert_eq!(app.screen, Screen::Findings);
-
-        app.handle_key(KeyCode::Char('n'));
-        assert_eq!(app.screen, Screen::NetworkMap);
-
-        app.handle_key(KeyCode::Char('a'));
-        assert_eq!(app.screen, Screen::AttackPaths);
-
-        app.handle_key(KeyCode::Char('d'));
-        assert_eq!(app.screen, Screen::Dashboard);
-    }
-
-    #[test]
-    fn test_quit() {
-        let mut app = test_app();
-        assert!(!app.should_quit);
-        app.handle_key(KeyCode::Char('q'));
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn test_rescan_request() {
-        let mut app = test_app();
-        let rescan = app.handle_key(KeyCode::Char('s'));
-        assert!(rescan);
-        assert!(app.scanning);
-    }
-
-    #[test]
-    fn test_rescan_blocked_while_scanning() {
-        let mut app = test_app();
-        app.scanning = true;
-        let rescan = app.handle_key(KeyCode::Char('s'));
-        assert!(!rescan);
-    }
-
-    #[test]
-    fn test_selection_bounds_no_results() {
-        let mut app = test_app();
-        app.screen = Screen::Findings;
-        // Should not panic even with no results
-        app.handle_key(KeyCode::Down);
-        assert_eq!(app.selected_finding_index, 0);
-        app.handle_key(KeyCode::Up);
-        assert_eq!(app.selected_finding_index, 0);
-    }
-
-    #[test]
-    fn test_esc_from_device_detail() {
-        let mut app = test_app();
-        app.screen = Screen::DeviceDetail;
-        app.handle_key(KeyCode::Esc);
-        assert_eq!(app.screen, Screen::Dashboard);
-    }
-
-    #[test]
-    fn test_arrow_tab_navigation() {
-        let mut app = test_app();
-        assert_eq!(app.screen, Screen::Dashboard);
-
-        app.handle_key(KeyCode::Right);
-        assert_eq!(app.screen, Screen::NetworkMap);
-
-        app.handle_key(KeyCode::Right);
-        assert_eq!(app.screen, Screen::Findings);
-
-        app.handle_key(KeyCode::Left);
-        assert_eq!(app.screen, Screen::NetworkMap);
-
-        // Tab wraps around: Dashboard → Network → Findings → Attacks → TopActions → Dashboard
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.screen, Screen::Findings);
-
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.screen, Screen::AttackPaths);
-
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.screen, Screen::TopActions);
-
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.screen, Screen::Dashboard);
-
-        // BackTab goes backwards
-        app.handle_key(KeyCode::BackTab);
-        assert_eq!(app.screen, Screen::TopActions);
-
-        app.handle_key(KeyCode::BackTab);
-        assert_eq!(app.screen, Screen::AttackPaths);
-    }
-
-    #[test]
-    fn test_top_actions_shortcut() {
-        let mut app = test_app();
-        app.handle_key(KeyCode::Char('t'));
-        assert_eq!(app.screen, Screen::TopActions);
-    }
-
-    #[test]
-    fn test_vim_keys_selection() {
-        let mut app = test_app();
-        app.screen = Screen::Findings;
-        // j/k should work like Down/Up
-        app.handle_key(KeyCode::Char('j'));
-        assert_eq!(app.selected_finding_index, 0); // no results, stays at 0
-        app.handle_key(KeyCode::Char('k'));
-        assert_eq!(app.selected_finding_index, 0);
-    }
-
-    #[test]
-    fn test_severity_filter_default() {
-        let app = test_app();
-        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
-    }
-
-    #[test]
-    fn test_severity_filter_toggle() {
-        let mut app = test_app();
-        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
-        app.handle_key(KeyCode::Char('l'));
-        assert_eq!(app.severity_filter, SeverityFilter::All);
-        app.handle_key(KeyCode::Char('l'));
-        assert_eq!(app.severity_filter, SeverityFilter::ActionableOnly);
-    }
-
-    #[test]
-    fn test_recent_findings_sorted_and_capped() {
-        let mut app = test_app();
-        let mut findings = vec![Finding::new("test", "Low", "desc", Severity::Low)];
-        findings.extend(
-            (0..RECENT_FINDINGS_MAX)
-                .map(|i| Finding::new("test", &format!("Crit {i}"), "desc", Severity::Critical)),
-        );
-        app.results = Some(ScanResults {
-            findings,
-            ..Default::default()
-        });
-        let recent = app.recent_findings();
-        assert_eq!(recent.len(), RECENT_FINDINGS_MAX);
-        assert!(recent.iter().all(|f| f.severity == Severity::Critical));
-    }
-
-    #[test]
-    fn test_dashboard_click_selects_finding_not_device() {
-        let mut app = test_app();
-        app.results = Some(ScanResults {
-            findings: vec![
-                Finding::new("test", "Low", "desc", Severity::Low),
-                Finding::new("test", "Critical", "desc", Severity::Critical),
-                Finding::new("test", "High", "desc", Severity::High),
-            ],
-            devices: vec![device("10.0.0.1"), device("10.0.0.2"), device("10.0.0.3")],
-            ..Default::default()
-        });
-        app.selected_device_index = 2;
-        app.hit_regions.list_area = Some(Rect::new(0, 10, 80, 8));
-        app.hit_regions.list_header_offset = 1;
-
-        // Dashboard rows: Critical, High, Low. Row 1 = High = filtered index 1.
-        app.handle_mouse(left_click(5, 12));
-        assert_eq!(app.selected_finding_index, 1);
-        assert_eq!(app.findings_table_state.selected(), Some(1));
-        assert_eq!(app.selected_device_index, 2);
-
-        // Row 2 = Low, hidden by the default filter: nothing changes.
-        app.handle_mouse(left_click(5, 13));
-        assert_eq!(app.selected_finding_index, 1);
-        assert_eq!(app.selected_device_index, 2);
-
-        // Past the last row: nothing changes.
-        app.handle_mouse(left_click(5, 17));
-        assert_eq!(app.selected_finding_index, 1);
-        assert_eq!(app.selected_device_index, 2);
-    }
-
-    #[test]
-    fn test_network_map_click_selects_device() {
-        let mut app = test_app();
-        app.screen = Screen::NetworkMap;
-        app.results = Some(ScanResults {
-            devices: vec![device("10.0.0.1"), device("10.0.0.2"), device("10.0.0.3")],
-            ..Default::default()
-        });
-        app.hit_regions.list_area = Some(Rect::new(0, 0, 80, 20));
-        app.hit_regions.list_header_offset = 11;
-
-        app.handle_mouse(left_click(5, 13));
-        assert_eq!(app.selected_device_index, 2);
-        app.handle_mouse(left_click(5, 11));
-        assert_eq!(app.selected_device_index, 0);
-    }
-
-    #[test]
-    fn test_filtered_findings_excludes_low_info() {
-        use rikitikitavi_core::Severity;
-        use rikitikitavi_models::Finding;
-
-        let mut app = test_app();
-        app.results = Some(ScanResults {
-            findings: vec![
-                Finding::new("test", "Critical", "desc", Severity::Critical),
-                Finding::new("test", "High", "desc", Severity::High),
-                Finding::new("test", "Medium", "desc", Severity::Medium),
-                Finding::new("test", "Low", "desc", Severity::Low),
-                Finding::new("test", "Info", "desc", Severity::Info),
-            ],
-            risk_score: 50.0,
-            ..Default::default()
-        });
-
-        // Default filter: ActionableOnly
-        let filtered = app.filtered_findings();
-        assert_eq!(filtered.len(), 3);
-        assert_eq!(filtered[0].severity, Severity::Critical);
-        assert_eq!(filtered[1].severity, Severity::High);
-        assert_eq!(filtered[2].severity, Severity::Medium);
-
-        // Toggle to All
-        app.severity_filter = SeverityFilter::All;
-        let all = app.filtered_findings();
-        assert_eq!(all.len(), 5);
-        // Should still be sorted by severity descending
-        assert_eq!(all[0].severity, Severity::Critical);
-        assert_eq!(all[4].severity, Severity::Info);
+/// Select `row` (or the current row, clamped); nothing when the list is empty.
+fn select(state: &mut TableState, row: Option<usize>, len: usize) {
+    if len == 0 {
+        *state = TableState::default();
+    } else {
+        state.select(Some(row.unwrap_or(0).min(len - 1)));
     }
 }

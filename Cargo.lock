@@ -2831,13 +2831,14 @@ name = "rikitikitavi-tui"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "ratatui",
  "rikitikitavi-analysis",
  "rikitikitavi-core",
  "rikitikitavi-export",
  "rikitikitavi-models",
- "tracing",
+ "unicode-width",
 ]
 
 [[package]]

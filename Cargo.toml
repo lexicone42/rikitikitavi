@@ -45,6 +45,7 @@ tokio-rustls = "0.26"
 # TUI
 ratatui = "0.30"
 crossterm = "0.29"
+unicode-width = "0.2"
 
 # Error handling
 thiserror = "2"

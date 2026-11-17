@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- TUI rebuilt. It opens on the last saved scan and runs the first scan in the
+  background (it used to show a blank terminal until the scan finished). The
+  network map, which listed 15 devices at most, is now a scrolling device table
+  with grade, proposed zone and finding counts; a device opens to its ports and
+  findings. Finding, action and attack-path text wraps and scrolls instead of
+  being cut at the pane edge. New: `/` search, `?` help, Ctrl-C to quit, a
+  finding's CVEs, KEV flag, confidence and fingerprint, `--accept-file`, the
+  UniFi client import, and `e` writing the results JSON, fix plan and segment
+  plan under timestamped names (it used to overwrite
+  `rikitikitavi-results.json`). Themes paint their background. The terminal is
+  restored on errors and panics, and log output no longer draws over the
+  screen. Device-type emoji are gone (their width differs between terminals).
+  New mascot, here and in the README.
 - reqwest 0.13.5 (was held at 0.13.1 by a removed `webpki-roots` feature):
   sensitive headers are stripped on cross-scheme redirects. Outbound TLS now
   validates against the OS root store. The authenticated UniFi client follows

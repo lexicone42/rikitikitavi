@@ -1,16 +1,16 @@
 # rikitikitavi
 
 ```
-                                .------.__
-   /\      ____________________/ o    o   >--~~<§
-  /  `----'                      `--ww--'
- (              .----.   .----.     /        "When I was a young man I was led to believe
-  \   .--------|      |-|      |--'           there were organisations to kill my snakes for me
-   `--'        |      | |      |              I.E. the church, I.E. the government, I.E. school
-               `------' `------'              But when I got a little older
-                                              I learned I had to kill them myself"
-
-                                                                             ─ Donovan
+         n,---.n
+         ( o o )
+          \ Y /              __       "When I was a young man I was led to believe
+         /`---'\          -<'o )       there were organisations to kill my snakes for me
+        / /| |\ \            ) )       I.E. the church, I.E. the government, I.E. school
+       ( ( | | ) )          / /        But when I got a little older
+        \_\| |/_/          ( (         I learned I had to kill them myself"
+          |   |             \ \
+          | | |        ~-.__/ /                                          ─ Donovan
+ ~-..__.-(_/ \_)        `----'
 ```
 
 A home network security auditor written in Rust. Scans your local network for
@@ -184,7 +184,7 @@ verdict. Schemes like ETSI EN 303 645 and the FCC Cyber Trust Mark rest on
 manufacturer evidence no network scan can see.
 
 Grades appear in the terminal report, the HTML device inventory, the TUI
-dashboard, network map and device detail, the JSON `report_cards` array, and the
+overview, device table and device detail, the JSON `report_cards` array, and the
 Prometheus export. With `--known-devices`, each card also carries whether the
 host is `known`, `new`, or `untracked` (no list supplied, so nothing is claimed).
 
@@ -314,34 +314,48 @@ aws s3 cp findings.ndjson \
 Interactive TUI built with [ratatui](https://ratatui.rs/):
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  RIKITIKITAVI ─ Home Network Security Auditor                │
-├──────────────────────────────────────────────────────────────┤
-│  Risk Score: 72/100 (C)      Scan: 2m 14s                   │
-│  ████████████████░░░░░░░░    37 scanners, 47 findings        │
-│                                                              │
-│  CRIT ██  3    NEW   5       ┌─────────────────┐            │
-│  HIGH ████  7  CHG   2       │   ,:::::::,     │            │
-│  MED  ████████  18           │  ,::/^\:::::,   │            │
-│  LOW  ██████  12             │ ,::( ^  ^)::,   │            │
-│  INFO ███████  7             │ `:::\ w  /::;   │            │
-│                              │   ';:`. .':;'   │            │
-│                              │      ~§>        │            │
-├─────────────┬───────────┬───┴────────┬────────┴──┬───────────┤
-│ D Dashboard │ N Network │ F Findings │ A Attacks │ T Actions │
-└──────────────────────────────────────────────────────────────┘
+  1 Overview  2 Devices  3 Findings  4 Actions  5 Paths         ⠹ scanning 12s
+╭ Hunting ────────────────────────╮╭ Risk ─────────────────────────────────────╮
+│          n,---.n                ││ Network grade  D  Needs Attention         │
+│          ( o o )                ││ 24 devices · 131 findings · +2 new, -1 re…│
+│           \ Y /              __ ││                                           │
+│          /`---'\          -<'o )││ Critical                         0        │
+│         / /| |\ \            ) )││ High     █▊                      3        │
+│        ( ( | | ) )          / / ││ Medium   ███████▎                12       │
+│         \_\| |/_/          ( (  ││ Low      ██████████████████▍     31       │
+│           |   |             \ \ ││ Info     ███████████████████████ 85       │
+│           | | |        ~-.__/ / ││                                           │
+│  ~-..__.-(_/ \_)        `----'  ││ Device grades  A 19  B 2  C 2  D 1        │
+╰─────────────────────────────────╯╰───────────────────────────────────────────╯
+╭ Devices needing attention ───────────────────────────────────────────────────╮
+│  D  nas                           1 high, 2 medium, 10 low; nas class graded…│
+│  C  office-plug                   1 high, 1 low                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ What to fix first ───────────────────────────────────────────────────────────╮
+│  HIGH  Update the firmware, then re-scan                           2 devices │
+│  MED   Enable authentication on the web admin interface            1 device  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ 1-5 tabs  s scan  e export  ? help  q quit
 ```
 
-- Full mouse support: click tabs and rows, right-click for detail, scroll wheel
-  moves the selection
-- Keyboard: `D`ashboard, `N`etwork, `F`indings, `A`ttacks, `T`op actions,
-  `S`can (re-scan), `L` toggle severity filter, `E`xport, `Enter` device
-  detail / `Esc` back, `Tab`/`Shift+Tab` or `←`/`→` cycle screens,
-  `↑`/`↓`/`j`/`k`, `PageUp`/`PageDown`, `Home`/`End` move the selection, `Q`uit
+- Opens at once on the last saved scan; the first scan runs in the background
+  and replaces it, with new and changed findings marked **NEW** / **CHG**
+- **Devices**: every device in a scrolling table with grade, name, type,
+  proposed segmentation zone and finding counts; `Enter` opens a device with its
+  ports and findings, `f` there lists its findings
+- **Findings**: table plus a wrapped detail pane; `Enter` opens the full
+  finding (description, evidence, fix steps, CVEs, fingerprint for the accept
+  file); `/` searches, `l` shows Low and Info
+- **Top actions** and **Attack paths** scroll
+- `e` writes three files to the working directory, named after the scan time:
+  the results JSON, the fix plan and the segmentation plan
+- Keys: `1`-`5`, `Tab` or `←`/`→` switch tabs; `↑`/`↓`/`j`/`k`, `PageUp`/`PageDown`,
+  `g`/`G` move or scroll; `o` sorts devices; `s` scans again; `?` lists every
+  key; `q` or `Ctrl-C` quits
+- Mouse: click a tab or a row, click the row again (or right-click) to open it,
+  wheel scrolls
 - Watch mode: `tui --watch --interval 300` re-scans every N seconds (see
   [TUI Options](#tui-options))
-- Scan diff badges: **NEW** and **CHG** markers on changed findings
-- ASCII mongoose with animated snake (because why not)
 
 ### Cross-Platform
 
@@ -426,11 +440,15 @@ Options:
   --interval <SECS>      Watch interval [default: 300]; values below 5 are rejected
   --theme <T>            dark, light, hacker, accessible [default: dark]
   --perspective <P>      As for scan [default: config scan.perspective, else unauthenticated]
+  --accept-file <FILE>   Accepted-risk ledger, as for scan
   --network, --ssid      Not yet implemented; passing them is an error
 ```
 
 The TUI runs at the config intensity (capped at active), always with attack
-paths, and saves every scan to history. `S` re-scans on demand.
+paths, and saves every scan to history. `s` re-scans on demand. With
+`unifi.controller` credentials in the config it imports the controller's client
+list, as `scan` does. Logging to the terminal is off while the TUI runs; set
+`RUST_LOG` and redirect stderr to a file to capture it.
 
 ### Report
 
@@ -941,6 +959,6 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 ---
 
 ```
-              ~§>
-    The mongoose is watching your network.
+     n,---.n
+     ( o o )     The mongoose is watching your network.
 ```
