@@ -10,7 +10,6 @@ repository.workspace = true
 rikitikitavi-core = { path = "../rikitikitavi-core" }
 
 serde.workspace = true
-serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 ipnetwork.workspace = true

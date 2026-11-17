@@ -1,7 +1,13 @@
-# Detection Roadmap
+# Detection Roadmap 2026-09
+
+> **This roadmap is closed.** Its top 15 shipped in 0.4.0. The current roadmap,
+> with all open work, is [ROADMAP-2026-11.md](ROADMAP-2026-11.md). The few
+> 2026-09 items that are still partly open are listed below and repeated there
+> under "Carried over from 2026-09". This file is kept for the rejected items
+> and their reasons, which still apply.
 
 Derived from a 2026-09 research sweep across four dimensions (emerging threats,
-embeddable resources, home hardware, comparable projects). Every item below was
+embeddable resources, home hardware, comparable projects). Every item was
 fact-checked against primary sources and against this repository; refuted items
 are listed in [Rejected or unusable](#rejected-or-unusable) with the reason.
 
@@ -9,276 +15,106 @@ Scope constraint for everything here: unprivileged, read-only, from an ordinary
 LAN host. Licence constraint: Apache-2.0-compatible only (MIT/BSD/ISC/CC0/
 Apache/public domain). GPL/LGPL/AGPL, NPSL, FoxIO and CC-BY-NC are excluded.
 
-Baseline at time of writing: 26 `Scanner` impls (25 in `rikitikitavi-scanners`,
-1 in `rikitikitavi-unifi`), 40,157 OUI entries, KEV catalog 2026.09.16
-(1,713 entries), EPSS at runtime.
+Baseline at time of writing: 26 `Scanner` impls, 40,157 OUI entries, KEV catalog
+2026.09.16 (1,713 entries), EPSS at runtime.
 
-> **Status 2026-09-17:** the top 15 shipped in three waves (see CHANGELOG.md
-> "Unreleased"): six wave-1 scanners (Cast, PaperCut, Kasa, Tuya, SADP, Modbus),
-> ASUS 53282, DeviceType widening, Vulnrichment; mDNS/HA tables/Matter,
-> endoflife.date, nuclei detection; Recog, per-device report cards, Prometheus
-> export, and five further scanners (KNXnet/IP, media servers, 3D printers,
-> DD-WRT UPnP, client-side LAN exposure). CP-07 (default-credential corpus,
-> gated), CP-11 (`scan --rules` declarative engine) and CP-13 (OWASP IoT Top 10
-> tagging) also shipped. Nothing on this roadmap remains open.
+## Status (checked against the code 2026-11-17)
 
-## Executive summary
+Paths are relative to `crates/`. "Done" means the detection exists in the code,
+not only in the changelog.
 
-1. The largest coverage gap is not threat intelligence — it is **device
-   identification**. mDNS asks about 8 service types; the consumer surface is 113.
-2. Two Apache-2.0/BSD corpora close most of that gap mechanically: Rapid7 Recog
-   (4,676 banner regexes, BSD-2-Clause) and Home Assistant's generated discovery
-   tables (346 DHCP matchers, 113 zeroconf types, 91 SSDP matchers, Apache-2.0).
-3. One 2026 KEV threat is worth a same-day check: the ASUS *AyySSHush* NVRAM SSH
-   backdoor on TCP/53282, which survives firmware updates and whose only
-   network-visible artefact is that port.
-4. The scanner's port lists miss the entire consumer control plane — Kasa 9999,
-   Tuya 6668, Modbus 502, Cast 8443/8009, Sonos 1400, Moonraker 7125, Plex 32400.
-   Each is a self-identifying, unauthenticated read.
-5. `DeviceType` has 16 variants and no way to express hub, lock, EV charger,
-   inverter, NVR or vacuum — so the highest-risk classes collapse into `IoT`.
-   Only JSON and HTML emit the field, so widening it is cheaper than assumed.
-6. Firmware/software EOL is hand-coded and already wrong (`services.rs` still
-   calls nginx 1.26.x "current stable"). endoflife.date (MIT) covers the server
-   stack but **not** pfSense, UniFi, Synology DSM or OpenSSH.
-7. CISA Vulnrichment (CC0) adds the one exploitation tier KEV and EPSS cannot
-   express: `poc` — public exploit exists, not yet observed in the wild.
-8. Several 2026 campaign reports did not survive fact-checking. UniFi, MikroTik,
-   D-Link/HNAP, NETGEAR TelnetEnable and TP-Link TDDP were all rejected on
-   misattributed CVEs, wrong fix-version tables, or unreachable probes.
-9. Both embedded datasets are current: KEV catalog 2026.09.16 and the IEEE OUI
-   table regenerated 2026-09-16 (40,157 entries). Refresh both with the
-   generator scripts before each release.
-10. A real bug surfaced during verification: `epss.rs` sends every CVE in one
-    unpaginated request and silently drops everything past the API's 100-item
-    default. See [Observations](#observations).
+### Done
 
-## Top 15 by (value x prevalence) / effort
+| ID | Item | Code |
+|----|------|------|
+| ET-03 | ASUS AyySSHush, SSH on TCP/53282 (top 15 #2) | `rikitikitavi-scanners/src/ports.rs`, `services.rs` |
+| ET-04 | DD-WRT `upnpd` CVE-2021-27137, passive `SERVER:` match | `rikitikitavi-scanners/src/ddwrt_upnp.rs` |
+| ET-05 | Hikvision SADP, build-date floor 250807 (top 15 #9) | `rikitikitavi-scanners/src/sadp.rs` |
+| ET-11 | Client-side LAN exposure, Sonos CVE-2026-4149 | `rikitikitavi-scanners/src/lan_client_exposure.rs` |
+| ET-12 | PaperCut NG/MF build check (top 15 #13) | `rikitikitavi-scanners/src/papercut.rs` |
+| ET-13 | KNXnet/IP `SEARCH_REQUEST` | `rikitikitavi-scanners/src/knx.rs` |
+| PL-01 | Rapid7 Recog fingerprints (top 15 #3) | `rikitikitavi-scanners/src/recog.rs`, `recog_db.rs` |
+| PL-03 | nuclei `network/detection` table, part (a) (top 15 #14) | `rikitikitavi-scanners/src/nuclei_detect.rs`, `nuclei_db.rs` |
+| PL-06 | routersploit `snmp.txt` communities, capped at 8 per host | `rikitikitavi-scanners/src/default_creds_db.rs`, `snmp.rs` |
+| PL-07 | endoflife.date cycles (top 15 #7) | `rikitikitavi-scanners/src/eol_db.rs` |
+| PL-08 | CISA Vulnrichment SSVC and CWE backfill (top 15 #11) | `rikitikitavi-analysis/src/vulnrichment_db.rs` |
+| PL-13 | Home Assistant discovery tables (top 15 #4) | `rikitikitavi-scanners/src/ha_discovery_db.rs` |
+| HW-02 | mDNS service types 8 -> 113, TXT interpreted (top 15 #1) | `rikitikitavi-network/src/mdns.rs` |
+| HW-06 | Modbus/SunSpec, read-only (top 15 #10) | `rikitikitavi-scanners/src/modbus.rs` |
+| HW-10 | Google Cast eureka_info and 8009 TLS (top 15 #12) | `rikitikitavi-scanners/src/cast.rs` |
+| HW-13 | TP-Link Kasa `get_sysinfo` (top 15 #6) | `rikitikitavi-scanners/src/kasa.rs` |
+| HW-14 | Tuya 55AA/6699 broadcasts (top 15 #8) | `rikitikitavi-scanners/src/tuya.rs` |
+| HW-16 | Plex `/identity`, Jellyfin `/System/Info/Public` | `rikitikitavi-scanners/src/media_server.rs` |
+| HW-19 | Moonraker `/access/info`, OctoPrint `X-Clacks-Overhead` | `rikitikitavi-scanners/src/print3d.rs` |
+| HW-22 | `DeviceType` +13 variants and `device_subtype` (top 15 #5) | `rikitikitavi-models/src/device.rs` |
+| CP-07 | Default-credential corpus from routersploit, `--aggressive` only, incl. HTTP Basic | `rikitikitavi-scanners/src/credentials.rs`, `default_creds_db.rs` |
+| CP-11 | `scan --rules` declarative YAML rules | `rikitikitavi-analysis/src/declarative.rs` |
+| CP-12 | `--format prometheus` (exposition 0.0.4) | `rikitikitavi-export/src/prometheus.rs` |
 
-| # | Item | Why now (year, source) | Detection sketch | Maps to | Effort |
-|---|------|------------------------|------------------|---------|--------|
-| 1 | mDNS service-type expansion (8 -> 113) | 2026 — HA `generated/zeroconf.py` enumerates 113 consumer service types; we query 8 | Add targeted PTR queries; interpret TXT (`md`, `fn`, `gen`, `VP`, `CM`) instead of only joining it to a string | `rikitikitavi-network/src/mdns.rs:373` `SERVICE_QUERIES`; `scanners/src/mdns.rs` classifier | M |
-| 2 | ASUS AyySSHush SSH backdoor, TCP/53282 | 2025-06-02 KEV, CVE-2023-39780 — [GreyNoise](https://www.greynoise.io/blog/stealthy-backdoor-campaign-affecting-asus-routers) | SSH banner on 53282 = Critical/Confirmed; SSH banner on any non-22 port on the gateway = Probable | `ports.rs` `common_ports()`; `services.rs:501` `BANNER_PORTS` + `deep_probe` SSH arm | S |
-| 3 | Rapid7 Recog fingerprint DB | 2026-08 HEAD, BSD-2-Clause — [rapid7/recog](https://github.com/rapid7/recog) | 4,676 regexes over banners already collected; `RegexSet` per match-key; 7,550 upstream examples become tests | `services.rs`, `http_audit.rs`, `snmp.rs`, `ssl.rs`, `smb.rs`, `printers.rs`, `device.rs` | L |
-| 4 | HA discovery tables (OUI globs, zeroconf, SSDP) | 2026, Apache-2.0 — [home-assistant/core](https://github.com/home-assistant/core) `homeassistant/generated/` | 257 MAC prefixes (nibble-granular) + 165 zeroconf matchers + 91 SSDP matchers -> `DeviceHint` above the OUI tier | `device.rs` `DeviceHint`, `mdns.rs`, `upnp_igd.rs`, `arp.rs` | M |
-| 5 | `DeviceType` widening + `device_subtype` | 2026 — hub/lock/EVSE/inverter/NVR/vacuum have no variant | Data-model change; only JSON (serde) and HTML (Debug) emit the field, CSV and OCSF do not | `models/src/device.rs:41`; `export/{json,html}.rs`; 2 exhaustive TUI matches | M |
-| 6 | TP-Link Kasa, TCP/9999 | 2026 — [softScheck analysis](https://github.com/softScheck/tplink-smartplug): XOR autokey, "no authentication mechanism" | Length-prefixed XOR-autokey `get_sysinfo`; decode to JSON = Confirmed. Read-only allowlist (same socket accepts `reset`) | new probe in `services.rs`; `ports.rs` | S |
-| 7 | endoflife.date EOL correlation | 2026, MIT — [endoflife.date](https://endoflife.date/api/v1/products/), 475 products, daily | Build-time table keyed on (product, cycle-prefix); join to versions `http_audit.rs` already parses | `services.rs`, `http_audit.rs`, new EOL enrichment in `rikitikitavi-analysis` | M |
-| 8 | Tuya local protocol, UDP 6666/6667 + TCP 6668 | 2026 — [tinytuya](https://github.com/jasonacox/tinytuya) documents the firewall requirement | Passive: bind 6666/6667, decode both `0x000055AA` (AES-ECB) and `0x00006699` (AES-GCM) magics -> gwId/ip/productKey in clear | new `tuya` module; `ports.rs` | M |
-| 9 | Hikvision SADP, UDP/37020 | 2025-2026 — CVE-2025-66177 (AV:A) + CVE-2017-7921 KEV 2026-03-05 | Single well-formed `<Types>inquiry</Types>` datagram; parse `SoftwareVersion` build date vs floor 250807 | new `sadp.rs`; `rtsp.rs` `CameraVendor`; `device.rs` | M |
-| 10 | Modbus/TCP 502 (solar, battery, EVSE) | 2026 — IANA `mbap 502`; HA advertises `_solaredge-modbus._tcp`, `_enphase-envoy._tcp` | FC 0x03 SunSpec scan at bases 40000/0/50000 for `SunS` magic; FC 0x2B/0x0E as opportunistic extra. Never write | new `modbus` module; `ports.rs`; new `DeviceType` | M |
-| 11 | CISA Vulnrichment SSVC | 2026, CC0-1.0 — [cisagov/vulnrichment](https://github.com/cisagov/vulnrichment) (branch `develop`) | Extract `(cve, exploitation, automatable, technical_impact, cwe)`; the value is the `poc` tier, not `active` (all 13 active CVEs are already in KEV) | `analysis/src/exploit_intel.rs`, `risk_score.rs`; CWE backfill for OCSF | M |
-| 12 | Google Cast 8443/8009 | 2026 — [pychromecast](https://github.com/home-assistant-libs/pychromecast) `dial.py` tries HTTPS/8443 first, 8008 as fallback | `GET /setup/eureka_info?params=...` (self-signed, verify off) -> `wifi.ssid`, `device_info.mac_address`; TLS handshake on 8009 | `ssl.rs` handshake path; `mdns.rs`; `ports.rs` | S |
-| 13 | PaperCut NG/MF, TCP 9191 | 2026-08-31 KEV, CVE-2026-81578 -> CVE-2026-82078 — [vendor bulletin](https://www.papercut.com/kb/Main/security-bulletin-27-aug-2026-urgent-security-advisory/) | `GET /` on 9191; regex `\?(\d{4,6})papercut-(mf\|ng)` in asset paths gives build **and** edition | `printers.rs`; `ports.rs`; `http_audit.rs` | S |
-| 14 | nuclei `network/detection` templates | 2026, MIT — [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | Convert 73 send-bytes/expect-words YAMLs into a static table; second identification pass on ports that yielded no banner | `services.rs` | M |
-| 15 | Matter / Thread border-router mDNS | 2026 — [ot-br-posix](https://github.com/openthread/ot-br-posix) border agent, BSD-3-Clause | `_matter._tcp`, `_matterc._udp` (`CM != 0`), `_meshcop._udp` (`sb` state bitmap, `nn`, `xp`, `omr`) | `rikitikitavi-network/src/mdns.rs` (needs an IPv6 socket) | M |
+Also shipped, though rejected as pitched (CP-08): per-device report cards,
+`rikitikitavi-analysis/src/device_grade.rs`.
+
+### Partly done or not started
+
+| ID | State | What is missing |
+|----|-------|-----------------|
+| CP-02 | Partly done | `_matter`, `_matterc`, `_meshcop` are queried and parsed, but only over IPv4 (`UdpSocket::bind("0.0.0.0:0")` in `rikitikitavi-network/src/mdns.rs`). Thread-only Matter nodes need an IPv6 mDNS socket. |
+| CP-13 | Partly done | Findings are tagged with OWASP IoT Top 10 (2018) categories (`rikitikitavi-analysis/src/standards.rs`). OWASP ISTG test-case IDs with access level are not. |
+| PL-14 | Partly done | Cast is done (HW-10). The Roku `/query/device-info`, Shelly `auth_en` and ESPHome identity probes are not. |
+| PL-12 | Not started | NIST IR 8425 `capability_area` on `Finding`. |
+| PL-04, PL-05 | Not started | SecLists and DefaultCreds are not used; the corpus came from routersploit instead (CP-07). |
+| PL-03 (b) | Not started, by design | Bulk import of `http/default-logins` was advised against. |
+
+Small loose ends from shipped items, still true in the code:
+- HW-19: port 5000 is still labelled `UPnP/DLNA` in `rikitikitavi-scanners/src/ports.rs`.
+- HW-16: `upnp_igd.rs` still treats a forwarded 32400 (Plex) as not sensitive.
+- ET-11: `parse_upnp_device_xml` reads `firmwareVersion` only, not Sonos's
+  `softwareVersion`. The Sonos finding does not need a version, so this only
+  matters if a version check is added.
+
+The detail sections below keep only the text needed for the open work. A done
+item has one line; its design notes are in git history (`git log -- docs/ROADMAP.md`)
+and in the module docs.
 
 ## Threats
 
-Six of eighteen threat claims survived verification. The rest are in
-[Rejected](#rejected-or-unusable).
-
-### ET-03 — ASUS AyySSHush NVRAM SSH backdoor, TCP/53282
-CVE-2023-39780 (CVSS 8.8, CWE-78, KEV 2025-06-02, due 2025-06-23) chained with
-two login-bypass techniques that **are patched but were never assigned CVEs**.
-The attacker enables SSH on 53282 and writes a key into `sshd_authkeys` in NVRAM;
-it survives reboot and firmware upgrade, logging is disabled, no malware drops.
-~9,000 compromised as of 2025-05-27. Affected: RT-AX55 (NVD CPE), plus RT-AC3100
-and RT-AC3200 per GreyNoise. Remediation must say a firmware update does **not**
-evict the key — GreyNoise's own advice is factory reset and manual reconfigure.
-Implementation: 53282 must go in `BANNER_PORTS` (`services.rs:501`) as well as
-the sweep lists, or no banner is ever grabbed. `ports.rs:171 grab_banner` is
-port-agnostic and works today. Optional Authenticated-perspective escalation:
-RFC 4252 §7 publickey probe with `have signature = FALSE` confirms the attacker
-key without credentials — zero false positives, but it is an auth attempt and
-must be opt-in.
-Sources: https://www.greynoise.io/blog/stealthy-backdoor-campaign-affecting-asus-routers ,
-https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2023-39780
-
-### ET-04 — DD-WRT UPnP M-SEARCH overflow, CVE-2021-27137 (KEV 2026-07-21)
-`strcpy` in `router/upnp/src/ssdp.c`; weaponised by the c0xmo/Gafgyt variant on
-UDP/1900. The vulnerable daemon is the Broadcom-derived `upnpd`, **not**
-MiniUPnPd — `ssdp.c` emits `Server: DD-WRT/<os_version> UPnP/1.0 upnpd/0.9.0`,
-and `os_name` is hardcoded `"DD-WRT"` even on Buffalo OEM builds. Match
-`/DD-WRT/i` **together with** `upnpd/0.9.0`; a MiniUPnPd banner is a negative
-indicator. No build number is reachable (`os_version` is a CFE board variable,
-`modelNumber` is hardcoded `V30`), so the ceiling is High/Probable, not
-Confirmed. Never send the oversized-uuid M-SEARCH — the public PoC crashes the
-service. Passive `SERVER:` banner match only.
-Sources: https://ssd-disclosure.com/ssd-advisory-dd-wrt-upnp-buffer-overflow/ ,
-https://www.fortinet.com/blog/threat-research/inside-cross-platform-propagation-of-new-gafgyt-variant-c0xmo
-
-### ET-05 — Hikvision SADP discovery, UDP/37020
-CVE-2025-66177 (NVR/DVR/CVR/IPC) and CVE-2025-66176 (access control), both
-CVSS 8.8 **AV:A** — adjacent-network, exactly this tool's vantage. Separately,
-CVE-2017-7921 was added to KEV **2026-03-05**; this was a first-time addition,
-not a re-addition (verified against the cisagov/kev-data commit diff; absent from
-the 2023-06, 2024-06 and 2025-05 snapshots). A clean version floor exists: 89 of
-104 affected families share `Build date before 250807`, and SADP's
-`<SoftwareVersion>` carries exactly that YYMMDD form. Use the active
-`<Types>inquiry</Types>` datagram as the primary path (documented, no crash
-risk — the CVE needs a malformed packet); passive listening is a best-effort
-supplement only, since unsolicited announcements are uncorroborated and IGMP
-snooping blocks group traffic without a join. Use the XML-over-UDP flavour, not
-the raw-Ethernet one, which needs `CAP_NET_RAW`. OEM rebrands (Annke, LaView)
-answer SADP too.
-Sources: https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2025-66177 ,
-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
-
-### ET-11 — Sonos Era 300 SMB client OOB, CVE-2026-4149
-CWE-119, NVD CVSS 3.1 9.8 (S:U); ZDI's own rating is 10.0 CVSS 3.0 (S:C).
-ZDI advisory 2026-03-16, NVD published 2026-04-11. The bug is in the speaker as
-an SMB **client**, so the attack comes from a hostile SMB server on the LAN —
-it breaks the implicit assumption that LAN risk flows inbound to listening ports.
-A fix floor **is** published (83.1-61240) but is unusable: Sonos dates that build
-to 2025-02-04, below the affected build 91.0-70070, so a version comparison
-would clear vulnerable speakers. Emit presence-plus-relationship at Inferred,
-justified as "published floor is inconsistent with the affected build". The real
-deliverable is a general **client-side LAN exposure** finding category; the CVE
-is the worked example. Note `mdns.rs::parse_upnp_device_xml` reads
-`firmwareVersion`, but Sonos emits `softwareVersion` — add the tag or it returns
-`None`.
-Sources: https://www.zerodayinitiative.com/advisories/ZDI-26-192/ ,
-https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2026-4149
-
-### ET-12 — PaperCut NG/MF, CVE-2026-81578 -> CVE-2026-82078 (KEV 2026-08-31)
-Missing authentication chained with unsafe reflection = unauthenticated RCE.
-Vendor CVSS 9.4 and 8.8; KEV due 2026-09-14 under BOD 26-04. The advisory applies
-to **all versions** of NG and MF, so an unparseable version defaults to "assume
-vulnerable, verify build". Version comes from the cache-buster query string on
-the unauthenticated login page (`/css/style.css?76602papercut-mf`), not the
-footer, which carries edition and licensee only. Known fixed builds: MF 26.0.5 =
-76602, NG 26.0.5 = 76603, MF 25.0.13 = 76604, NG 25.0.13 = 76605, MF 24.1.10 =
-76610, NG 24.1.10 = 76611. Two traps: builds are **not monotonic across
-branches** (76610 > 76604 > 76602), and Emergency Patches 1-3 carry earlier build
-ids while being fixed — so anything in the ambiguous window is Medium "version
-unverified", not Critical. `/api/health` returns 401 with distinctive JSON:
-useful as a secondary fingerprint, useless for version. Gate on `relevant_ports()
-= [9191, 9192]` so a pure-home scan pays nothing.
-Sources: https://www.papercut.com/kb/Main/security-bulletin-27-aug-2026-urgent-security-advisory/ ,
-https://www.cisa.gov/known-exploited-vulnerabilities-catalog
-
-### ET-13 — KNXnet/IP building automation, UDP/3671 (CVE-2023-4346, KEV 2026-07-15)
-CWE-645, CVSS 7.5, added to KEV two years after publication. An attacker on the
-KNX installation can purge devices and set a BCU key, irreversibly locking any
-device that does not already have one. Affected scope is narrower than it looks:
-devices using Connection Authorization Option 1 **in which no BCU key is
-currently set**. That state is a bus-level property and is **not carried in any
-KNXnet/IP datagram** — so the "gateway does not advertise KNX Secure" inference
-is two steps removed from anything measurable and must be downgraded to Info/Low
-attack-surface framing, not a vulnerability verdict. The remediation in
-ICSA-23-236-01 is "set the BCU Key in every KNX project", not "enable KNX
-Secure". Probe: `SEARCH_REQUEST` (0x0201) to 224.0.23.12:3671 with a real
-route-back HPAI, unicast fallback; optionally `SEARCH_REQUEST_EXTENDED` (0x020B)
-for the Secured Service Families DIB, which plain 0x0202 does not carry. Never
-send `CONNECT_REQUEST` or `DEVICE_CONFIGURATION_REQUEST`. CVE-2023-4346 is
-already in `kev_db.rs`, so risk scoring picks it up for free.
-Sources: https://www.cisa.gov/news-events/ics-advisories/icsa-23-236-01 ,
-https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2023-4346
+- ET-03 ASUS AyySSHush, TCP/53282: done.
+- ET-04 DD-WRT UPnP M-SEARCH overflow, CVE-2021-27137: done.
+- ET-05 Hikvision SADP, UDP/37020: done.
+- ET-11 Sonos Era 300 SMB client OOB, CVE-2026-4149: done, as the client-side
+  LAN exposure category.
+- ET-12 PaperCut NG/MF, CVE-2026-81578 -> CVE-2026-82078: done.
+- ET-13 KNXnet/IP, UDP/3671, CVE-2023-4346: done.
 
 ## Embeddable resources
 
-### PL-01 — Rapid7 Recog (BSD-2-Clause)
-4,676 live fingerprints across 51 XML files (a `grep` count of 4,685 includes 9
-commented-out entries). Zero lookahead, lookbehind or backreferences, so every
-pattern is `regex`-crate compatible. Flag mapping, corrected: `REG_ICASE` -> `(?i)`
-(319 fingerprints, not 248); **both** `REG_DOT_NEWLINE` and `REG_MULTILINE` ->
-`(?s)`, because Recog's Ruby reference maps both to Ruby's MULTILINE, which means
-dot-matches-newline; and `(?m)` must be applied to **every** pattern, since Ruby
-`^`/`$` are always line anchors while Rust's default to haystack anchors. With
-that mapping all 7,549 usable upstream examples match; with the naive mapping, 19
-fail. Two patterns exceed the default 10 MB compiled-size limit, and per-file
-`RegexSet`s fail for `ftp_banners`, `html_title`, `smtp_banners` and
-`snmp_sysdescr` — use `RegexSetBuilder::size_limit(256 MiB)` and
-`RegexBuilder::size_limit(64 MiB)`. `os.device` gives a ready-made device-type
-vocabulary (Printer 146, Switch 105, Router 87, WAP 42, Firewall 42, NAS 18,
-IP Camera 13, DVR 10, ...) that feeds `DeviceHint`. Vendor `COPYING` verbatim and
-retain "Copyright (c) 2014-2015, Rapid7".
-Sources: https://github.com/rapid7/recog , https://raw.githubusercontent.com/rapid7/recog/master/LICENSE
+- PL-01 Rapid7 Recog (BSD-2-Clause): done.
+- PL-03 nuclei-templates (MIT): `network/detection` done. Do **not** bulk import
+  `http/default-logins`; of the home-relevant vendors only asus, d-link, tplink,
+  dahua and grandstream have templates.
+- PL-06 routersploit `snmp.txt` (BSD-3-Clause): done.
+- PL-07 endoflife.date (MIT): done.
+- PL-08 CISA Vulnrichment (CC0-1.0): done.
+- PL-13 Home Assistant generated discovery tables (Apache-2.0): done.
 
-### PL-03 — nuclei-templates (MIT)
-Two separate imports. (a) `network/detection`: 73 top-level YAMLs (plus `ftp/`
-and `ics/` subdirs) that are literally send-bytes/expect-words pairs — mechanical
-conversion to a static table consumed by `services.rs` as a second identification
-pass. Note the protocol key is `tcp:` (`tcp[].inputs[].data`), not `network:`,
-and matchers may carry `encoding: hex`. (b) `http/default-logins`: do **not** bulk
-import 246 vendors; of the home-relevant vendor list only asus, d-link, tplink,
-dahua and grandstream actually have templates. `cves.json` is a
-CVE -> template-path -> severity -> CVSS index (no tags field).
-Source: https://github.com/projectdiscovery/nuclei-templates
-
-### PL-04 — SecLists default credentials (MIT)
+### PL-04 — SecLists default credentials (MIT) — not started
 `Passwords/Default-Credentials/default-passwords.csv`, 2,875 rows,
 `Vendor,Username,Password,Comments`. The vendor column is the point: join to the
 OUI vendor already on `Device` and try 3-10 plausible pairs instead of a blind
-list. Per-protocol better-lists exist for telnet, ssh, ftp, mysql, postgres,
-mssql, oracle, db2, vnc, tomcat, windows (there is **no** mongodb list). Handle
-the `<BLANK>` sentinel. Vendor strings need normalisation before the join
-("3COM", "2Wire, Inc." vs IEEE registrant names). This is an active
-authentication attempt: keep it behind the existing `--aggressive` gate, cap
-attempts per host, and treat "low-noise" as relative — logins still trigger
-account lockout and IDS logging.
+list. Handle the `<BLANK>` sentinel. Vendor strings need normalisation before the
+join ("3COM", "2Wire, Inc." vs IEEE registrant names). Same `--aggressive` gate
+and per-host cap as the existing corpus.
 Source: https://github.com/danielmiessler/SecLists
 
-### PL-05 — DefaultCreds-cheat-sheet (MIT)
-3,766 rows keyed on product rather than vendor. Merge into PL-04's generator, do
-not ship a second table. Corrected numbers: DefaultCreds alone normalises to
-3,685 unique triples vs SecLists' 2,850; the union is **~4,000-4,150**, not
-5,000-5,500, because 88% of SecLists is already contained in DefaultCreds. Two
-merge traps: the blank sentinel differs in case (`<blank>` here, `<BLANK>` in
-SecLists — normalise case-insensitively or ~1,200 rows become literal passwords),
-and 278 `productvendor` values carry a parenthesised protocol suffix
-(`Cisco (ssh)`) that must be stripped before dedup and can supply a tighter proto
-mask. Pin a commit SHA; the CSV moves.
+### PL-05 — DefaultCreds-cheat-sheet (MIT) — not started
+3,766 rows keyed on product. Merge into PL-04's generator, do not ship a second
+table. The union with SecLists is ~4,000-4,150 triples (88% of SecLists is
+already in DefaultCreds). Merge traps: the blank sentinel differs in case
+(`<blank>` here, `<BLANK>` in SecLists), and 278 `productvendor` values carry a
+protocol suffix (`Cisco (ssh)`) to strip before dedup. Pin a commit SHA.
 Source: https://github.com/ihebski/DefaultCreds-cheat-sheet
 
-### PL-06 — routersploit wordlists (BSD-3-Clause)
-Creds value is low (heavy overlap with PL-04/05). The distinct asset is
-`snmp.txt`: **120** curated community strings (the claim said "well under 100"),
-against `snmp.rs`'s current `["public", "private"]`. Try each with a v2c
-`sysDescr.0` GetRequest under a strict per-host cap; a reply on anything but
-`public` is High/Confirmed CWE-798. BSD-3 forbids using the RouterSploit name to
-endorse — attribution goes in `THIRD-PARTY-NOTICES.md`, not README copy. Do not
-import the exploit modules.
-Source: https://github.com/threat9/routersploit
-
-### PL-07 — endoflife.date (MIT)
-v1 API live, schema 1.2.1, 475 products. Present and useful: nginx,
-apache-http-server, tomcat, jetty, php, nodejs, mysql, mariadb, postgresql,
-mongodb, redis, debian, ubuntu, freebsd, openwrt, opnsense, routeros, truenas,
-esxi. **Absent** (checked, 404): pfsense, unifi, synology-dsm, openssh, samba,
-dropbear, busybox — i.e. the home-network-specific half, including the tool's
-best banner. Corrections: use `ETag` + `If-None-Match` for conditional refresh
-(there is no `Last-Modified`, and `If-Modified-Since` returns 200); cycle names
-are heterogeneous (`2.4`, `13`, `11-26h1-e`) so a universal major.minor prefix
-rule fails — generate per-product longest-dotted-prefix matching and exclude
-Windows-shaped products; `isEol: true` with `eolFrom: null` is common, so map it
-to Medium/Inferred rather than crashing the date arithmetic; `identifiers[]`
-coverage is uneven — routeros and opnsense carry only CPEs, which is arguably
-better since it joins to NVD/KEV. The v1 JSON carries no description field, so
-the Wikipedia CC-BY-SA prose problem is structurally avoided. API is self-declared
-Beta: pin `schema_version` and fail the build loudly on drift. Also note the real
-constraint: for routeros/openwrt/opnsense an unauthenticated scan usually yields
-no version at all, so ship server-software EOL first.
-Sources: https://endoflife.date/api/v1/products/ , https://github.com/endoflife-date/endoflife.date
-
-### PL-08 — CISA Vulnrichment (CC0-1.0)
-Per-CVE SSVC decision points (Exploitation none/poc/active, Automatable,
-Technical Impact) plus CWE backfill. The premise in the original claim that KEV is
-stale is false. Two sizing corrections: the project's scanners reference **45**
-distinct CVE ids, not ~600, so the generated table is a few KB; and the default
-branch is **`develop`**, with paths `<year>/<n>xxx/CVE-<year>-<n>.json`.
-Coverage is 72% and the gaps cluster on 2016-2022 nginx/Apache/lighttpd/Webmin
-rows. The critical design point: mapping `active` to a KEV-equivalent adds
-**zero** information — all 13 CVEs marked active are already in `kev_db.rs`, and
-all 9 marked `poc` are not (regreSSHion, Terrapin, the CUPS chain, the Brother
-printer pair). The value is the `poc` band, the `Automatable` wormability flag,
-and the CWE backfill for OCSF `analytic.uid`. CISA has backfilled well before the
-2024 program start (Heartbleed is enriched), so walk the project's own CVE list
-rather than a 3-year window.
-Source: https://github.com/cisagov/vulnrichment
-
-### PL-12 — NIST IR 8425 (US Government work, public domain in the US)
+### PL-12 — NIST IR 8425 (US Government work, public domain in the US) — not started
 The technical capability areas — Asset Identification, Product Configuration,
 Data Protection, Interface Access Control, Software Update, Cybersecurity State
 Awareness — give a citable consumer-IoT rubric where ETSI EN 303 645 text is
@@ -291,287 +127,64 @@ criteria; (b) Cybersecurity State Awareness is an internal logging property and
 Asset Identification is about the product's own component inventory — neither is
 network-observable, so render them Unknown/Not-Assessable, not failing; (c)
 mapping Asset Identification to "no resolvable vendor" measures our OUI coverage,
-not the device. Also: the default-SSID input this needs does not exist in
-`wifi.rs` yet, and WiFi findings carry no `affected_ip`, so they cannot populate a
-per-device row without attribution to the AP.
+not the device. WiFi findings carry no `affected_ip`, so they cannot populate a
+per-device row without attribution to the AP. `Finding` now has a `standards`
+field (CP-13), which is the natural place for these IDs.
 Source: https://csrc.nist.gov/pubs/ir/8425/final
 
-### PL-13 — Home Assistant generated discovery tables (Apache-2.0)
-`generated/dhcp.py`, `zeroconf.py`, `ssdp.py`. Parse with `ast.parse()` + walk
-top-level assigns (a whole-file `literal_eval` raises on the docstring/import).
-Corrected shapes, all of which break the naive schema:
-- DHCP: 388 entries but **346 usable** — 42 are `registered_devices: True` with
-  no matcher and would encode as match-everything wildcards. MAC globs are
-  **nibble-granular**: 250 are true 3-byte OUIs, 6 are longer (`70B3D52A0*`,
-  `DC44271*` = Tesla Wall Connector), one is a 5-nibble non-byte-aligned entry.
-  `Option<[u8;3]>` truncation of `70B3D52A0*` widens it to a whole MA-S block.
-  Store hex prefix + nibble count.
-- zeroconf: 113 keys expand to 165 matchers; 70 carry name globs or TXT property
-  predicates. `_http._tcp.local.` maps to shelly — a flat pair table would claim
-  every mDNS HTTP responder.
-- SSDP: 43 domains, **91 matchers**, nine keys. Only 40 are (deviceType,
-  manufacturer); 21 are `st`-only (including Sonos ZonePlayer) and 4 are
-  (manufacturer, modelDescription) — the entire UniFi Dream Machine set.
-Sequence the work zeroconf + HomeKit first (`_hap._tcp` is already queried and
-TXT already parsed, so the 71-model map needs only `md=` extraction), OUI second,
-SSDP third, DHCP-hostname last (we have no DHCP option-12 source; mDNS host
-labels often coincide but not always). Apache-2.0 has no NOTICE file upstream, so
-obligations are §4(a) licence copy, §4(b) attribution, §4(c) modification notice.
-Source: https://github.com/home-assistant/core
-
-### PL-14 — HA device client libraries as protocol references
-Once PL-13 types a device, the per-device library documents a read-only
-auth-posture probe. pychromecast is MIT. Four corrections to the naive design:
-Cast eureka_info is HTTPS/8443 first with HTTP/8008 as fallback, self-signed, and
-the selector is `?params=device_info,name` not `?options=detail`; Roku keypresses
-are gated behind "Control by mobile apps" as of Roku OS 14.1 but `/launch` and
-`/query/device-info` are not; Shelly exposes `auth_en` directly in `GET /shelly`,
-so `Shelly.GetConfig` is corroboration only; ESPHome's `InvalidEncryptionKeyAPIError`
-carries `received_name` and `received_mac`, so even an encrypted node leaks
-identity to an unauthenticated peer. Licences differ per library — python-kasa is
-GPL-3.0; check each, never assume.
+### PL-14 — HA device client libraries as protocol references — partly done
+Cast is done (HW-10). Remaining read-only auth-posture probes: Roku
+`/query/device-info` (keypresses are gated behind "Control by mobile apps" as of
+Roku OS 14.1, but `/launch` and `/query/device-info` are not); Shelly exposes
+`auth_en` directly in `GET /shelly`, so `Shelly.GetConfig` is corroboration only;
+ESPHome's `InvalidEncryptionKeyAPIError` carries `received_name` and
+`received_mac`, so even an encrypted node leaks identity to an unauthenticated
+peer. Licences differ per library — python-kasa is GPL-3.0; check each, never
+assume.
 Source: https://github.com/home-assistant-libs/pychromecast
 
 ## Hardware
 
-### HW-02 — mDNS service-type expansion
-`SERVICE_QUERIES` (`rikitikitavi-network/src/mdns.rs:373`) is the DNS-SD
-meta-query plus eight types. HA's table has 113 covering solar
-(`_enphase-envoy._tcp`, `_solaredge-modbus._tcp`), EV charging (`_openevse._tcp`,
-`_nrgkick._tcp`), Matter/Thread, Zigbee/Z-Wave coordinators, 3D printers, TVs,
-speakers, appliances, UPS (`_nut._tcp`), vacuums. TXT is already parsed — the gap
-is interpreting it. Caveats: `_amzn-alexa._tcp` maps to **roomba** in HA (gated on
-`irobot-*`/`roomba-*`), not Amazon Echo; several keys are one-to-many
-(`_axis-video` -> axis + doorbird, `_miio._udp` -> 3 domains), so the table needs
-an ambiguous/multi representation; the meta-query is best-effort and many embedded
-responders ignore it, so targeted PTRs must carry the weight.
-Source: https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/generated/zeroconf.py
-
-### HW-06 — Modbus/TCP 502: solar, battery, EV charging
-No authentication, no encryption, no authorisation; FC 0x06/0x10 writes accepted
-from any peer. Probe order corrected: SunSpec **FC 0x03** at base addresses
-`[40000, 0, 50000]` reading **3** registers (magic `SunS` plus model id) is the
-primary path; FC 0x2B/0x0E Read Device Identification is optional in the spec and
-most residential gear does not implement it. MBAP length for the device-ID frame
-is **5**, not 6 (`00 01 00 00 00 05 01 2B 0E 01 00`). Treat a Modbus exception
-response (FC | 0x80) as positive identification — it proves an unauthenticated
-Modbus server. Unit id 1 then 0xFF. Never write. Do **not** claim registers are
-writable — say the protocol accepts writes from any peer; SMA and others ship
-write access off. High only with SunSpec confirmed, Medium for bare 502.
-Operational hazard: several inverters accept one or two concurrent connections, so
-one connection, three reads, close, no retry. `DC4427*` is wrong for Tesla Wall
-Connector — the MA-M assignment is `DC44271*` (28-bit); `DC:44:27` as a 3-byte
-OUI belongs to the IEEE Registration Authority and spans sixteen companies. Only
-solaredge_modbus and my-PV of the seven mDNS types actually speak 502.
-Sources: https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.txt ,
-https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/components/enphase_envoy/manifest.json
-
-### HW-10 — Google Cast: 8009 TLS and 8443/8008 eureka_info
-8009 is **not** an IANA Cast port — IANA assigns it to `nvme-disc`, and nmap names
-it `ajp13`. Never label it Cast on port number alone; the TLS handshake is the
-discriminator (AJP and nvme-disc will not complete one). Reuse
-`ssl.rs:690 probe_tls_handshake`, but treat "open, handshake failed" as Ambiguous
-since it builds rustls with safe defaults only. For eureka_info use
-`?params=name,build_info,device_info,net,wifi,detail,settings&options=detail` on
-HTTPS/8443 first, HTTP/8008 as fallback, certificate verification off, and connect
-by IP (Cast returns 403 for a hostname `Host` header). Flag `wifi.ssid`,
-`wifi.bssid`, `device_info.mac_address`, `device_info.local_authorization_token_hash`,
-`settings.timezone`. Unverified: that the 8009 certificate CN/SAN carries a
-serial — pychromecast never inspects the cert. `ports.rs` has no 8008 arm despite
-8008 being in `extended_ports()`, so it currently reports "Unknown".
-Source: https://github.com/home-assistant-libs/pychromecast
-
-### HW-13 — TP-Link Kasa, TCP/9999
-softScheck: "trivial XOR autokey encryption that provides no security" and
-"There is no authentication mechanism and commands are accepted independent of
-device state". Send the 4-byte-length-prefixed XOR-autokey (initial key 171)
-encoding of `{"system":{"get_sysinfo":{}}}`, read the header then exactly that
-many bytes (a single 2 KB `recv` truncates on devices with many schedule rules).
-Extract `model`, `sw_ver`, `hw_ver`, `deviceId`, `alias`, and both
-`latitude`/`longitude` and `latitude_i`/`longitude_i` (integers scaled 1e4).
-Three corrections: `get_sysinfo` returns **no** stored Wi-Fi credentials — the
-read-only leak is `netif.get_scaninfo` (nearby APs); an open 9999 is a
-**hardware-generation** signal, not a firmware-age one (python-kasa: the KLAP
-migration tracks hardware revision), so "update firmware" is unachievable
-remediation for most affected units — lead with VLAN segmentation; and the same
-socket accepts `reset`, `reboot` and `set_stainfo`, so the probe needs a hard
-command allowlist, not convention. Gate the finding on a successful decode to
-`system.get_sysinfo` JSON, not on the port being open. Consider High rather than
-Medium for switched-mains plugs.
-Source: https://github.com/softScheck/tplink-smartplug
-
-### HW-14 — Tuya local protocol, UDP 6666/6667/7000 + TCP 6668
-The largest unbranded-IoT population on a typical home LAN. Passive half is the
-headline: bind 6666/6667 and decode broadcasts — `gwId`, `ip`, `productKey`,
-`version` in the clear, continuously, to anyone with a socket. Decode **both**
-magics: `0x000055AA` (plaintext JSON or AES-ECB under the fixed
-`md5('yGAdlopoPVldABfn')` key) and `0x00006699` (protocol 3.5, AES-GCM) — a
-55AA-only matcher misses every v3.5 device. Two scope corrections: 7000 is the
-*app* port and v3.5 devices do not self-announce (tinytuya broadcasts
-`REQ_DEVINFO = 0x25` to elicit them), so "zero packets sent" holds for 3.1/3.3
-only; and unauthenticated *control* is not available — only unauthenticated
-*status readout* on protocol 3.1 / firmware below 1.0.5. For the active probe,
-DP_QUERY on 3.1 needs the device's own `gwId`/`devId` echoed back, so the passive
-listener is a prerequisite; 3.4/3.5 require session-key negotiation first, so
-treat any 55AA/6699-framed response as positive identification and reserve High
-for parseable plaintext status JSON. Note 6667/TCP is already in `common_ports()`
-as IRC — keep the two distinct in reporting.
-Source: https://github.com/jasonacox/tinytuya
-
-### HW-16 — Plex 32400 and Jellyfin 8096/8920/7359
-CVE-2025-34158 (CVSS 8.5, CWE-669) affects Plex 1.41.7.x-1.42.0.x before 1.42.1:
-`/myplex/account` exposes server-owner credentials. Note the vector is **PR:L**,
-not PR:N — word it as "authenticated low-privilege user harvests the owner's
-credentials", not unauthenticated LAN takeover. Probe `GET /identity` on 32400
-for `machineIdentifier` and `version` (never `/myplex/account`), falling back to
-HTTPS on the same port since Plex multiplexes and may refuse plaintext under
-"Secure connections: Required". Confidence should be **Probable**, matching the
-Apache 2.4.49/50 precedent in `http_audit.rs`. Worth adding a second range check
-for CVE-2020-5741 (PMS before 1.19.3), which **is** KEV-listed — same version
-string, stronger signal; CVE-2025-34158 is not in KEV. Jellyfin version comes only
-from `GET /System/Info/Public`; the UDP 7359 reply carries Address/Id/Name and no
-version, and works unicast (no broadcast needed). Also: `devices.rs:200` already
-maps 32400 to "Plex", a label no scanner can currently produce, and
-`upnp_igd.rs:891` asserts 32400 is *not* a sensitive port — revisit that in the
-same change.
-Sources: https://cveawg.mitre.org/api/cve/CVE-2025-34158 , https://jellyfin.org/docs/general/post-install/networking/
-
-### HW-19 — 3D printers: OctoPrint 5000, Moonraker 7125
-A Klipper/Moonraker printer with the LAN in `trusted_clients` is unauthenticated
-arbitrary G-code, file upload and host reboot/update. Correction: `cors_domains`
-is **not** an authentication bypass — `check_cors()` only decides response
-headers; `authenticate_request()` runs independently. Only `trusted_clients` (or
-an absent `[authorization]` section) disables auth. The compound risk worth
-describing is `cors_domains: *` together with a trusted LAN: any page a LAN
-browser visits can then drive the printer. Better probe: `GET /access/info` is
-registered `auth_required=False`, always returns 200, and reports
-`{"trusted": true|false, "login_required": ...}` directly — an explicit answer
-rather than a status-code inference. Identify OctoPrint by the
-`X-Clacks-Overhead: GNU Terry Pratchett` response header, present on every
-response including the 403; `/api/version` alone cannot distinguish it, because
-Moonraker's `octoprint_compat` component registers the same path on 7125. Port
-7130 will usually be closed (HTTPS starts only if cert and key are configured).
-"Fire risk" overstates it — Klipper enforces `max_temp` and thermal-runaway
-protection, and shell execution needs the third-party `gcode_shell_command`
-extension. Port 5000 is currently mislabelled `UPnP/DLNA` in `ports.rs:57`.
-Source: https://moonraker.readthedocs.io/en/latest/configuration/
-
-### HW-22 — `DeviceType` is missing the high-risk classes
-Missing, each with a distinct HA discovery signal: Hub/Bridge (arguably the most
-important — hubs aggregate every other device's credentials), Lock/AccessControl,
-Thermostat/HVAC, EvCharger, SolarInverter/Battery, SmartSpeaker, Vacuum, NVR,
-Appliance, 3dPrinter, Sensor. The change surface is **smaller than assumed**:
-only `export/json.rs` (serde, snake_case) and `export/html.rs:414`
-(`format!("{:?}")`, PascalCase) emit the field — `csv.rs` is findings-only and
-the OCSF export emits no Device object at all. There is no `Display` impl and no
-TUI column keyed on type; the real compile-time breakage sites are two exhaustive
-emoji matches (`widgets/network_map.rs:12`, `widgets/devices.rs:36`), which is
-the desired behaviour. Pre-existing bug to fix in the same PR: JSON emits
-`smart_tv` while HTML emits `SmartTv` for the same device. Recommended design:
-add a small number of variants that change triage severity (Hub, Lock, EvCharger,
-SolarInverter, Nvr) plus `device_subtype: Option<String>` for the long tail —
-additive in serde, invisible to CSV/OCSF, no enum bump per new category. If OCSF
-device mapping is ever added, OCSF already defines Hub=11, Router=12, Switch=10,
-IOT=7, so do not blanket-map to Other(99). Corrections to the evidence: `frigate`
-and `moonraker` have no HA core integration; `ruuvi` is `ruuvi_gateway`; 8123 and
-8581 are de-facto conventions, not IANA registrations.
-Source: https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/generated/dhcp.py
+- HW-02 mDNS service-type expansion: done.
+- HW-06 Modbus/TCP 502: done.
+- HW-10 Google Cast 8009 TLS and 8443/8008 eureka_info: done.
+- HW-13 TP-Link Kasa, TCP/9999: done. The 2026-11 roadmap added a fixed-firmware table (NT-02).
+- HW-14 Tuya local protocol: done.
+- HW-16 Plex 32400 and Jellyfin: done. Loose end: `upnp_igd.rs` 32400 sensitivity.
+- HW-19 3D printers, OctoPrint and Moonraker: done. Loose end: port 5000 label.
+- HW-22 `DeviceType` widening: done. JSON and HTML now share one snake_case spelling.
 
 ## Comparable projects
 
-### CP-02 — Matter and Thread border-router discovery
-Add `_matter._tcp`, `_matterc._udp`, `_matterd._udp`, `_meshcop._udp`,
-`_meshcop-e._udp`. Corrections that change the output: (a) the mDNS socket binds
-`0.0.0.0:0` and sends to 224.0.0.251 — **IPv4 only** — while Matter mandates IPv6
-and Thread-attached nodes have no IPv4 address, so the Matter half needs an IPv6
-socket first; (b) `_meshcop-e._udp` carries **no** TXT data (`PublishEpskcService`
-passes an empty TXT), so it is presence-plus-SRV only and vendor fields must come
-from the sibling `_meshcop` record; (c) test `CM != 0`, not `CM in {1,2}` —
-`kEnabledJointFabric = 3` now exists, and CM=1 (Basic, static factory passcode) is
-arguably worse than CM=2 (Enhanced, dynamic, time-boxed); (d) an open window is an
-exposed authentication surface (PASE/SPAKE2+ still needs the setup passcode), not
-an unauthenticated join — word it accordingly; (e) the ephemeral-key window
-defaults to 2 minutes (max 10) and auto-stops on first failed connect, so the
-`_meshcop-e` finding is realistically Info/Low opportunistic for a scheduled scan.
-The richest TXT target is `_meshcop`'s `sb` state bitmap (commissioning posture)
-plus `nn`, `xp`, `omr`, which leak Thread network identity and the routable IPv6
-prefix in the clear.
+- CP-07 routersploit corpora: done (see PL-04/PL-05 for the corpora not used).
+- CP-11 Declarative, user-extensible checks: done.
+- CP-12 Metrics export: done.
+
+### CP-02 — Matter and Thread border-router discovery — partly done
+Queries and TXT parsing for `_matter._tcp`, `_matterc._udp`, `_matterd._udp`
+and `_meshcop._udp` are done, including `CM != 0` and the `sb`/`nn`/`xp`/`omr`
+fields. Open: the mDNS socket binds `0.0.0.0:0` and sends to 224.0.0.251 —
+**IPv4 only** — while Matter mandates IPv6 and Thread-attached nodes have no IPv4
+address, so the Matter half needs an IPv6 socket.
 Source: https://github.com/openthread/ot-br-posix
 
-### CP-07 — routersploit corpora (BSD-3-Clause)
-`defaults.txt` (653 lines, `user:pass`), `passwords.txt`, `usernames.txt`,
-`snmp.txt`. The `exploits/routers` tree is a de-facto vendor fingerprint index
-(2wire, 3com, asmax, asus, belkin, bhu, billion, cisco, comtrend, dlink,
-fortinet, huawei, ipfire, lg, linksys, mikrotik, movistar, netcore, netgear,
-netsys, shuttle, technicolor, thomson, tplink, ubiquiti, zte, zyxel, plus
-`multi/`). The missing third leg next to telnet and FTP is HTTP Basic/Digest,
-aimed at panels `mgmt_plane.rs` has already classified Exposed or Ambiguous.
-Gate behind `--aggressive`, one attempt per credential per service, Confirmed
-only on successful auth. Do not port the exploit modules. LICENSE appends an
-informal attribution request satisfied by a `THIRD-PARTY-NOTICES.md` line.
-Source: https://github.com/threat9/routersploit
-
-### CP-11 — Declarative, user-extensible checks (concept from Wazuh SCA; GPL-2.0, concept only)
-Today every check needs a Rust change and a recompile. A policy schema with
-`id, title, severity, confidence, cwe, standards, when, remediation`, scoped in
-v1 to predicates over facts already collected, would let users add checks without
-touching the workspace — and the compliance field is where PL-12's capability-area
-IDs and any ETSI/PSTI IDs belong. Three implementation corrections: `regex` is
-**not** a workspace dependency (it reaches Cargo.lock only through
-`termwiz -> fancy-regex` and the non-default `pcap` feature), so it is a new
-direct dep; `toml` is also absent while `serde_yaml_ng` is present, so the format
-should be YAML; and the project is closer to this than it looks —
-`scanners/src/remediation.rs` already parses a declarative multi-document YAML
-schema (OVRS) with `id/version/summary/metadata/parameters/steps/preflight/
-validation/rollback`, and already reserves the predicate slot
-(`r#match: Option<Value>`, currently `#[allow(dead_code)]`). The real delta is
-`include_str!` -> XDG filesystem loading, not imperative -> declarative. Extend
-the OVRS schema rather than shipping a second YAML dialect. Two of the seven
-desirable predicate facts (`tls.key_bits`, `http.header`) are gathered but
-dropped into Findings and never retained, so a fact-store change is a
-prerequisite. Borrow Wazuh's policy-level `requirements` gate; model `compliance`
-as an open map of standard -> IDs, since Wazuh's own ruleset maps eleven
-standards plus MITRE ATT&CK.
-Source: https://documentation.wazuh.com/current/user-manual/capabilities/sec-config-assessment/index.html
-
-### CP-12 — Metrics export (concept from WatchYourLAN, MIT)
-`ScanHistory` plus the scan-diff engine are already more sophisticated than the
-comparable's history, but there is no metrics export, so a cron-driven user
-cannot graph or alert without writing a JSON parser. Add `--format prometheus`
-emitting **Prometheus text exposition format 0.0.4** — *not* OpenMetrics:
-node_exporter's textfile collector parses with `expfmt.NewTextParser`, which
-rejects `# EOF`, `_created` series and OpenMetrics-only types, and would publish
-`node_textfile_scrape_error 1` and drop the file. The collector also does not
-support timestamps, so never append one (a `_timestamp_seconds` gauge whose
-*value* is the epoch second is fine). Write to `name.prom.$$` and rename
-atomically. Metrics: `devices_total`, `devices_new` (from `ScanDiff`),
-`findings{severity,confidence}`, `kev_findings_total`, `eol_services_total`,
-`scan_duration_seconds`, `last_scan_timestamp_seconds`. Use the info-metric
-pattern — `device_info{ip,mac,vendor,device_type} 1` alongside a single-label
-gauge — rather than three labels on one series. KEV and EOL metrics are
-available today; a per-device grade is not (`Device` has no score field).
-Source: https://github.com/aceberg/WatchYourLAN
-
-### CP-13 — OWASP IoT Security Testing Guide IDs as a finding taxonomy (CC-BY-SA-4.0)
-The OWASP IoT Top 10 is still the 2018 edition; the live work is the ISTG
-(pushed 2026-08). Exercisable categories from this vantage are **three**, not two:
-ISTG-DES, ISTG-UI and ISTG-WRLS — the attacker-model table marks Wireless
-Interface as the only fully testable component at PA-2 (LAN access), which
-`wifi.rs` and `passive_wifi.rs` already cover (WRLS-CRYPT-001 for WEP/TKIP,
-WRLS-AUTHZ-001 for open SSID and WPS). One mapping correction: default
-credentials are an authorization failure -> **DES-AUTHZ-001 / UI-AUTHZ-001**, not
-DES-SCRT-001, whose objective is "whether secrets can be accessed via the data
-exchange service" — reserve that for SNMP community strings, WPA-PSK, and
+### CP-13 — OWASP IoT Security Testing Guide IDs (CC-BY-SA-4.0) — partly done
+Shipped instead: OWASP IoT Top 10 (2018) category tags (`I1`-`I10`) in a
+`standards` field. Open: ISTG IDs. Exercisable categories from this vantage are
+ISTG-DES, ISTG-UI and ISTG-WRLS (WRLS-CRYPT-001 for WEP/TKIP, WRLS-AUTHZ-001 for
+open SSID and WPS). Default credentials map to **DES-AUTHZ-001 / UI-AUTHZ-001**,
+not DES-SCRT-001; reserve that for SNMP community strings, WPA-PSK and
 unauthenticated config dumps. Record the ISTG access level (PA-1/AA-1) alongside
-the ID, or a coverage matrix implies we tested the PA-2+ half of the same test
-case. Licence line: store bare ID strings, author your own labels, do not vendor
+the ID. Licence: store bare ID strings, author your own labels, do not vendor
 `checklists/checklist.md` or any `src/03_test_cases/*.md`, and do not reproduce
-the full ID+title table — individual IDs are uncopyrightable but the taxonomy's
-selection and arrangement is the compilation interest CC-BY-SA protects.
-Depends on a `standards` field, which `Finding` does not have today.
+the full ID+title table.
 Source: https://github.com/OWASP/owasp-istg
 
 ## Rejected or unusable
+
+Reasons are as of 2026-09. Some code facts quoted below have changed since (for
+example, reverse DNS now exists: ID-01 in the 2026-11 roadmap), but the reasons
+for rejecting each item still hold.
 
 ### Threats
 | ID | Item | Reason |
@@ -638,65 +251,51 @@ Source: https://github.com/OWASP/owasp-istg
 | CP-14 | OpenWrt firmware currency + banIP | No LuCI detection exists in the tree to "extend" (zero matches for `luci`). uhttpd emits no `Server` header, and the default `luci-theme-bootstrap` suppresses the release string on the login page (`blank_page: true`). banIP is GPL-3.0-or-later and dibdot/DoH-IP-blocklists is GPL-3.0 — the DoH list cannot be embedded. |
 | CP-15 | IoT Inspector device-identity-by-destination | The "device-labelling logic" is a client that POSTs device metadata to a remote fine-tuned LLaMA endpoint on Modal; the only local corpus in the repo is an OUI CSV. Apache-2.0 covers the client, not the model. Its flow visibility comes from ARP spoofing + libpcap (root), not from monitor mode — 802.11 data frames are CCMP-encrypted, so no destination IP/port/hostname is derivable. |
 
+
 ## Data refresh
 
-Both embedded snapshots were regenerated on 2026-09-16 and the generators
-reproduce the committed files byte for byte.
+Embedded snapshots as of 2026-11-17. Each generator's docstring gives its exact
+usage; regenerate rather than hand-editing (the tables are sorted for
+`binary_search` and carry `#[rustfmt::skip]`).
 
-| Dataset | Embedded? | Current snapshot | Staleness | Licence |
-|---------|-----------|------------------|-----------|---------|
-| CISA KEV | Yes, `crates/rikitikitavi-analysis/src/kev_db.rs` | 2026.09.16, 1,713 entries | current | CC0-1.0 |
-| IEEE OUI (MA-L) | Yes, `crates/rikitikitavi-scanners/src/oui_db.rs` | generated 2026-09-16, 40,157 entries | current | IEEE public listing |
-| EPSS | No — runtime API | n/a | n/a | FIRST ToU: revocable, non-transferable; **never embed** |
+| Dataset | File (under `crates/`) | Snapshot | Generator | Licence |
+|---------|------------------------|----------|-----------|---------|
+| CISA KEV | `rikitikitavi-analysis/src/kev_db.rs` | 2026.11.13, 1,781 entries | `scripts/gen_kev_db.py` | CC0-1.0 |
+| IEEE MA-L / MA-M / MA-S | `rikitikitavi-scanners/src/oui_db.rs` | 2026-11-14; 40,055 / 6,688 / 7,280 | `scripts/gen_oui_db.py --fetch <empty-dir>` | IEEE public listing |
+| Home Assistant discovery | `rikitikitavi-scanners/src/ha_discovery_db.rs` | commit fa47075 | `scripts/gen_ha_discovery_db.py` | Apache-2.0 |
+| endoflife.date | `rikitikitavi-scanners/src/eol_db.rs` | see file header | `scripts/gen_eol_db.py` | MIT |
+| Vulnrichment | `rikitikitavi-analysis/src/vulnrichment_db.rs` | see file header | `scripts/gen_vulnrichment_db.py` | CC0-1.0 |
+| Recog | `rikitikitavi-scanners/src/recog_db.rs` | see file header | `scripts/gen_recog_db.py` | BSD-2-Clause |
+| nuclei detection | `rikitikitavi-scanners/src/nuclei_db.rs` | see file header | `scripts/gen_nuclei_db.py` | MIT |
+| routersploit wordlists | `rikitikitavi-scanners/src/default_creds_db.rs` | ref 723b574 | `scripts/gen_default_creds_db.py` | BSD-3-Clause |
+| EPSS | not embedded, runtime API | n/a | n/a | FIRST ToU: revocable, non-transferable; **never embed** |
 
-### Commands
+After a refresh:
 
 ```bash
-# KEV — regenerate from the live CISA feed (weekly is sufficient; ~a few CVEs/week)
-uv run python scripts/gen_kev_db.py > crates/rikitikitavi-analysis/src/kev_db.rs
-git diff --stat crates/rikitikitavi-analysis/src/kev_db.rs
-
-# OUI — the generator reads a hardcoded /tmp/oui.csv and takes no argument
-curl -fsSL https://standards-oui.ieee.org/oui/oui.csv -o /tmp/oui.csv
-curl -sSL -o /tmp/oui.csv https://standards-oui.ieee.org/oui/oui.csv && uv run python scripts/gen_oui_db.py > crates/rikitikitavi-scanners/src/oui_db.rs
-# (only MA-L rows are kept; MA-M/MA-S 28- and 36-bit blocks are dropped — see PL-13)
-
-# Verify both compile and that the generated tables stay sorted
 cargo test -p rikitikitavi-analysis -p rikitikitavi-scanners
 cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --check   # oui_db.rs carries #[rustfmt::skip] to stop table churn
+cargo fmt --check
 ```
 
 Notes:
-- Both generated files are `#[rustfmt::skip]`-annotated tables sorted for
-  `binary_search`; regenerate rather than hand-editing.
-- KEV's JSON Schema was revised 2026-09-02, additively (`forensicTriage` added
-  per BOD 26-04). The generator reads only `catalogVersion`, `dateReleased` and
-  `vulnerabilities[].cveID`, all still in the schema's `required` lists, and has
-  already run cleanly against the post-revision feed.
-- KEV's licence is CC0-1.0 with two conditions the "public domain" shorthand
-  drops: third-party links inside records are bound by those sites' licences,
-  and use does not authorise the CISA logo or DHS seal. Record this in
-  `THIRD-PARTY-NOTICES.md` (which does not exist yet).
+- Attribution for the embedded data is in `THIRD-PARTY-NOTICES.md`.
+- KEV's licence is CC0-1.0 with two conditions: third-party links inside records
+  are bound by those sites' licences, and use does not authorise the CISA logo
+  or DHS seal.
 - EPSS must stay a runtime lookup. FIRST's Services Terms of Use grant a
   revocable, non-transferable, field-of-use-limited licence that is incompatible
-  with Apache-2.0 redistribution. Add an attribution line naming both FIRST and
-  Empirical Security (which now generates the scores) to README and to the
-  JSON/OCSF/HTML exports that carry the `epss` field.
-- If PL-07 or PL-08 land, add `gen_eol_db.py` and `gen_ssvc_db.py` to the same
-  refresh job. Vulnrichment's default branch is `develop`, not `main`.
+  with Apache-2.0 redistribution. Still open: the README names FIRST.org but not
+  Empirical Security (which now generates the scores), and the JSON/OCSF/HTML
+  exports that carry `epss` have no attribution line.
+- Vulnrichment's default branch is `develop`, not `main`.
 
 ## Observations
 
-Found while grounding the roadmap against the code; none are in scope for the
-roadmap itself but all are actionable.
+Found while grounding this roadmap against the code in 2026-09. Status as of
+2026-11-17:
 
-1. **`epss.rs` dropped CVEs past the first 100** (the API's row cap). Fixed
-   2026-09-17: requests are batched in groups of 100.
-
-2. **`device_type` renders two different ways** — `smart_tv` in JSON (serde
-   `rename_all`), `SmartTv` in HTML (`format!("{:?}")` at `html.rs:414`). There is
-   no `Display` impl. Same field, two spellings, depending on export format.
-3. **`THIRD-PARTY-NOTICES.md` does not exist.** Several items above (Recog,
-   nuclei, SecLists, DefaultCreds, routersploit, HA tables, KEV, EPSS) create
-   attribution obligations that need somewhere to live.
+1. `epss.rs` dropped CVEs past the first 100. Fixed 2026-09-17 (batches of 100).
+2. `device_type` rendered as `smart_tv` in JSON and `SmartTv` in HTML. Fixed in
+   0.4.0 (one snake_case spelling).
+3. `THIRD-PARTY-NOTICES.md` did not exist. It does now.

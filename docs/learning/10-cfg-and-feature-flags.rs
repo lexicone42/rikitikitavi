@@ -16,6 +16,8 @@
 //   unifi = ["dep:rikitikitavi-unifi"]
 //   monitor = ["rikitikitavi-scanners/monitor", "rikitikitavi-network/monitor"]
 //   minimal = []
+//   otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp",
+//           "dep:tracing-opentelemetry"]
 //
 // What this means:
 //
@@ -30,32 +32,30 @@
 //   dependencies! Enabling "monitor" on the binary also enables "monitor"
 //   on the scanners and network crates.
 //
-// - `minimal = []` — an empty feature for minimal builds (no TUI, no UniFi,
-//   no WiFi monitoring).
+// - `minimal = []` — an empty feature. Enabling it changes nothing; a minimal
+//   build is `--no-default-features`.
+//
+// - `otel` — OTLP trace export, off by default.
 //
 // ── USING FEATURES IN CODE ──────────────────────────────────────────────────
 //
 // Features control what code is compiled:
 //
-//   #[cfg(feature = "tui")]
-//   mod tui_commands;
+//   // crates/rikitikitavi/src/main.rs (excerpt)
+//   let result = match cli.command {
+//       Command::Scan(args) => cmd_scan(args, &loaded).await,  // always available
+//       #[cfg(feature = "tui")]
+//       Command::Tui(args) => cmd_tui(args, app_config).await,
+//       #[cfg(feature = "unifi")]
+//       Command::Unifi(args) => cmd_unifi(args, app_config).await,
+//       #[cfg(feature = "monitor")]
+//       Command::Monitor(args) => cmd_monitor(args).await,
+//       // ...
+//   };
 //
-//   #[cfg(feature = "tui")]
-//   use rikitikitavi_tui::App;
+// The matching `Command` variants in cli.rs carry the same #[cfg].
 //
-//   fn main() {
-//       match cli.command {
-//           #[cfg(feature = "tui")]
-//           Command::Tui(args) => cmd_tui(args),
-//
-//           #[cfg(feature = "monitor")]
-//           Command::Monitor(args) => cmd_monitor(args),
-//
-//           Command::Scan(args) => cmd_scan(args),  // always available
-//       }
-//   }
-//
-// If you build without `--features tui`, the TUI command literally doesn't
+// If you build without the `tui` feature, the TUI command literally doesn't
 // exist in the binary. It's not hidden — it's not compiled at all.
 //
 // ── OPTIONAL DEPENDENCIES ───────────────────────────────────────────────────
@@ -75,33 +75,35 @@
 //
 // Beyond features, #[cfg] also handles platform differences:
 //
+//   // crates/rikitikitavi-network/src/interfaces.rs (simplified)
 //   #[cfg(target_os = "linux")]
-//   pub fn detect_gateway() -> Option<IpAddr> {
-//       let contents = std::fs::read_to_string("/proc/net/route").ok()?;
-//       parse_proc_route(&contents)
-//           .into_iter()
-//           .find(|r| r.is_default)
-//           .map(|r| r.gateway)
+//   fn detect_gateway_platform() -> Result<Option<IpAddr>> {
+//       let contents = std::fs::read_to_string("/proc/net/route")?;
+//       Ok(detect_gateway_from_proc(&contents))
 //   }
 //
 //   #[cfg(target_os = "macos")]
-//   pub fn detect_gateway() -> Option<IpAddr> {
-//       let output = Command::new("route")
+//   fn detect_gateway_platform() -> Result<Option<IpAddr>> {
+//       let out = std::process::Command::new("route")
 //           .args(["-n", "get", "default"])
-//           .output().ok()?;
-//       parse_route_output(&String::from_utf8_lossy(&output.stdout))
+//           .output()?;
+//       Ok(detect_gateway_from_macos_route(&String::from_utf8_lossy(&out.stdout)))
 //   }
 //
-// The compiler picks ONE of these based on the target platform. The other
-// doesn't exist in the binary — not even as dead code.
+//   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+//   fn detect_gateway_platform() -> Result<Option<IpAddr>> { Ok(None) }
+//
+// The compiler picks ONE of these based on the target platform. The others
+// don't exist in the binary — not even as dead code.
 //
 // ── THE TEST TRICK: cfg(any(..., test)) ─────────────────────────────────────
 //
 // Problem: the macOS parser is only compiled on macOS. But our CI runs on
 // Linux. How do we test the macOS parser?
 //
+//   // crates/rikitikitavi-network/src/arp.rs
 //   #[cfg(any(target_os = "macos", test))]
-//   fn parse_arp_command_output(contents: &str) -> Vec<ArpEntry> {
+//   fn parse_macos_arp(contents: &str) -> Vec<ArpEntry> {
 //       contents.lines().filter_map(|line| {
 //           // Parse "? (192.168.1.1) at aa:bb:cc:dd:ee:ff on en0 ..."
 //       }).collect()
@@ -120,15 +122,15 @@
 //
 //   # In rikitikitavi-scanners/Cargo.toml
 //   [features]
-//   monitor = ["rikitikitavi-network/monitor", "dep:pcap"]
+//   monitor = ["pcap", "rikitikitavi-network/monitor"]
 //
 // When the binary enables "monitor", it propagates:
 //
 //   binary (monitor) → scanners (monitor) → network (monitor)
 //                                         → pcap crate
 //
-// This means the passive WiFi scanner and pcap dependency are ONLY compiled
-// when you explicitly ask for them.
+// This means the passive WiFi capture code and pcap dependency are ONLY
+// compiled when you explicitly ask for them.
 //
 // ── CONDITIONAL MODULE INCLUSION ────────────────────────────────────────────
 //
@@ -138,23 +140,9 @@
 //   #[cfg(feature = "monitor")]
 //   pub mod passive_wifi;
 //
-//   #[cfg(feature = "monitor")]
-//   pub use passive_wifi::PassiveWifiScanner;
-//
-// And in the scanner registry:
-//
-//   pub fn new() -> Self {
-//       let mut scanners: Vec<Box<dyn Scanner>> = vec![
-//           Box::new(NetworkScanner),
-//           Box::new(PortScanner),
-//           // ... always-available scanners ...
-//       ];
-//
-//       #[cfg(feature = "monitor")]
-//       scanners.push(Box::new(PassiveWifiScanner));
-//
-//       Self { scanners }
-//   }
+// `passive_wifi` is not a `Scanner` and is not in `ScannerRegistry`. The
+// `monitor` subcommand (also behind the feature) calls
+// `passive_wifi::capture_frames` and `passive_wifi::analyse_results` directly.
 //
 // ── BUILD-TIME VS RUNTIME CHECKS ───────────────────────────────────────────
 //

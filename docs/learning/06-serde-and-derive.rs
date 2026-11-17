@@ -33,7 +33,7 @@ pub struct Device {
     pub open_ports: Vec<u16>,      // Dynamic array (real code: Vec<OpenPort>)
 }
 
-/// Device classification with serde rename.
+/// Device classification with serde rename. The real enum has ~30 variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 //      ↑ This means variants serialize as "smart_tv" not "SmartTv"
@@ -56,12 +56,14 @@ pub enum DeviceType {
 // The real enum (crates/rikitikitavi-models/src/device.rs) hand-writes
 // `Serialize`/`Deserialize` instead. Two things the derive could not give it:
 //
-//  1. A single source of truth for the name. `DeviceType::as_str` feeds serde,
-//     `Display`, and the HTML report, so JSON and HTML cannot spell the same
-//     device type differently (they used to: "smart_tv" vs "SmartTv").
+//  1. One table for every spelling. A `device_types!` macro declares each
+//     variant with its wire name and human label: `as_str` feeds serde and
+//     `Display`, `label` feeds the HTML report and terminal ("Smart TV").
+//     Neither can drift from the other.
 //  2. Forward compatibility. The derive rejects an unknown variant name, so a
 //     scan file written by a newer build failed to load entirely. The hand
-//     written `Deserialize` maps an unrecognised name to `Unknown`.
+//     written `Deserialize` maps an unrecognised name to `Unknown`
+//     (and accepts `iot` as an alias for `io_t`).
 //
 // `#[serde(other)]` looks like the fix for (2) but does not apply: serde only
 // allows it on internally- or adjacently-tagged enums, not on a plain enum

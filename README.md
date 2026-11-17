@@ -46,15 +46,18 @@ rikitikitavi scan --format ocsf --output findings.ndjson
 Passive WiFi monitoring requires `libpcap-dev` and is not included by default:
 
 ```bash
+# On Debian/Ubuntu, install libpcap first
+sudo apt-get install libpcap-dev
+
 # Install with WiFi monitoring support
 cargo install --git https://github.com/lexicone42/rikitikitavi --features monitor
 
-# On Debian/Ubuntu, install libpcap first:
-sudo apt-get install libpcap-dev
-
-# Then monitor WiFi traffic
+# Monitor for 60 s (the default; --duration sets it)
 sudo rikitikitavi monitor --interface wlan0
 ```
+
+`monitor` also takes `--home-ssid`, `--known-bssids`, `--output` and `--format`.
+Without the feature the subcommand does not exist.
 
 ## Features
 
@@ -64,7 +67,7 @@ Two-phase adaptive scanning: Phase 1 discovers your network, then Phase 2 runs
 deep, targeted checks — only probing services that actually exist on your
 network.
 
-Devices are identified by a layered stack: IEEE OUI vendor lookup, then Home Assistant's discovery tables (DHCP/mDNS/SSDP matchers), Rapid7 Recog banner fingerprints (2,430 patterns), and mDNS service types including Matter and Thread border routers. Each scan also produces a per-device letter-grade report card.
+Devices are identified by a layered stack: IEEE OUI vendor lookup (MA-L, MA-M and MA-S registries, longest prefix first), Home Assistant's discovery tables (DHCP/mDNS/SSDP matchers), Rapid7 Recog banner fingerprints, mDNS service types including Matter and Thread border routers, and names from reverse DNS, NetBIOS and, if configured, the UniFi controller (see [Host Discovery](#host-discovery)). Each scan also produces a per-device letter-grade report card.
 
 ```
 Phase 1 (Discovery)          Phase 2 (Deep Analysis)
@@ -76,7 +79,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
                              │ ARP/DHCP     │
     Discovers IPs,           │ Credentials  │
     open ports,              │ HTTP Audit   │
-    device types             │ ... (14 more)│
+    device types             │ ... and more │
                              └──────────────┘
                              Runs concurrently,
                              skips irrelevant checks
@@ -85,7 +88,7 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | Scanner | What it checks |
 |---------|---------------|
 | **Network Discovery** | Interface enumeration, ARP cache, device count |
-| **Port Scanner** | TCP connect scan of 66 common ports across all LAN hosts |
+| **Port Scanner** | TCP connect scan of a default list of common ports across all LAN hosts (top 20 with `--quick`, an extended list with `--aggressive`) |
 | **Device Fingerprinting** | MAC OUI vendor lookup, port-based device classification |
 | **DNS Security** | Resolver config, DNSSEC validation, DNS rebinding, cross-resolver checks |
 | **Router Security** | Admin panel exposure, HTTPS enforcement, UPnP |
@@ -101,10 +104,10 @@ Phase 1 (Discovery)          Phase 2 (Deep Analysis)
 | **Matter / Thread** | Commissionable Matter devices and Thread border routers via mDNS (`_matter`, `_matterc`, `_meshcop`) |
 | **nuclei detection** | Read-only banner/handshake product identification from projectdiscovery nuclei detection templates |
 | **Neighbor/Proximity** | Stub: registered for the `neighbor` perspective, returns no findings yet |
-| **Network Isolation** | Flat network detection, inter-VLAN routing, subnet analysis |
+| **Network Isolation** | Flat network detection, devices outside the home subnet, inter-VLAN routing probes |
 | **Service Banners** | SSH version, HTTP headers, banner grabbing |
 | **SSL/TLS Certificates** | Self-signed, expired, weak keys, TLS 1.0/1.1 |
-| **mDNS/SSDP Discovery** | Service advertisement enumeration, UPnP device discovery |
+| **mDNS/SSDP Discovery** | Service advertisement enumeration, UPnP device discovery; Apple TV tvOS version (from AirPlay) against KEV fix versions and end-of-life, AirPlay receivers with no access control |
 | **HTTP Security Audit** | Missing security headers, default pages, admin path enumeration |
 | **Database Security** | Auth-less Redis/MongoDB/MySQL/Elasticsearch/Memcached |
 | **SMB Security** | SMBv1 (EternalBlue-vulnerable) detection, NetBIOS exposure |
@@ -133,13 +136,14 @@ scanner of its own.
 
 ### Exploit Intelligence & Confidence
 
-Not every finding deserves equal panic. rikitikitavi layers three signals on top
-of raw CVE/CVSS so a non-expert knows what to fix first:
+rikitikitavi adds these signals on top of raw CVE/CVSS so a non-expert knows
+what to fix first:
 
 - **Actively exploited (CISA KEV):** findings whose CVE is in the CISA Known
   Exploited Vulnerabilities catalog (an embedded snapshot, refreshed via
   `scripts/gen_kev_db.py`) are badged **⚠ ACTIVELY EXPLOITED**, escalated to at
-  least High, and weighted more heavily in the risk score.
+  least High unless their confidence is only *inferred*, and weighted more
+  heavily in the risk score.
 - **EPSS scores:** findings are enriched with the EPSS probability that each CVE
   will be exploited in the next 30 days (rendered as `EPSS 94%`). Fetched
   best-effort from FIRST.org at scan time — offline scans simply skip it.
@@ -150,7 +154,7 @@ of raw CVE/CVSS so a non-expert knows what to fix first:
   so confirmed findings stand out from ones worth double-checking.
 - **Exploitation tier (CISA Vulnrichment):** an embedded SSVC snapshot (CC0) adds a `poc` tier — public exploit code exists but exploitation is not yet observed — between KEV and the rest, and backfills CWEs.
 - **End-of-life components:** server and OS versions are checked against endoflife.date cycles; a distribution-backported build is flagged Low rather than Medium since it may still carry fixes.
-- **OWASP IoT Top 10:** each finding is tagged with its OWASP IoT Top 10 (2018) category (`I1`–`I10`) in the JSON, HTML and OCSF output.
+- **OWASP IoT Top 10:** each finding is tagged with its OWASP IoT Top 10 (2018) category (`I1`–`I10`) in the JSON, CSV, HTML and OCSF output.
 - **AyySSHush backdoor:** SSH on TCP 53282 is flagged (CVE-2023-39780, CISA KEV), with the ASUS-specific CVE asserted only when the host is identifiably ASUS.
 
 ### Per-Device Report Cards
@@ -160,8 +164,8 @@ class, alongside the network-wide score:
 
 ```
   Devices needing attention (grade | device | findings):
-    D  192.168.1.64     Hikvision (camera)          1 HIGH  [new]
-    C  192.168.1.34     Denon (media_player)        1 HIGH
+    D  192.168.1.64     Hikvision (Camera)          1 HIGH  [new]
+    C  192.168.1.80     Denon (Media Player)        1 HIGH
 
   Device grades (own scoring, not a certification):
     A 57,  C 1,  not assessed 2
@@ -249,30 +253,64 @@ rikitikitavi fix-plan -o fix-plan.md
 # After fixing, re-check only the affected hosts
 rikitikitavi verify                       # Low and above
 rikitikitavi verify --finding 8a49cb832045970f
+rikitikitavi verify --ip 192.168.1.64 --format json
 
 # Record a risk you have decided to live with
 rikitikitavi scan --accept-file accepted.yaml
 ```
 
+`fix-plan` groups items per device; each item has its fix, references and a
+`verify` command to re-check it.
+
 `verify` replays the scanners behind each prior finding against that host
 alone and reports `resolved`, `still present` or `inconclusive`. An offline
-host, a scanner error, or a finding that cannot be replayed directly (mDNS,
-UPnP, ARP) is inconclusive, never resolved. Exit codes: 0 all resolved,
-3 some still present, 4 only inconclusive left.
+host, a scanner error or timeout, or a finding that cannot be replayed by a
+unicast probe (mDNS, UPnP, ARP) is inconclusive, never resolved. Login checks
+(`credentials` findings) are replayed only with `--aggressive`. Exit codes:
+0 all resolved (or nothing selected), 1 error, 3 some still present, 4 none
+still present but some inconclusive.
 
 `rikitikitavi segment-plan -o segment-plan.md` proposes Trusted / IoT /
-Infrastructure zones from the last scan, with the allow rules and mDNS
-services each zone needs. It is a proposal: it never configures a device.
+Infrastructure zones from the last scan, with per-device reasons, an
+allow-rule table built from the ports seen open, and the mDNS services that
+must cross zones. It is text only: it never configures a device.
 
-An accept-file entry is `{fingerprint, reason, accepted_on, expires,
-compensating}`. Accepted findings stay in the report with their reason but
-leave the risk score, grades and `--fail-on`. Past `expires` the entry is
-ignored with a warning and the finding is active again. Fingerprints are
-printed by `verify`, `fix-plan` and JSON output.
+The accept file is YAML:
+
+```yaml
+accepted:
+  - fingerprint: "01a2b3c4d5e6f708"
+    reason: Printer is on the isolated IoT VLAN
+    accepted_on: 2026-11-01
+    expires: 2027-02-01
+    compensating: Inbound blocked at the gateway   # optional
+```
+
+Accepted findings stay in the report with their reason but leave the risk
+score, grades, priority actions and `--fail-on`. Past `expires` the entry is
+ignored with a warning and the finding is active again. Unknown keys, invalid
+dates and files over 256 KiB are errors. `scan`, `tui`, `verify` (accepted
+findings are not re-checked) and `fix-plan` (fills its Accepted section) all
+take `--accept-file`. Fingerprints are printed by `verify`, `fix-plan`, the
+TUI finding view and JSON output.
 
 ### UniFi Integration
 
-Deep security auditing for Ubiquiti UniFi networks:
+Two paths use a UniFi controller.
+
+**Client import during `scan` and `tui`.** When `unifi.controller` in the
+config has a `url` and an `api_token` (or `username` and `password`), each scan
+reads the controller's client list (read-only). Owner-set aliases and
+hostnames name devices, in the order alias > scanner names > controller
+hostname > NetBIOS > PTR. Connected clients the scan did not see are
+summarised in one finding. Devices carry `seen_by`. `unifi.mode: disabled`
+turns the import off. Without credentials, an identified UniFi gateway gets one
+Info advisory naming the SAB-069 fixed firmware versions.
+
+**`unifi scan`** audits the controller configuration. It takes the controller
+and credentials on the command line only; from the config file it reads just
+`unifi.controller.insecure`. A password given with `--password` is visible to
+other local users in the process list.
 
 ```bash
 # Scan a remote UniFi controller
@@ -289,11 +327,18 @@ rikitikitavi unifi scan --controller https://192.168.1.1 \
 rikitikitavi unifi scan --controller https://192.168.1.1 --user admin --password secret --insecure
 ```
 
-- WLAN encryption and PMF (802.11w) configuration audit
-- Firewall rule analysis (overly permissive rules, disabled rules)
-- Device firmware version reporting
-- IDS/IPS event summary
-- On-device detection (Dream Machine, Cloud Gateway, etc.)
+- WLAN encryption, PMF (802.11w), guest and default-SSID audit
+- Firewall rule analysis (overly permissive rules, disabled rules, no custom rules)
+- Adopted-device firmware checked against UniFi Security Advisory Bulletin 069
+  fixed versions
+- IDS/IPS event count
+- `--local` runs on the device itself (Dream Machine, Cloud Gateway, etc.) and
+  adds its own firmware check; `--site` selects the site (default `default`);
+  `-o` writes the findings as JSON
+
+The other `unifi` subcommands (`devices`, `firmware-check`,
+`audit-controller`, `deploy`, `tui`, `report`) are placeholders: they print a
+pointer to `unifi scan` or "not yet implemented".
 
 ### OCSF Export for AWS Security Lake
 
@@ -349,8 +394,9 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 - **Top actions** and **Attack paths** scroll
 - `e` writes three files to the working directory, named after the scan time:
   the results JSON, the fix plan and the segmentation plan
-- Keys: `1`-`5`, `Tab` or `←`/`→` switch tabs; `↑`/`↓`/`j`/`k`, `PageUp`/`PageDown`,
-  `g`/`G` move or scroll; `o` sorts devices; `s` scans again; `?` lists every
+- Keys: `1`-`5`, `Tab` or `←`/`→` switch tabs (also `d` `n` `f` `t` `a`);
+  `↑`/`↓`/`j`/`k`, `PageUp`/`PageDown`, `g`/`G` move or scroll; `Esc` goes back
+  or clears the search; `o` sorts devices; `s` scans again; `?` lists every
   key; `q` or `Ctrl-C` quits
 - Mouse: click a tab or a row, click the row again (or right-click) to open it,
   wheel scrolls
@@ -359,29 +405,32 @@ Interactive TUI built with [ratatui](https://ratatui.rs/):
 
 ### Cross-Platform
 
-- **Linux**: reads `/proc/net/route`, `/proc/net/arp`, `/sys/class/net/`
-- **macOS**: uses `ifconfig`, `route`, `arp`, `system_profiler`
+- **Linux**: reads `/proc/net/route`, `/proc/net/arp`, `/sys/class/net/`;
+  WiFi scanning uses `iwconfig`/`iwlist`
+- **macOS**: uses `ifconfig`, `route`, `arp`, `system_profiler` (falls back to
+  `airport` on older releases)
+- Other platforms build, but network discovery returns nothing
 
 ## CLI Reference
 
 ```
-rikitikitavi <COMMAND>
+rikitikitavi [OPTIONS] <COMMAND>
 
 Commands:
-  scan        Run network security scan
-  tui         Launch interactive terminal UI
-  verify      Re-check findings from the last full scan on the affected hosts only
-  fix-plan    Markdown fix checklist from the last full scan
-  segment-plan  Zone and firewall-rule proposal from the last full scan
-  report      Print the last saved scan (--latest); other modes not yet implemented
-  unifi       UniFi controller commands
-  aws         AWS Security Lake commands (not yet implemented; every subcommand exits non-zero)
-  modules     List available scanner modules
-  monitor     Passive WiFi monitoring (requires --features monitor)
-  config      Show/validate configuration (secrets redacted)
-  init        Interactive setup wizard (not yet implemented; points at config.example.yaml)
-  update-db   Update vulnerability databases (not yet implemented)
-  version     Show version info
+  scan          Run a network security scan
+  tui           Launch the interactive terminal UI
+  verify        Re-check findings from the last full scan on the affected hosts only
+  fix-plan      Markdown fix checklist from the last full scan
+  segment-plan  Markdown zone and allow-rule proposal from the last full scan
+  report        Print the last saved scan (--latest); other modes not yet implemented
+  unifi         UniFi controller commands (only `unifi scan` is implemented)
+  aws           AWS Security Lake commands (not yet implemented; every subcommand exits non-zero)
+  modules       `modules list`, `modules info <id>`
+  monitor       Passive WiFi monitoring (only in a `--features monitor` build)
+  config        `config validate`, `config show` (secrets redacted)
+  init          Setup wizard (not yet implemented; points at config.example.yaml)
+  update-db     Update vulnerability databases (not yet implemented)
+  version       Show version info (`--verbose` for system details)
 ```
 
 ### Global Options
@@ -389,9 +438,11 @@ Commands:
 ```
   -c, --config <PATH>    Config file [env: RIKITIKITAVI_CONFIG]; skips the default search
   -l, --log-level <L>    error, warn, info, debug, trace [default: warn]
+      --log-format <F>   text, json [default: text]
 ```
 
-Both apply to every subcommand.
+All three apply to every subcommand. `RUST_LOG`, when set, overrides
+`--log-level`.
 
 ### Scan Options
 
@@ -405,16 +456,20 @@ Options:
                          and the `neighbor` stub accept neighbor, so that
                          perspective is effectively a WiFi-only scan
   --quick                Passive scan (top 20 ports only)
-  --aggressive           Deep scan (extended port range)
-  --modules <M>          Comma-separated scanner list
-  --output <PATH>        Output file path
-  --format <F>           Output format: json, csv, html, ocsf, prometheus
+  --aggressive           Deep scan (extended port range, longer timeouts,
+                         password-guessing logins)
+  --modules <M>          Comma-separated scanner list (ids from `modules list`)
+  -o, --output <PATH>    Write the report to this file instead of printing
+                         the terminal report
+  --format <F>           json, csv, html, ocsf, prometheus [default: json];
+                         used only with --output
   --attack-paths         Generate attack path analysis
   --compare-previous     Diff against last saved scan
   --fail-on <SEVERITY>   Exit code 2 if any finding is at/above this severity
                          (never, info, low, medium, high, critical) — for
                          cron/CI self-audits, e.g. --fail-on high
   --suppress <FILE>      Mute findings whose fingerprint is in this baseline
+  --accept-file <FILE>   Accepted-risk ledger (see "Fixing and Verifying")
   --write-baseline <F>   Write current findings' fingerprints to a baseline file
   --known-devices <F>    Flag any device not in this file as a "new device"
   --write-known-devices <F>  Write current devices to a known-devices file
@@ -441,7 +496,8 @@ Options:
   --theme <T>            dark, light, hacker, accessible [default: dark]
   --perspective <P>      As for scan [default: config scan.perspective, else unauthenticated]
   --accept-file <FILE>   Accepted-risk ledger, as for scan
-  --network, --ssid      Not yet implemented; passing them is an error
+  --network, --ssid      Not yet implemented; --ssid, or --network other than
+                         auto, is an error
 ```
 
 The TUI runs at the config intensity (capped at active), always with attack
@@ -449,6 +505,29 @@ paths, and saves every scan to history. `s` re-scans on demand. With
 `unifi.controller` credentials in the config it imports the controller's client
 list, as `scan` does. Logging to the terminal is off while the TUI runs; set
 `RUST_LOG` and redirect stderr to a file to capture it.
+
+### Verify, Fix-Plan and Segment-Plan Options
+
+All three read the most recent full scan in history; they fail if there is
+none, so run `scan` (without `--no-save`) first.
+
+```
+rikitikitavi verify [OPTIONS]
+  --severity <S>         Only findings at or above this severity
+                         [default: low, or none with --finding]
+  --ip <IP>              Only findings on these hosts (repeatable or comma-separated)
+  --finding <ID>         Only these findings, by fingerprint or finding id
+  --aggressive           Allow replaying login checks (`credentials` findings)
+  --accept-file <FILE>   Listed findings are not re-checked
+  --format <F>           text, json [default: text]
+  -o, --output <PATH>    Write the report to this file instead of stdout
+
+rikitikitavi fix-plan [-o <PATH>] [--accept-file <FILE>]
+rikitikitavi segment-plan [-o <PATH>]
+```
+
+`fix-plan` and `segment-plan` write Markdown to stdout, or to `-o` with mode
+0600.
 
 ### Report
 
@@ -459,8 +538,10 @@ and `--attack-paths` are parsed but unused.
 > **Log level:** defaults to `warn` so the report stays readable; use
 > `--log-level info` for scan progress detail.
 
-**Baselines & recurring audits.** Establish a baseline once, then surface only
-what's new on later scans — ideal for cron/CI (`--fail-on` sets the exit code):
+### Baselines and Recurring Audits
+
+Establish a baseline once, then surface only what's new on later scans, for
+cron or CI (`--fail-on` sets the exit code):
 
 ```bash
 rikitikitavi scan --write-baseline .rikitikitavi-baseline \
@@ -470,12 +551,13 @@ rikitikitavi scan --suppress .rikitikitavi-baseline \
                   --known-devices .rikitikitavi-devices --fail-on high
 ```
 
-Order after a scan: new-device findings are appended and `--write-known-devices`
-written; history is saved; `--write-baseline` is written; `--suppress`
-filtering is applied; the report, then the `--compare-previous` diff, are
-printed; `--fail-on` is evaluated last, on the filtered set. History and a
-baseline written in the same run as `--suppress` therefore contain the full,
-unfiltered set.
+Order after a scan: `--rules` findings are added; new-device findings are
+appended and `--write-known-devices` written; history is saved;
+`--write-baseline` is written; `--accept-file` entries are applied; `--suppress`
+filtering is applied; the report is printed (or written to `--output`), then the
+`--compare-previous` diff; `--fail-on` is evaluated last, on the filtered set.
+History and a baseline written in the same run as `--accept-file` or
+`--suppress` therefore contain the full, unfiltered set.
 
 > **Consent:** rikitikitavi prints a one-line reminder that you should only scan
 > networks you own or are authorized to test. *Password-guessing* telnet logins
@@ -489,7 +571,7 @@ unfiltered set.
 
 `rikitikitavi` loads the file given by `--config`/`-c` (or `RIKITIKITAVI_CONFIG`); otherwise the first of `./config.yaml`, `./config.yml`, `/etc/rikitikitavi/config.yaml`; otherwise built-in defaults. An explicit path that does not exist is an error. `scan` prints `Config: <path>` unless `--quiet`.
 
-[`config.example.yaml`](config.example.yaml) documents every key with its default. Keys that parse but are not read yet (`logging.*`, `output.*`, `scan.network_mode`, `security_lake.*`, and others) are marked "reserved" there. `scan.perspective` is the default for `--perspective` on `scan` and `tui`; `scan.modules` and `scan.attack_paths` are overridden by `--modules`/`--attack-paths` or their absence. Safety-relevant keys under `scan`:
+[`config.example.yaml`](config.example.yaml) documents every key with its default. Keys that parse but are not read yet (`logging.*`, `output.*`, `scan.network_mode`, `security_lake.*`, and others) are marked "reserved" there. `scan.perspective` is the default for `--perspective` on `scan` and `tui`; `scan.modules` and `scan.attack_paths` are overridden by `--modules`/`--attack-paths` or their absence. `unifi.controller` turns on the controller client import (see [UniFi Integration](#unifi-integration)); `config show` prints the loaded config with secrets redacted. Safety-relevant keys under `scan`:
 
 ```yaml
 scan:
@@ -503,7 +585,7 @@ scan:
 
 Exclusion semantics: MAC entries are resolved to IPs through the ARP cache before the host sweep and re-applied after the sweep fills in MACs. Findings on excluded hosts are dropped after the scan, except `arp` findings, so spoofing that involves an excluded host is still reported. If every discovered host is excluded, the six ARP-fallback scanners (`credentials`, `services`, `smb`, `snmp`, `database`, `mgmt-plane`) are skipped; if the gateway is excluded, `router` is skipped.
 
-Independently of `scan.timeout_seconds`, each scanner runs under its own budget of 4× its estimated duration, clamped to 60–600 s; a scanner that exceeds it is skipped with a warning and contributes no findings.
+Independently of `scan.timeout_seconds`, each scanner runs under its own budget of 4× its estimated duration, clamped to 60–600 s. A scanner that exceeds it is stopped with a warning; it keeps only the findings it had already reported incrementally (span outcome `partial`), which for most scanners is none.
 
 Reports, baseline and known-device files are written with mode `0600` (the Prometheus textfile export is `0644`); the scan-history directory with `0700`.
 
@@ -558,9 +640,11 @@ over-long pattern. See [`examples/rules/`](examples/rules/).
 
 ### Logging and Tracing
 
-A scan is traced as spans: `scan` (root), `discovery`, and one `scanner` span per
+A scan is traced as spans: `scan` (root), `discovery`, one `scanner` span per
 scanner carrying `id`, `findings`, `outcome` (`ok`, `partial`, `error`, `timeout`)
-and `budget_secs`. Each span logs its busy and idle time when it closes:
+and `budget_secs`, and `rdns`, `nbns` and `unifi_clients` for the naming passes
+(`verify` has its own root span). Each span logs its busy and idle time when it
+closes:
 
 ```bash
 rikitikitavi -l info scan                 # per-scanner timings on stderr
@@ -582,13 +666,22 @@ Without the variable set, nothing is exported even in an `otel` build.
 
 ### Host Discovery
 
-Devices are named by a reverse-DNS (PTR) pass against the gateway and any
-RFC 1918 resolvers, never a public one, and typed from the name by a small
-hostname table and the Home Assistant DHCP matchers.
+In Active and Aggressive mode, devices are named by two passes that run
+alongside Phase 2:
+
+- a reverse-DNS (PTR) pass against the gateway and any RFC 1918 resolvers from
+  `resolv.conf`, never a public one; names are typed by a small hostname table
+  and the Home Assistant DHCP matchers;
+- a NetBIOS node-status (NBSTAT) pass, unicast UDP 137 to private addresses
+  with SMB open or no name yet. A self-reported NetBIOS name ranks above a PTR
+  name, except macOS's generated `MAC-xxxxxx` form.
+
+With UniFi controller credentials in the config, controller aliases and
+hostnames also name devices (see [UniFi Integration](#unifi-integration)).
 
 In the default (Active) mode, rikitikitavi runs a bounded, unprivileged
 TCP-connect sweep across the detected subnet, so a cold ARP cache on a freshly
-booted machine no longer yields an empty "looks clean" report. `--quick`
+booted machine does not yield an empty "looks clean" report. `--quick`
 (Passive) mode stays read-only and only reads the ARP cache; to enrich it first:
 
 ```bash
@@ -598,58 +691,56 @@ rikitikitavi scan --quick
 
 ## Findings Format
 
-Each finding includes severity, scanner ID, title, description, affected
-host/port/service, CWE reference, and remediation steps with estimated effort:
+Each finding carries a severity, confidence, scanner ID, title, description,
+affected host/port/service, CWE and CVE references, evidence, and remediation
+steps with estimated effort. The JSON, CSV, HTML and OCSF exports carry all of
+it. The terminal report prints a summary, the device table shown under
+[Per-Device Report Cards](#per-device-report-cards), then
+Critical/High/Medium findings in full and Low/Info as one line each,
+accepted findings, and the top priority actions:
 
 ```
- CRIT  Redis accessible without authentication on 192.168.1.50:6379
-       CWE-306 | Remediation: Enable Redis AUTH, bind to 127.0.0.1
+Scan complete: 131 findings
+Risk score: 41/100 (F  CRITICAL ISSUES)
 
- HIGH  SMBv1 enabled on 192.168.1.30:445
-       CWE-327 | Remediation: Disable SMBv1 (EternalBlue/WannaCry vulnerable)
+  Severity breakdown:
+    CRITICAL  1
+    HIGH      3
+    MEDIUM    12
+    ...
 
- MED   DNSSEC validation not enforced
-       CWE-350 | Remediation: Switch to Quad9 (9.9.9.9) or Cloudflare (1.1.1.1)
+  Actionable findings:
 
- LOW   SSH server banner reveals version (OpenSSH 8.9p1) on 192.168.1.10:22
-       CWE-200 | Remediation: Suppress version in sshd_config
+    [CRITICAL] Redis accessible without authentication on 192.168.1.50:6379
+              Redis at 192.168.1.50:6379 responds to commands without requiring ...
+              Fix: Edit redis.conf and set 'requirepass <strong-password>'. → ...
+
+  Informational (115):
+    [LOW     ] ...
 ```
 
 ---
 
 ## Architecture
 
-```
-                    ┌─────────────────────┐
-                    │   rikitikitavi (bin) │
-                    │  CLI + orchestration │
-                    └──────────┬──────────┘
-                               │
-          ┌────────────────────┼────────────────────┐
-          │                    │                     │
-   ┌──────┴──────┐   ┌────────┴────────┐   ┌───────┴───────┐
-   │   scanners  │   │    analysis     │   │    export     │
-   │ 39 scanners │   │ risk, diff,     │   │ JSON, CSV,    │
-   │ + registry  │   │ attack paths    │   │ HTML, OCSF    │
-   └──────┬──────┘   └────────┬────────┘   └───────────────┘
-          │                    │
-   ┌──────┴──────┐   ┌────────┴────────┐   ┌───────────────┐
-   │   network   │   │     models      │   │      tui      │
-   │ ARP, routes,│   │ Finding, Device,│   │   ratatui +   │
-   │ WiFi, iface │   │ ScanContext     │   │   crossterm   │
-   └──────┬──────┘   └────────┬────────┘   └───────────────┘
-          │                    │
-          │            ┌───────┴───────┐    ┌───────────────┐
-          └────────────│     core      │    │     unifi     │
-                       │ Severity,     │    │ API client +  │
-                       │ Perspective   │    │ scanner       │
-                       └───────────────┘    └───────────────┘
-```
+This is a 9-crate Rust workspace under `crates/`:
 
-This is a 9-crate Rust workspace. The dependency graph flows downward — `core`
-has no intra-workspace dependencies (its runtime deps are thiserror, anyhow,
-tracing, serde, chrono, uuid, ipnetwork), `models` builds on it, and everything
-else builds on those two.
+| Crate | Contents | Workspace dependencies |
+|-------|----------|------------------------|
+| `rikitikitavi` | Binary: CLI, scan runner, `verify`, accept file | all others (`tui`, `unifi` optional) |
+| `rikitikitavi-core` | `Severity`, `Confidence`, `Perspective`, `ScanError` | none |
+| `rikitikitavi-models` | `Finding`, `Device`, `ScanContext`, `ScanResults`, config types, OCSF structs | core |
+| `rikitikitavi-network` | ARP, routes, interfaces, WiFi, host sweep, PTR and NBSTAT lookups, public IP, EPSS fetch | none |
+| `rikitikitavi-scanners` | `Scanner` trait, `ScannerRegistry`, the 39 scanners, remediation templates, embedded fingerprint tables | core, models, network |
+| `rikitikitavi-analysis` | Risk score, device grades, scan diff and history, attack paths, priority actions, KEV/Vulnrichment, OWASP tags, declarative rules | core, models |
+| `rikitikitavi-export` | JSON, CSV, HTML, OCSF, Prometheus, fix plan, segment plan | core, models, analysis |
+| `rikitikitavi-tui` | ratatui + crossterm terminal UI | core, models, export, analysis |
+| `rikitikitavi-unifi` | UniFi controller client, local detection, WLAN/firewall/firmware audit | core, models, scanners |
+
+Cargo features of the binary: `tui` and `unifi` (default), `monitor`
+(passive WiFi, needs libpcap), `otel` (OTLP trace export), and `minimal`
+(an empty marker; build with `--no-default-features` for a binary without the
+TUI and UniFi crates).
 
 ### Design Deep Dive
 
@@ -685,7 +776,10 @@ pub trait Scanner: Send + Sync {
     fn name(&self) -> &'static str;
     fn supported_perspectives(&self) -> &[Perspective];
     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError>;
-    fn estimated_duration_secs(&self) -> u64;
+    // Default calls scan(); override to keep partial findings on timeout.
+    async fn scan_collecting(&self, ctx: &ScanContext, sink: &mut Vec<Finding>)
+        -> Result<(), ScanError> { /* ... */ }
+    fn estimated_duration_secs(&self) -> u64 { 30 }   // also sets the time budget
     fn requires_privileges(&self) -> bool { false }
     fn relevant_ports(&self) -> &[u16] { &[] }  // empty = always run
 }
@@ -695,8 +789,7 @@ pub trait Scanner: Send + Sync {
 5432]` and no hosts have those ports open, it's skipped entirely.
 
 The `ScannerRegistry` holds `Vec<Box<dyn Scanner>>` and provides filtering by
-perspective or ID. Adding a new scanner is: implement the trait, add one line to
-`ScannerRegistry::new()`.
+perspective or ID (see [Adding a New Scanner](#adding-a-new-scanner)).
 
 #### Builder Pattern for Domain Models
 
@@ -763,28 +856,25 @@ Devices use MAC address (preferred) or IP as their fingerprint
 Network functions are split into pure parsing and I/O:
 
 ```rust
-// Pure — takes &str, easy to unit test with literal strings
+// Pure: takes &str, unit-tested with literal strings
 fn parse_proc_route(contents: &str) -> Vec<RouteEntry> { /* ... */ }
+fn detect_gateway_from_proc(contents: &str) -> Option<IpAddr> { /* ... */ }
 
-// Public — reads from /proc, calls the pure function
-pub fn detect_gateway() -> Option<IpAddr> {
-    let contents = std::fs::read_to_string("/proc/net/route").ok()?;
-    parse_proc_route(&contents)
-        .into_iter()
-        .find(|r| r.is_default)
-        .map(|r| r.gateway)
-}
+// Public: reads the platform source, calls the pure function
+pub fn detect_gateway() -> Result<Option<IpAddr>> { /* ... */ }
 ```
 
-Linux reads `/proc` directly (no shelling out). macOS calls `ifconfig`,
-`route`, `arp` and parses their output. Platform selection uses `#[cfg]`:
+Linux reads `/proc` and `/sys` for routes, ARP and interfaces; only the WiFi
+scan shells out (`iwconfig`, `iwlist`). macOS calls `ifconfig`,
+`route`, `arp` and `system_profiler` and parses their output. Platform
+selection uses `#[cfg]`:
 
 ```rust
 #[cfg(target_os = "linux")]
-fn read_arp_table() -> Vec<ArpEntry> { /* parse /proc/net/arp */ }
+fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> { /* parse /proc/net/arp */ }
 
 #[cfg(target_os = "macos")]
-fn read_arp_table() -> Vec<ArpEntry> { /* parse `arp -an` output */ }
+fn read_arp_cache_platform() -> Result<Vec<ArpEntry>> { /* parse `arp -a` output */ }
 ```
 
 Tests import the macOS parsers on Linux with
@@ -798,11 +888,17 @@ The runner (`runner.rs`) coordinates scanning:
    the previous results)
 2. **Enrichment** — discovered ports are grouped by IP to build device
    profiles, then injected into `ScanContext`
-3. **Phase 2** — remaining 34 scanners run concurrently via
-   `futures::future::join_all`, filtered by `relevant_ports()`
-4. **Deduplication** — when Phase 1 and Phase 2 produce findings for the same
-   `(ip, port)`, the one with more detail wins (scored by evidence, CWE,
-   remediation, description length)
+3. **Phase 2** — the remaining selected scanners run concurrently via
+   `futures::future::join_all`, filtered by `relevant_ports()`; the PTR,
+   NBSTAT and UniFi client passes run alongside them
+4. **Deduplication** — only restatements are dropped: the generic `ports`
+   finding when a deeper scanner reports on the same `(ip, port)` at equal or
+   higher severity, and two listed cross-scanner pairs (HSTS, server version).
+   Distinct findings from different scanners on one port are kept, and
+   findings with the same fingerprint collapse to the most severe
+5. **Post-processing** — product-aware remediation, then KEV/Vulnrichment, OWASP
+   tags and EPSS, then attack paths, risk score, priority actions and device
+   grades
 
 #### OCSF Export Pipeline
 
@@ -836,33 +932,15 @@ parallel processing.
 
 #### Property-Based Testing
 
-Beyond standard unit tests, the codebase uses `proptest` for invariant testing:
-
-```rust
-proptest! {
-    #[test]
-    fn finding_json_roundtrip(f in arb_finding()) {
-        let json = serde_json::to_string(&f).unwrap();
-        let back: Finding = serde_json::from_str(&json).unwrap();
-        prop_assert_eq!(f.title, back.title);
-        prop_assert_eq!(f.severity, back.severity);
-    }
-
-    #[test]
-    fn diff_covers_all_findings(old in vec(arb_finding(), 0..20),
-                                 new in vec(arb_finding(), 0..20)) {
-        let diff = diff_scan_results(&old, &new);
-        // Every unique fingerprint lands in exactly one category
-    }
-}
-```
-
-This catches edge cases that example-based tests miss — serialization
-roundtrips, diff category coverage, fingerprint stability.
+Beyond unit tests, `proptest` checks invariants such as JSON round-trips,
+valid NDJSON for OCSF export, scan-diff symmetry, and risk-score bounds and
+monotonicity (search for `fn prop_`).
 
 The parsers that consume network-sourced bytes (DNS packets, 802.11 frames,
-SSH KEX, service banners, HTTP headers, SSDP/UPnP, X.509 DER, identifiers)
-also have libFuzzer harnesses under `fuzz/fuzz_targets/`; see `fuzz/README.md`.
+SSH KEX, service banners, HTTP headers, SSDP/UPnP, X.509 DER, OT and
+smart-home protocols, web-app responses, Recog matching, among others) also
+have libFuzzer harnesses under `fuzz/fuzz_targets/`; see
+[`fuzz/README.md`](fuzz/README.md).
 
 #### Error Handling
 
@@ -909,8 +987,13 @@ performance.
 1. Create `crates/rikitikitavi-scanners/src/my_scanner.rs`
 2. Implement the `Scanner` trait
 3. Register in `ScannerRegistry::new()` (`traits.rs`)
-4. Add `mod my_scanner;` to `lib.rs`
-5. Write tests
+4. Add `pub mod my_scanner;` to `lib.rs`
+5. Attach a remediation to every finding above Info (templates live in
+   `crates/rikitikitavi-scanners/templates/`); `tests/remediation_coverage.rs`
+   fails otherwise
+6. If its probes go only to known hosts, consider adding its id to
+   `REPLAYABLE` in `crates/rikitikitavi/src/verify.rs` so `verify` can re-check it
+7. Write tests
 
 ### Adding a New Export Format
 
@@ -918,12 +1001,12 @@ performance.
 2. Implement `export_my_format(results: &ScanResults, path: &Path) -> Result<()>`
 3. Re-export in `lib.rs`
 4. Add variant to `ReportFormatArg` in `cli.rs`
-5. Wire dispatch in `main.rs`
+5. Wire dispatch in `write_report` in `main.rs`
 
 ## Development
 
 ```bash
-# Run all tests (2196 tests across 17 binaries, incl. ~200 proptest invariants)
+# Run all tests (unit, integration and proptest)
 cargo test --workspace
 
 # Clippy (pedantic + nursery, must be clean)
@@ -947,7 +1030,8 @@ cargo build --profile release-embedded
 ```
 
 CI (`.github/workflows/ci.yml`) runs six jobs on every push to `main` and
-every PR: `check` (fmt + clippy), `test` (Linux), `test-macos`, `msrv`
+every PR: `check` (fmt, clippy, and clippy with `--features otel`), `test`
+(Linux), `test-macos`, `msrv`
 (`cargo check` on Rust 1.89), `deny`, and `fuzz-build` (nightly `cargo fuzz
 build`; the fuzzers are built, not run). Release-profile builds are not part
 of CI.

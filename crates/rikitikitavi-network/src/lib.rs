@@ -21,3 +21,18 @@ pub use mdns::{
 };
 pub use sweep::{MAX_SWEEP_HOSTS, tcp_sweep};
 pub use wifi::{WifiEncryption, WifiNetwork, scan_wifi_networks};
+
+/// Read at most `max_bytes` of a response body. A read error ends the body early.
+pub(crate) async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> Vec<u8> {
+    let mut buf = Vec::new();
+    while buf.len() < max_bytes {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let take = chunk.len().min(max_bytes - buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    buf
+}

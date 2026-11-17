@@ -1,7 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-17
 
+- http_audit: fewer duplicate admin-page findings. An admin path that returns
+  the device's front page, or the page it serves for a path that does not
+  exist (single-page apps, redirects to the front page), is no longer reported
+  as "Possibly exposed admin page". One page returned by several admin paths
+  is reported once, under the first path. A UniFi camera went from 12 such
+  findings to none. The dropped findings show as resolved in the next scan
+  diff.
+- Docs checked against the code: README (CLI reference, sample output,
+  architecture), SECURITY.md (every outbound call, UniFi import, `verify`,
+  file handling), both roadmaps (status per item), RUST_PATTERNS, the learning
+  files and THIRD-PARTY-NOTICES. New `CLAUDE.md` for AI-assisted work. The
+  0.4.0 entry named the wrong credential corpus; it is RouterSploit's.
+- cargo-deny ignores RUSTSEC-2026-0543 (chrono unmaintained, no vulnerability)
+  until chrono is replaced.
+- Hardening: `Debug` output redacts the UniFi cloud, Shodan and Censys API
+  keys (the controller password already was). The public-IP and EPSS responses
+  are read with a size cap, like every LAN response.
 - TUI rebuilt. It opens on the last saved scan and runs the first scan in the
   background (it used to show a blank terminal until the scan finished). The
   network map, which listed 15 devices at most, is now a scrolling device table
@@ -165,7 +182,7 @@ robustness sweep (two adversarial re-reviews, fuzzing, and mutation testing).
   scan's own facts (ports, versions, banners, findings, device type) with a
   small total predicate set — no code execution, bounded patterns, and a rule
   can never mint a Confirmed finding. Example rules under `examples/rules/`.
-- A default-credential corpus (SecLists, MIT). Login attempts run only at
+- A default-credential corpus (RouterSploit wordlists, BSD-3-Clause). Login attempts run only at
   `--aggressive`, capped and rate-limited, stopping at first success and
   honouring exclusions; below `--aggressive`, a device whose class ships
   defaults gets a Low/Inferred "verify" advisory with no login.

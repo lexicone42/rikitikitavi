@@ -76,13 +76,13 @@ fn add_score(scores: &mut Vec<i32>, score: i32) {
 //   - The caller retains ownership of both the scanner and context
 //
 // In the TUI App:
-//   pub fn handle_key(&mut self, key: KeyCode) {
+//   pub fn handle_key(&mut self, key: KeyEvent) -> bool {
 //                     ^^^^^^^^^
 //                     └─ Mutable borrow of self — can modify app state
 //
 // In the Finding builder:
-//   pub fn with_ip(mut self, ip: IpAddr) -> Self {
-//                  ^^^^^^^^
+//   pub const fn with_ip(mut self, ip: IpAddr) -> Self {
+//                        ^^^^^^^^
 //                  └─ Takes OWNERSHIP of self (consumes it)
 //                     Returns a new Self (builder pattern)
 

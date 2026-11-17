@@ -33,16 +33,19 @@ pub async fn get_public_ip() -> Result<IpAddr> {
     Err(anyhow!("failed to detect public IP from any provider"))
 }
 
+/// An IP address in text is at most 45 bytes.
+const MAX_IP_BODY_BYTES: usize = 256;
+
 /// Try to get the public IP from a single provider.
 async fn try_get_ip(client: &reqwest::Client, url: &str) -> Result<IpAddr> {
     let response = client
         .get(url)
-        .header("User-Agent", "rikitikitavi/0.1")
+        .header("User-Agent", "rikitikitavi")
         .send()
         .await?
         .error_for_status()?;
-    let body = response.text().await?;
-    let ip: IpAddr = body.trim().parse()?;
+    let body = crate::read_capped(response, MAX_IP_BODY_BYTES).await;
+    let ip: IpAddr = std::str::from_utf8(&body)?.trim().parse()?;
     Ok(ip)
 }
 

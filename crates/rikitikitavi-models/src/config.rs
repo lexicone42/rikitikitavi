@@ -274,12 +274,11 @@ pub struct UniFiControllerConfig {
 
 impl std::fmt::Debug for UniFiControllerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
         f.debug_struct("UniFiControllerConfig")
             .field("url", &self.url)
             .field("username", &self.username)
-            .field("password", &redacted(&self.password))
-            .field("api_token", &redacted(&self.api_token))
+            .field("password", &redacted(self.password.as_ref()))
+            .field("api_token", &redacted(self.api_token.as_ref()))
             .field("site", &self.site)
             .field("insecure", &self.insecure)
             .finish()
@@ -299,7 +298,7 @@ impl Default for UniFiControllerConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UniFiCloudConfig {
     pub enabled: bool,
@@ -307,12 +306,44 @@ pub struct UniFiCloudConfig {
     pub site_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+impl std::fmt::Debug for UniFiCloudConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UniFiCloudConfig")
+            .field("enabled", &self.enabled)
+            .field("api_key", &redacted(self.api_key.as_ref()))
+            .field("site_id", &self.site_id)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiConfig {
     pub shodan_api_key: Option<String>,
     pub censys_api_id: Option<String>,
     pub censys_api_secret: Option<String>,
+}
+
+impl std::fmt::Debug for ApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiConfig")
+            .field("shodan_api_key", &redacted(self.shodan_api_key.as_ref()))
+            .field("censys_api_id", &self.censys_api_id)
+            .field(
+                "censys_api_secret",
+                &redacted(self.censys_api_secret.as_ref()),
+            )
+            .finish()
+    }
+}
+
+/// `Debug` stand-in for a secret: shows whether it is set, never its value.
+const fn redacted(secret: Option<&String>) -> &'static str {
+    if secret.is_some() {
+        "<redacted>"
+    } else {
+        "<unset>"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,5 +681,22 @@ mod tests {
             "unifi:\n  mode: disabled\n  controller:\n    url: https://192.168.1.1\n    api_token: k\n",
         );
         assert!(disabled.scan_controller().is_none());
+    }
+
+    #[test]
+    fn api_keys_are_redacted_in_debug() {
+        let cloud = UniFiCloudConfig {
+            enabled: true,
+            api_key: Some("cloud-s3cr3t".to_owned()),
+            site_id: None,
+        };
+        let api = ApiConfig {
+            shodan_api_key: Some("shodan-s3cr3t".to_owned()),
+            censys_api_id: Some("id".to_owned()),
+            censys_api_secret: Some("censys-s3cr3t".to_owned()),
+        };
+        let out = format!("{cloud:?} {api:?}");
+        assert!(!out.contains("s3cr3t"), "{out}");
+        assert!(out.contains("<redacted>"));
     }
 }

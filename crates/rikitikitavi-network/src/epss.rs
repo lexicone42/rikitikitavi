@@ -48,7 +48,8 @@ pub async fn fetch_epss_scores(cves: &[String]) -> HashMap<String, f64> {
             }
         };
 
-        match resp.json::<EpssResponse>().await {
+        let body = crate::read_capped(resp, MAX_EPSS_BODY_BYTES).await;
+        match serde_json::from_slice::<EpssResponse>(&body) {
             Ok(parsed) => {
                 for entry in parsed.data {
                     if let Ok(score) = entry.epss.parse::<f64>() {
@@ -62,6 +63,9 @@ pub async fn fetch_epss_scores(cves: &[String]) -> HashMap<String, f64> {
 
     out
 }
+
+/// Cap on one EPSS response; a full batch is about 15 KiB.
+const MAX_EPSS_BODY_BYTES: usize = 1024 * 1024;
 
 /// The API returns at most `EPSS_BATCH` rows per request.
 const EPSS_BATCH: usize = 100;

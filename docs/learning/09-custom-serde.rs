@@ -46,19 +46,19 @@
 //
 //   #[derive(Serialize, Deserialize)]
 //   pub struct OcsfFinding {
-//       /// Epoch milliseconds, not RFC 3339 string
-//       #[serde(serialize_with = "serialize_epoch_ms")]
-//       #[serde(deserialize_with = "deserialize_epoch_ms")]
+//       // ...
+//       #[serde(
+//           serialize_with = "serialize_epoch_ms",
+//           deserialize_with = "deserialize_epoch_ms"
+//       )]
 //       pub time: DateTime<Utc>,
-//
-//       /// Same for metadata.modified_time
-//       #[serde(serialize_with = "serialize_epoch_ms")]
-//       #[serde(deserialize_with = "deserialize_epoch_ms")]
-//       pub modified_time: DateTime<Utc>,
 //   }
 //
+// `OcsfMetadata::logged_time` and `OcsfFindingInfo::created_time` use the
+// same pair (crates/rikitikitavi-models/src/ocsf.rs).
+//
 // Now `serde_json::to_string(&ocsf)` produces:
-//   { "time": 1739353800000, "modified_time": 1739353800000, ... }
+//   { "time": 1739353800000, "metadata": { "logged_time": 1739353800000, ... }, ... }
 //
 // Instead of:
 //   { "time": "2026-02-12T10:30:00Z", ... }
@@ -143,7 +143,10 @@
 //   pub fn to_ocsf_ndjson(results: &ScanResults) -> Result<String> {
 //       let mut buf = String::new();
 //       for finding in &results.findings {
-//           let ocsf = OcsfFinding::from(finding);
+//           let mut ocsf = OcsfFinding::from(finding);
+//           if results.risk_score > 0.0 {
+//               ocsf.risk_score = Some(results.risk_score);
+//           }
 //           let line = serde_json::to_string(&ocsf)?;
 //           buf.push_str(&line);
 //           buf.push('\n');
@@ -160,17 +163,22 @@
 //
 //   proptest! {
 //       #[test]
-//       fn prop_epoch_ms_roundtrip(ms in 0_i64..4_000_000_000_000) {
-//           let dt = DateTime::from_timestamp_millis(ms).unwrap();
-//           let ocsf = OcsfFinding { time: dt, ... };
+//       fn prop_ocsf_json_roundtrip(
+//           scanner in "[a-z]{1,10}",
+//           title in "[a-zA-Z0-9 ]{1,30}",
+//           desc in "[a-zA-Z0-9 ]{1,60}",
+//           severity in arb_severity(),
+//       ) {
+//           let finding = Finding::new(&scanner, &title, &desc, severity);
+//           let ocsf = OcsfFinding::from(&finding);
 //           let json = serde_json::to_string(&ocsf).unwrap();
-//           let back: OcsfFinding = serde_json::from_str(&json).unwrap();
-//           assert_eq!(ocsf.time, back.time);
+//           let recovered: OcsfFinding = serde_json::from_str(&json).unwrap();
+//           assert_eq!(ocsf.time.timestamp_millis(), recovered.time.timestamp_millis());
 //       }
 //   }
 //
-// This generates thousands of random timestamps and verifies they survive
-// serialize → deserialize without drift.
+// The timestamp is the finding's creation time, not a generated value, so
+// this checks the roundtrip shape rather than the full timestamp range.
 //
 // ── KEY TAKEAWAYS ───────────────────────────────────────────────────────────
 //
@@ -180,8 +188,8 @@
 // 3. skip_serializing_if keeps output clean for optional/empty fields
 // 4. r#keyword lets you use reserved words as identifiers
 // 5. NDJSON is just "one serde_json::to_string per line" — trivial in Rust
-// 6. Property tests catch serialization edge cases (negative timestamps,
-//    year 2038 overflow, etc.)
+// 6. Property tests check that serialize → deserialize preserves the fields
+//    consumers rely on
 
 fn main() {
     println!("Read the comments above to learn about custom serde and OCSF export.");

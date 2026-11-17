@@ -11,7 +11,8 @@
 
 // ── THISERROR: Structured Errors ──────────────────────────────────────────
 //
-// In crates/rikitikitavi-core/src/error.rs, we define error types:
+// In crates/rikitikitavi-core/src/error.rs, we define error types
+// (excerpt; the real enum also has InsufficientPrivileges and InterfaceNotFound):
 
 use std::net::IpAddr;
 
@@ -86,11 +87,12 @@ fn example_with_anyhow() -> anyhow::Result<()> {
 
 // ── WHEN TO USE WHICH ─────────────────────────────────────────────────────
 //
-// thiserror → Library code (scanners, models, core)
+// thiserror → errors callers match on (ScanError, returned by Scanner::scan)
 //   - Callers can match on specific error variants
 //   - Forces you to think about error categories
 //
-// anyhow → Application code (main.rs, CLI handlers)
+// anyhow → main.rs, CLI handlers, and internal helpers in network, analysis,
+//          export, unifi and tui
 //   - Quick and ergonomic
 //   - Good for "just tell me what went wrong" scenarios
 //   - Supports error chains with .context()

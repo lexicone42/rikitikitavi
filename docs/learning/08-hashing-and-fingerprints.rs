@@ -77,8 +77,8 @@
 //
 // Instead of using a raw `u64` for fingerprints, we wrap it:
 //
-//   #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-//   pub struct FindingFingerprint(pub u64);
+//   #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+//   pub struct FindingFingerprint(u64);   // private field; read via a getter
 //
 // Why? Type safety. You can't accidentally compare a FindingFingerprint with
 // a DeviceFingerprint, even though both are u64 inside. The compiler treats
@@ -102,15 +102,11 @@
 //
 // In Rust, we build HashMaps keyed by fingerprint:
 //
-//   let old_map: HashMap<FindingFingerprint, &Finding> = old_findings
-//       .iter()
-//       .map(|f| (f.fingerprint(), f))
-//       .collect();
+//   let old_map: HashMap<FindingFingerprint, &Finding> =
+//       old.findings.iter().map(|f| (f.fingerprint(), f)).collect();
 //
-//   let new_map: HashMap<FindingFingerprint, &Finding> = new_findings
-//       .iter()
-//       .map(|f| (f.fingerprint(), f))
-//       .collect();
+//   let new_map: HashMap<FindingFingerprint, &Finding> =
+//       new.findings.iter().map(|f| (f.fingerprint(), f)).collect();
 //
 //   // New findings: in new_map but not old_map
 //   for (fp, finding) in &new_map {
@@ -148,16 +144,20 @@
 //   proptest! {
 //       #[test]
 //       fn prop_diff_covers_all_findings(
-//           old in vec(arb_finding(), 0..20),
-//           new in vec(arb_finding(), 0..20),
+//           old_findings in vec(arb_finding(), 0..15),
+//           new_findings in vec(arb_finding(), 0..15),
 //       ) {
+//           let old = make_results(old_findings, vec![]);
+//           let new = make_results(new_findings.clone(), vec![]);
 //           let diff = diff_scan_results(&old, &new);
 //
-//           // Every new fingerprint is in exactly one category
-//           let total_new = diff.new_findings.len()
+//           // Each distinct new fingerprint lands in exactly one category.
+//           let accounted = diff.new_findings.len()
 //               + diff.unchanged_findings.len()
 //               + diff.severity_changes.len();
-//           // (We count unique fingerprints, not raw findings)
+//           let unique_new: HashSet<_> =
+//               new_findings.iter().map(Finding::fingerprint).collect();
+//           assert_eq!(accounted, unique_new.len());
 //       }
 //   }
 //
@@ -170,13 +170,13 @@
 // Scans are saved as timestamped JSON files in XDG data dir:
 //
 //   ~/.local/share/rikitikitavi/scans/
-//   ├── scan_2026-02-12T10-30-00.json
-//   ├── scan_2026-02-12T14-15-00.json
-//   └── scan_2026-02-12T18-45-00.json
+//   ├── scan-20260212-103000.json
+//   ├── scan-20260212-141500.json
+//   └── verify-20260212-184500.json   (verify runs, pruned separately)
 //
 // The `dirs` crate finds the XDG base directory portably (Linux: ~/.local/share,
-// macOS: ~/Library/Application Support). History is pruned to keep only the
-// 10 most recent scans.
+// macOS: ~/Library/Application Support). Each kind is pruned to the 10 most
+// recent files (crates/rikitikitavi-analysis/src/history.rs).
 //
 // ── KEY TAKEAWAYS ───────────────────────────────────────────────────────────
 //
@@ -186,7 +186,8 @@
 // 3. HashMap set operations (contains_key, difference) map naturally to
 //    scan comparison categories
 // 4. Property tests verify algebraic invariants across random inputs
-// 5. Option<T> implements Hash, so optional fields participate correctly
+// 5. Derived Hash for Option<T> is not portable across platforms; write
+//    optional fields with explicit tag bytes when the digest is persisted
 
 fn main() {
     println!("Read the comments above to learn about hashing and fingerprints.");

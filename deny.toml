@@ -11,6 +11,8 @@ feature-depth = 1
 # Advisory database — deny known vulnerabilities
 [advisories]
 ignore = [
+    # chrono unmaintained notice (2026-11); no vulnerability. Drop when chrono is replaced.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained notice only; replacement tracked in docs/ROADMAP-2026-11.md" },
 ]
 
 # License allowlist — common permissive licenses

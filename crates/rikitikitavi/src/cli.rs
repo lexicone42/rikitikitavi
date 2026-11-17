@@ -6,8 +6,8 @@ use std::path::PathBuf;
     name = "rikitikitavi",
     about = "Home network security auditor",
     version,
-    long_about = "Rikitikitavi scans your home network for security vulnerabilities \
-                  and reports findings to AWS Security Lake."
+    long_about = "Rikitikitavi scans your home network for security problems and \
+                  reports them with fix steps. Run it only on networks you own."
 )]
 pub struct Cli {
     /// Path to configuration file.

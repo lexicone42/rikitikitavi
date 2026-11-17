@@ -6,6 +6,8 @@ Code is Apache-2.0 (see LICENSE). The generated tables below carry their own ter
 
 Embedded in `crates/rikitikitavi-analysis/src/kev_db.rs` (regenerate with `scripts/gen_kev_db.py`).
 
+- Catalog version: 2026.11.13 (1,781 entries)
+
 - Source: https://www.cisa.gov/known-exploited-vulnerabilities-catalog
 - Licence: CC0 1.0 Universal
 
@@ -99,11 +101,11 @@ either.
 
 ## endoflife.date release and support dates
 
-Embedded in `crates/rikitikitavi-scanners/src/eol_db.rs` (149 release cycles across 8
-products; 25,852 bytes of table source, 31 KB file).
+Embedded in `crates/rikitikitavi-scanners/src/eol_db.rs` (178 release cycles across 9
+products; 30,388 bytes of table source, 36 KB file).
 
 - Source: https://endoflife.date/api/v1/products/ (v1 API, `schema_version` 1.2.1)
-- Snapshot taken: 2026-09-17
+- Snapshot taken: 2026-11-14
 - Licence: MIT — https://github.com/endoflife-date/endoflife.date/blob/master/LICENSE.
   That licence requires its copyright notice and permission notice to travel with
   the data, so both are reproduced verbatim below.
@@ -112,7 +114,7 @@ products; 25,852 bytes of table source, 31 KB file).
   cycle with its `isLts` flag. Nothing else from the record is embedded — no
   `links`, `identifiers`, `labels`, `custom` or release policy text.
 - Products embedded: nginx, apache-http-server, eclipse-jetty, openssl, python, php,
-  debian, ubuntu. Each has a call site in this workspace that joins a probed version
+  debian, ubuntu, tvos. Each has a call site in this workspace that joins a probed version
   against the table; mysql, mariadb and redis are tracked upstream but not embedded,
   because nothing joins them yet.
 - The API is self-declared Beta; the generator pins `schema_version` and fails the
@@ -134,7 +136,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## nuclei-templates (detection matchers)
 
-Embedded in `crates/rikitikitavi-scanners/src/nuclei_db.rs` (93,495 bytes; 145
+Embedded in `crates/rikitikitavi-scanners/src/nuclei_db.rs` (89,485 bytes; 145
 TCP templates with 144 probe payloads and 150 matchers, 23 HTTP templates with
 29 word matchers and 16 status matchers).
 
@@ -239,8 +241,8 @@ Embedded in `crates/rikitikitavi-scanners/src/recog_db.rs` (regenerate with
   `pop3.banner` 30, `http_header.server` 451, `http_header.wwwauth` 74, `html_title` 452,
   `snmp.sys_description` 591, `x509.subject` 166, `x509.issuer` 29, `hp.pjl.id` 35 —
   plus 4,529 test-only examples.
-- Byte size: 1,172,967 bytes of embedded table and 811,591 bytes of `#[cfg(test)]`
-  examples, 1,984,558 bytes of generated source in total.
+- Byte size: about 1.17 MB of embedded table and 0.81 MB of `#[cfg(test)]`
+  examples, 1,984,627 bytes of generated source in total.
 - Modifications (§ none required by BSD-2-Clause, recorded for review): each pattern is
   rewritten from Recog's Ruby/POSIX flag conventions into Rust inline flags —
   `REG_ICASE` becomes `(?i)`, `REG_DOT_NEWLINE` and `REG_MULTILINE` both become `(?s)`,

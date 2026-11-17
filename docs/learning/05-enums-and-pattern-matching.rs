@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 /// Our severity levels — simple variants with no data attached.
 /// The derive macros auto-generate useful trait implementations.
+/// The real enum (crates/rikitikitavi-core/src/types.rs) also derives `Hash`
+/// and has `#[serde(rename_all = "lowercase")]`.
 #[derive(Debug,          // Enables {:?} formatting
          Clone, Copy,    // Can be duplicated (cheap for small types)
          PartialEq, Eq,  // Can be compared with ==
@@ -28,7 +30,8 @@ pub enum Severity {
 // ── ENUM WITH DATA (algebraic data types / tagged unions) ─────────────────
 
 /// Network mode — each variant holds different data.
-/// This is much more powerful than a C enum!
+/// Simplified from crates/rikitikitavi-core/src/types.rs, where `ssid` is
+/// `Option<String>`. Only `Auto` is implemented by the CLI today.
 #[derive(Debug, Clone)]
 pub enum NetworkMode {
     Auto,                                          // No data

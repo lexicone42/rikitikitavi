@@ -1641,6 +1641,127 @@ fn recog_identify(
 }
 
 /// Audit a single HTTP endpoint.
+/// Path no device is expected to serve; a 200 here means every path answers.
+const CATCH_ALL_PROBE_PATH: &str = "/rikitikitavi-no-such-page-7f3a";
+
+/// True when two bodies are the same page: identical, or same `<title>` and
+/// length within 5%.
+fn same_page(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (la, lb) = (a.to_lowercase(), b.to_lowercase());
+    let (ta, tb) = (extract_title_lower(&la), extract_title_lower(&lb));
+    let (long, short) = (a.len().max(b.len()), a.len().min(b.len()));
+    ta.is_some() && ta == tb && (long - short) * 20 <= long
+}
+
+fn exposed_admin_finding(ip: IpAddr, port: u16, path: &str, signals: &[AuthSignal]) -> Finding {
+    let evidence = format_auth_evidence(signals);
+    Finding::new(
+        "http_audit",
+        &format!("Unauthenticated admin panel at {ip}:{port}{path}"),
+        &format!(
+            "The admin path '{path}' on {ip}:{port} exposes \
+             administrative content without authentication. \
+             {evidence}"
+        ),
+        Severity::High,
+    )
+    .with_ip(ip)
+    .with_port(port)
+    .with_service("HTTP")
+    .with_cwe("CWE-306")
+    .with_references(refs![
+        "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
+    ])
+    .with_opt_remediation(crate::remediation::get(
+        "rikitikitavi.http_audit.admin-no-auth",
+        &[],
+    ))
+}
+
+/// Probe `ADMIN_PATHS`. A path that returns the front page or the page served
+/// for a nonexistent path is not reported as ambiguous, and one page is
+/// reported once however many paths return it.
+async fn probe_admin_paths(
+    client: &reqwest::Client,
+    scheme: &str,
+    ip: IpAddr,
+    port: u16,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut generic: Vec<String> = Vec::new();
+    for path in ["/", CATCH_ALL_PROBE_PATH] {
+        if let Ok(resp) = client
+            .get(format!("{scheme}://{ip}:{port}{path}"))
+            .send()
+            .await
+            && resp.status().as_u16() == 200
+        {
+            generic.push(
+                crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await,
+            );
+        }
+    }
+    let mut reported: Vec<String> = Vec::new();
+
+    for path in ADMIN_PATHS {
+        let admin_url = format!("{scheme}://{ip}:{port}{path}");
+        if let Ok(resp) = client.get(&admin_url).send().await
+            && resp.status().as_u16() == 200
+        {
+            let header_signals = extract_response_header_signals(&resp);
+            let body =
+                crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
+            if reported.iter().any(|r| same_page(r, &body)) {
+                continue;
+            }
+            let signals = extract_auth_signals(&body, &header_signals);
+            let classification = classify_auth(&signals);
+
+            match classification {
+                AuthClassification::Protected => {
+                    // no finding
+                }
+                AuthClassification::Exposed => {
+                    findings.push(exposed_admin_finding(ip, port, path, &signals));
+                    reported.push(body);
+                }
+                AuthClassification::Ambiguous => {
+                    if generic.iter().any(|g| same_page(g, &body)) {
+                        continue;
+                    }
+                    let evidence = format_auth_evidence(&signals);
+                    findings.push(
+                        Finding::new(
+                            "http_audit",
+                            &format!("Possibly exposed admin page at {ip}:{port}{path}"),
+                            &format!(
+                                "The admin path '{path}' on {ip}:{port} returned \
+                                     HTTP 200 but authentication state could not be \
+                                     confidently determined. Review manually. {evidence}"
+                            ),
+                            Severity::Medium,
+                        )
+                        .with_ip(ip)
+                        .with_port(port)
+                        .with_service("HTTP")
+                        .with_cwe("CWE-306")
+                        .with_opt_remediation(crate::remediation::get(
+                            "rikitikitavi.http_audit.admin-no-auth",
+                            &[],
+                        )),
+                    );
+                    reported.push(body);
+                }
+            }
+        }
+    }
+
+    findings
+}
+
 #[allow(clippy::too_many_lines)]
 async fn audit_http_endpoint(ip: IpAddr, port: u16, synology_host: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1820,75 +1941,7 @@ async fn audit_http_endpoint(ip: IpAddr, port: u16, synology_host: bool) -> Vec<
         findings.extend(classify_http_methods(ip, port, allow));
     }
 
-    for path in ADMIN_PATHS {
-        let admin_url = format!("{scheme}://{ip}:{port}{path}");
-        if let Ok(resp) = client.get(&admin_url).send().await
-            && resp.status().as_u16() == 200
-        {
-            let header_signals = extract_response_header_signals(&resp);
-            let body =
-                crate::http_util::read_body_capped(resp, crate::http_util::MAX_BODY_BYTES).await;
-            let signals = extract_auth_signals(&body, &header_signals);
-            let classification = classify_auth(&signals);
-
-            match classification {
-                AuthClassification::Protected => {
-                    // no finding
-                }
-                AuthClassification::Exposed => {
-                    let evidence = format_auth_evidence(&signals);
-                    findings.push(
-                            Finding::new(
-                                "http_audit",
-                                &format!(
-                                    "Unauthenticated admin panel at {ip}:{port}{path}"
-                                ),
-                                &format!(
-                                    "The admin path '{path}' on {ip}:{port} exposes \
-                                     administrative content without authentication. \
-                                     {evidence}"
-                                ),
-                                Severity::High,
-                            )
-                            .with_ip(ip)
-                            .with_port(port)
-                            .with_service("HTTP")
-                            .with_cwe("CWE-306")
-                            .with_references(refs![
-                                "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
-                            ])
-                            .with_opt_remediation(crate::remediation::get(
-                                "rikitikitavi.http_audit.admin-no-auth",
-                                &[],
-                            )),
-                        );
-                }
-                AuthClassification::Ambiguous => {
-                    let evidence = format_auth_evidence(&signals);
-                    findings.push(
-                        Finding::new(
-                            "http_audit",
-                            &format!("Possibly exposed admin page at {ip}:{port}{path}"),
-                            &format!(
-                                "The admin path '{path}' on {ip}:{port} returned \
-                                     HTTP 200 but authentication state could not be \
-                                     confidently determined. Review manually. {evidence}"
-                            ),
-                            Severity::Medium,
-                        )
-                        .with_ip(ip)
-                        .with_port(port)
-                        .with_service("HTTP")
-                        .with_cwe("CWE-306")
-                        .with_opt_remediation(crate::remediation::get(
-                            "rikitikitavi.http_audit.admin-no-auth",
-                            &[],
-                        )),
-                    );
-                }
-            }
-        }
-    }
+    findings.extend(probe_admin_paths(&client, scheme, ip, port).await);
 
     findings
 }
@@ -3439,5 +3492,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn same_page_matches_identical_and_near_identical() {
+        let a = "<html><title>UniFi Protect</title><meta nonce=\"aaaa\"><body>app</body></html>";
+        let b = "<html><title>UniFi Protect</title><meta nonce=\"bbbbb\"><body>app</body></html>";
+        assert!(same_page(a, a));
+        assert!(same_page(a, b));
+    }
+
+    #[test]
+    fn same_page_rejects_different_pages() {
+        let shell = "<html><title>Home</title><body>app</body></html>";
+        let admin = "<html><title>Admin</title><body>app</body></html>";
+        let long = format!(
+            "<html><title>Home</title><body>{}</body></html>",
+            "x".repeat(500)
+        );
+        assert!(!same_page(shell, admin));
+        assert!(!same_page(shell, &long));
+        assert!(!same_page("ok", "no"));
+    }
+
+    const SHELL: &str =
+        "<html><head><title>UniFi Protect</title></head><body><div id=\"app\"></div></body></html>";
+    const OTHER: &str = "<html><head><title>Status</title></head><body><p>Uptime 4 days, load 0.2, 31 clients</p></body></html>";
+
+    /// Local HTTP server: `route` maps a request path to a 200 body, `None` is a 404.
+    async fn serve(route: fn(&str) -> Option<&'static str>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/");
+                    let (status, body) =
+                        route(path).map_or(("404 Not Found", ""), |b| ("200 OK", b));
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    async fn admin_findings(route: fn(&str) -> Option<&'static str>) -> Vec<Finding> {
+        let port = serve(route).await;
+        let client =
+            unauthenticated_probe_client(HTTP_TIMEOUT, reqwest::redirect::Policy::limited(3))
+                .unwrap();
+        probe_admin_paths(&client, "http", IpAddr::from([127, 0, 0, 1]), port).await
+    }
+
+    #[tokio::test]
+    async fn same_page_on_every_path_is_not_an_admin_page() {
+        let findings = admin_findings(|_| Some(SHELL)).await;
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[tokio::test]
+    async fn admin_path_serving_the_front_page_is_not_reported() {
+        let findings =
+            admin_findings(|p| matches!(p, "/" | "/login" | "/setup").then_some(SHELL)).await;
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[tokio::test]
+    async fn distinct_ambiguous_page_is_reported_once() {
+        let findings = admin_findings(|p| match p {
+            "/" => Some(SHELL),
+            "/admin" | "/management" => Some(OTHER),
+            _ => None,
+        })
+        .await;
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].title.ends_with("/admin"));
     }
 }

@@ -86,18 +86,24 @@ temp files, mock filesystems). By separating the *parsing logic* from the
 *I/O*, we can test parsing with simple string literals:
 
 ```rust
+const SAMPLE_LINUX_ARP: &str = "\
+IP address       HW type     Flags       HW address            Mask     Device
+192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0
+...
+";
+
 #[test]
-fn test_parse_linux_arp_cache() {
-    let contents = "IP address       HW type     Flags       HW address            Mask     Device\n\
-                    192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0\n";
-    let entries = parse_linux_arp_cache(contents);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].mac, "aa:bb:cc:dd:ee:ff");
+fn test_parse_linux_arp_fields() {
+    let entries = parse_linux_arp_cache(SAMPLE_LINUX_ARP);
+    let first = &entries[0];
+    assert_eq!(first.ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    assert_eq!(first.mac, "aa:bb:cc:dd:ee:ff");
+    assert_eq!(first.interface, "eth0");
 }
 ```
 
-This same pattern is used throughout the `rikitikitavi-network` crate for
-route tables, interface lists, and WiFi scan results.
+The same split is used elsewhere in the `rikitikitavi-network` crate, for
+example `parse_proc_route` and `parse_macos_ifconfig_all` in `interfaces.rs`.
 
 **When to use**: Anywhere you parse structured text from files, commands, or
 network responses. Test the parser, not the I/O.
@@ -120,7 +126,13 @@ fn anomaly_to_finding(anomaly: &ArpAnomaly) -> Finding {
     match anomaly {
         ArpAnomaly::DuplicateIp { ip, macs, is_gateway } => {
             let severity = if *is_gateway { Severity::Critical } else { Severity::High };
-            Finding::new("arp", &format!("ARP spoofing: {ip}"), "...", severity)
+            let target = if *is_gateway { "GATEWAY " } else { "" };
+            Finding::new(
+                "arp",
+                &format!("ARP spoofing detected: {target}{ip} has multiple MACs"),
+                "...",
+                severity,
+            )
                 .with_ip(*ip)
                 .with_cwe("CWE-290")
         }
@@ -184,9 +196,9 @@ const fn port_to_service(port: u16) -> &'static str {
         21 => "FTP",
         22 => "SSH",
         23 => "Telnet",
-        80 => "HTTP",
+        25 => "SMTP",
+        // ... more ports ...
         443 => "HTTPS",
-        3306 => "MySQL",
         _ => "Unknown",
     }
 }
@@ -276,7 +288,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // device_rows() borrows app immutably; collect() ends the borrow.
     let rows: Vec<Row> = app.device_rows().map(|d| /* cells */).collect();
 
-    let block = panel(table_title(app, rows.len()), &p);
+    let shown = rows.len();
+    let block = panel(table_title(app, shown), &p);
     let inner = block.inner(area); // Rect is Copy
     let table = Table::new(rows, widths).block(block);
 
@@ -385,7 +398,12 @@ fn classify_smb_response(response: &[u8]) -> SmbVersion {
     }
     // SMBv1 magic: \xFFSMB at offset 4 (after NetBIOS header)
     if response[4] == 0xFF && &response[5..8] == b"SMB" {
-        return SmbVersion::V1;
+        let details = parse_smbv1_negotiate_details(response);
+        return SmbVersion::V1(SmbV1Info {
+            dialect_accepted: details.dialect_accepted,
+            signing_required: details.signing_required,
+            extended_security: details.extended_security,
+        });
     }
     // SMBv2 magic: \xFESMB
     if response[4] == 0xFE && &response[5..8] == b"SMB" {
@@ -421,7 +439,10 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+assert_is_empty = "allow"
 module_name_repetitions = "allow"
+must_use_candidate = "allow"
+future_not_send = "allow"
 ```
 
 **Why it's interesting**: Instead of adding `#![warn(clippy::pedantic)]` to
@@ -429,9 +450,10 @@ every crate's `lib.rs`, workspace-level lints apply to all crates at once.
 The `priority = -1` trick means "enable all pedantic/nursery lints as warnings"
 and then individual `= "allow"` entries override specific noisy ones.
 
-Combined with `-D warnings` in CI (`cargo clippy -- -D warnings`), this makes
-any lint violation a hard error. It's strict but catches real bugs: wrong casts,
-unnecessary allocations, missing error handling.
+Combined with `-D warnings` in CI
+(`cargo clippy --workspace --all-targets -- -D warnings`), this makes any lint
+violation a hard error. It's strict but catches real bugs, such as lossy
+numeric casts and needless allocations.
 
 **When to use**: Any multi-crate workspace. Set it once, every crate inherits.
 
@@ -485,8 +507,8 @@ pub enum DeviceFingerprint {
 **Why it's interesting**: `FindingFingerprint` wraps a `u64`, but Rust treats
 it as a distinct type: you can't pass a raw hash, or a `DeviceFingerprint`,
 where a `FindingFingerprint` is expected. The field is private, so a value
-only comes from `Finding::fingerprint()` or from parsing the hex form written
-to baseline files.
+only comes from `Finding::fingerprint()`, from parsing the hex form written
+to baseline files (`FromStr`), or from deserializing saved results.
 
 This is zero-cost: `FindingFingerprint(42)` has the same memory layout as
 `42_u64`. The wrapping only exists at compile time.
@@ -516,16 +538,27 @@ fn serialize_epoch_ms<S: Serializer>(dt: &DateTime<Utc>, s: S) -> Result<S::Ok, 
     s.serialize_i64(dt.timestamp_millis())
 }
 
-#[derive(Serialize)]
+fn deserialize_epoch_ms<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
+    let millis = i64::deserialize(d)?;
+    DateTime::from_timestamp_millis(millis)
+        .ok_or_else(|| serde::de::Error::custom("invalid epoch milliseconds"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcsfFinding {
-    #[serde(serialize_with = "serialize_epoch_ms")]
+    // ...
+    #[serde(
+        serialize_with = "serialize_epoch_ms",
+        deserialize_with = "deserialize_epoch_ms"
+    )]
     pub time: DateTime<Utc>,
 }
 ```
 
 **Why it's interesting**: The field type stays `DateTime<Utc>` (ergonomic in
 Rust), but the JSON output is epoch milliseconds (what OCSF requires). You get
-type safety in Rust code AND protocol compliance in the output.
+type safety in Rust code AND protocol compliance in the output. The paired
+`deserialize_with` reads the same form back and rejects out-of-range values.
 
 The `S: Serializer` generic means this works with any serde format (JSON,
 MessagePack, CBOR). You write the function once.
@@ -633,17 +666,20 @@ type makes that bug unrepresentable. Bit-level accessors (`is_locally_administer
 
 ## 18. Embedded, Regenerable Data Tables
 
-For a large static lookup that changes slowly (the 38k-entry IEEE OUI DB, the CISA
-KEV catalog), generate a sorted `static &[...]` from an authoritative source with a
-script, embed it, and binary-search it — no runtime fetch, works offline.
+For a large static lookup that changes slowly (the IEEE MA-L/MA-M/MA-S registries,
+about 54k prefixes; the CISA KEV catalog), generate a sorted `static &[...]` from an
+authoritative source with a script, embed it, and binary-search it — no runtime
+fetch, works offline.
 
 ```rust
 // kev_db.rs (generated by scripts/gen_kev_db.py)
-#[rustfmt::skip]
-static KEV_CVES: &[&str] = &[ "CVE-2002-0367", /* ...1,713 sorted entries... */ ];
 pub fn is_kev(cve: &str) -> bool {
-    KEV_CVES.binary_search(&cve.trim().to_ascii_uppercase().as_str()).is_ok()
+    let needle = cve.trim().to_ascii_uppercase();
+    KEV_CVES.binary_search(&needle.as_str()).is_ok()
 }
+
+#[rustfmt::skip]
+static KEV_CVES: &[&str] = &[ "CVE-2002-0367", /* ...1,781 sorted entries... */ ];
 ```
 
 `#[rustfmt::skip]` keeps the generated table from exploding into thousands of lines
@@ -653,8 +689,8 @@ case — fetched best-effort at runtime for just the CVEs a scan found.
 ## 19. Bounded I/O Primitives Against Hostile Peers
 
 A scanner points at untrusted devices, so every network primitive is bounded by
-construction. `http_util::read_body_capped` reads at most `MAX_BODY_BYTES` via
-chunked reads (a hostile device can't OOM the scanner with an endless body);
+construction. `http_util::read_body_capped` reads at most `max_bytes` (callers
+pass `MAX_BODY_BYTES`, 2 MiB, or a smaller per-scanner cap) via chunked reads (a hostile device can't OOM the scanner with an endless body);
 `ports::udp_probe` sends one datagram and waits one timeout, treating no-reply as
 *inconclusive*, never "closed". Concurrency is bounded with `buffer_unordered`
 rather than spawning a task per `(host, port)` up front.

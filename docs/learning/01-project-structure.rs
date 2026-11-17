@@ -29,7 +29,7 @@
 //
 // 1. **Faster compilation**: Change one crate → only that crate recompiles
 // 2. **Clear boundaries**: Each crate has a defined public API
-// 3. **Feature flags**: The TUI and UniFi crates are optional
+// 3. **Feature flags**: The TUI and UniFi crates are optional (on by default)
 // 4. **Reusability**: The library crates could be used by other tools
 //
 // ── DEPENDENCY FLOW (no circular deps allowed!) ───────────────────────────
@@ -37,11 +37,11 @@
 //   rikitikitavi (binary)
 //       ├── rikitikitavi-core       ← Foundation: errors, enums
 //       ├── rikitikitavi-models     ← depends on core
-//       ├── rikitikitavi-network    ← depends on core, models
+//       ├── rikitikitavi-network    ← no workspace dependencies
 //       ├── rikitikitavi-scanners   ← depends on core, models, network
 //       ├── rikitikitavi-analysis   ← depends on core, models
-//       ├── rikitikitavi-export     ← depends on core, models
-//       ├── rikitikitavi-tui        ← depends on core, models, scanners
+//       ├── rikitikitavi-export     ← depends on core, models, analysis
+//       ├── rikitikitavi-tui        ← depends on core, models, analysis, export
 //       └── rikitikitavi-unifi      ← depends on core, models, scanners
 //
 // ── WORKSPACE DEPENDENCIES ────────────────────────────────────────────────

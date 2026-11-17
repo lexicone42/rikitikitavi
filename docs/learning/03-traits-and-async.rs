@@ -40,6 +40,8 @@ impl Animal for Dog {
 //     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError>;
 //
 //     // These have default implementations (notice the body):
+//     async fn scan_collecting(&self, ctx: &ScanContext, sink: &mut Vec<Finding>)
+//         -> Result<(), ScanError> { sink.extend(self.scan(ctx).await?); Ok(()) }
 //     fn estimated_duration_secs(&self) -> u64 { 30 }
 //     fn requires_privileges(&self) -> bool { false }
 //     fn relevant_ports(&self) -> &[u16] { &[] }   // empty = always run
@@ -78,7 +80,11 @@ impl Animal for Dog {
 //     fn id(&self) -> &'static str { "dns" }
 //     fn name(&self) -> &'static str { "DNS Security" }
 //     fn supported_perspectives(&self) -> &[Perspective] {
-//         &[Perspective::Unauthenticated, Perspective::Authenticated]
+//         &[
+//             Perspective::Unauthenticated,
+//             Perspective::Authenticated,
+//             Perspective::Privileged,
+//         ]
 //     }
 //     async fn scan(&self, ctx: &ScanContext) -> Result<Vec<Finding>, ScanError> {
 //         // ... actual scanning logic ...

@@ -10,6 +10,10 @@
 //   rikitikitavi tui --watch --theme hacker
 //   rikitikitavi unifi scan --local
 //   rikitikitavi modules list
+//
+// The structs below are trimmed copies. The real `Command` also has verify,
+// fix-plan, segment-plan, report, aws, init, config and update-db, and `Cli`
+// has global --log-level and --log-format.
 
 use clap::{Parser, Subcommand, Args, ValueEnum};
 use std::path::PathBuf;
@@ -188,7 +192,7 @@ fn main() {
             }
         }
         Command::Version { verbose } => {
-            println!("rikitikitavi 0.1.0");
+            println!("rikitikitavi {}", env!("CARGO_PKG_VERSION"));
             if verbose {
                 println!("Built with Rust on Linux");
             }
@@ -203,10 +207,12 @@ fn main() {
 //   cargo run -- --help
 //   cargo run -- scan --help
 //   cargo run -- scan --dry-run
-//   cargo run -- scan --perspective neighbor --modules dns,ports
+//   cargo run -- scan --dry-run --perspective neighbor --modules dns,ports
 //   cargo run -- scan --quick --aggressive     # rejected: conflicts_with
-//   cargo run -- tui --watch --interval 30 --theme hacker
 //   cargo run -- tui --interval 4              # rejected: range(5..)
+//
+// Without --dry-run, `scan` and `tui` probe your LAN. Run them only on a
+// network you own.
 //   cargo run -- modules list
 //   cargo run -- modules info dns
 //   cargo run -- version --verbose
