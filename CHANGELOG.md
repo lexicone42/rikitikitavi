@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-17
 
 - `verify` gave wrong verdicts in three cases:
   - A powered-off host with a stale ARP entry counted as alive, so its
