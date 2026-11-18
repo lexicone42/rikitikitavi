@@ -131,10 +131,6 @@ impl UniFiClient {
                  admin credentials sent during login are exposed to on-path \
                  attackers. Only use --insecure on a trusted network."
             );
-            eprintln!(
-                "WARNING: TLS certificate validation is disabled for {base_url}. \
-                 Your UniFi admin credentials are not protected against interception."
-            );
             Self::new_insecure(base_url, site)
         } else {
             Self::new(base_url, site)

@@ -1,6 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
 
+/// `println!` that ignores a closed stdout (`| head`) instead of panicking.
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 mod accept;
 mod cli;
 mod config;
@@ -188,8 +196,8 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         perspective,
         intensity,
         port_scan_range,
-        modules: args.modules,
-        attack_paths: args.attack_paths,
+        modules: args.modules.or_else(|| app_config.scan.modules.clone()),
+        attack_paths: args.attack_paths || app_config.scan.attack_paths,
         parallelism: app_config.scan.effective_parallelism(),
         ..app_config.scan.clone()
     };
@@ -252,9 +260,14 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     }
 
     if args.dry_run {
-        println!("Would run {} scanners:", selection.scanners.len());
+        let mut out = std::io::stdout().lock();
+        tolerate_broken_pipe(writeln!(
+            out,
+            "Would run {} scanners:",
+            selection.scanners.len()
+        ))?;
         for s in &selection.scanners {
-            println!("  - {} ({})", s.name(), s.id());
+            tolerate_broken_pipe(writeln!(out, "  - {} ({})", s.name(), s.id()))?;
         }
         return Ok(());
     }
@@ -262,6 +275,9 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
     let controller = app_config.unifi.scan_controller();
     if controller.is_some() && cfg!(feature = "unifi") && !args.quiet {
         println!("Importing the UniFi controller client list (unifi.controller in config)");
+    }
+    if controller.as_ref().is_some_and(|c| c.insecure) && cfg!(feature = "unifi") {
+        eprintln!("{UNIFI_INSECURE_WARNING}");
     }
     let mut results = runner::run_scan(&mut ctx, controller).await?;
 
@@ -1341,6 +1357,9 @@ fn watch_rescan_due(app: &rikitikitavi_tui::App, since_last_scan: std::time::Dur
         && since_last_scan >= std::time::Duration::from_secs(app.config.watch_interval_secs)
 }
 
+const UNIFI_INSECURE_WARNING: &str = "WARNING: TLS certificate validation is disabled for the \
+    UniFi controller. Its credentials are not protected against interception.";
+
 /// Restores the terminal on drop, so error returns leave it usable.
 #[cfg(feature = "tui")]
 struct TerminalGuard;
@@ -1416,6 +1435,14 @@ async fn cmd_tui(
     }));
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
+    // A panic in the scan task must not restore the terminal under the running UI.
+    let ui_thread = std::thread::current().id();
+    let restore_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == ui_thread {
+            restore_hook(info);
+        }
+    }));
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
 
     let mut scan = Some(tokio::spawn(tui_scan(job.clone())));
@@ -1511,14 +1538,18 @@ async fn cmd_unifi(
             insecure,
             output,
         } => {
-            let insecure = insecure
-                || app_config
-                    .unifi
-                    .controller
-                    .as_ref()
-                    .is_some_and(|c| c.insecure);
+            let cfg = app_config.unifi.controller.clone().unwrap_or_default();
+            let insecure = insecure || cfg.insecure;
+            let site = if site == "default" { cfg.site } else { site };
             cmd_unifi_scan(
-                local, controller, user, password, token, &site, insecure, output,
+                local,
+                controller.or(cfg.url),
+                user.or(cfg.username),
+                password.or(cfg.password),
+                token.or(cfg.api_token),
+                &site,
+                insecure,
+                output,
             )
             .await?;
         }
@@ -1582,10 +1613,15 @@ async fn cmd_unifi_scan(
     } else if let Some(ctrl) = controller {
         ctrl
     } else {
-        anyhow::bail!("Specify --local (on-device) or --controller <url> for remote scanning.");
+        anyhow::bail!(
+            "Specify --local (on-device), --controller <url>, or unifi.controller.url in the config."
+        );
     };
 
     println!("Connecting to UniFi controller at {url}...");
+    if insecure {
+        eprintln!("{UNIFI_INSECURE_WARNING}");
+    }
 
     let mut client = UniFiClient::connect(&url, site, insecure)?;
 
@@ -1596,7 +1632,10 @@ async fn cmd_unifi_scan(
         client.login(&u, &p).await?;
         println!("Authenticated with username/password.");
     } else {
-        anyhow::bail!("Provide --token <api-token> or --user <username> --password <password>.");
+        anyhow::bail!(
+            "No credentials. Set unifi.controller in the config, or RIKITIKITAVI_UNIFI_TOKEN, \
+             or RIKITIKITAVI_UNIFI_PASSWORD with --user."
+        );
     }
 
     println!("Running UniFi security audit...\n");
@@ -1729,9 +1768,10 @@ fn cmd_config(args: &cli::ConfigArgs, loaded: &config::LoadedConfig) -> Result<(
     match args.command {
         cli::ConfigCommand::Validate => {
             config::validate_config(&loaded.config)?;
-            match loaded.path.as_ref() {
-                Some(p) => println!("Configuration is valid: {}", p.display()),
-                None => println!("Configuration is valid (no config file found; defaults)."),
+            if let Some(p) = loaded.path.as_ref() {
+                println!("Configuration is valid: {}", p.display());
+            } else {
+                println!("Configuration is valid (no config file found; defaults).");
             }
         }
         cli::ConfigCommand::Show => {
@@ -1882,6 +1922,7 @@ async fn cmd_monitor(args: cli::MonitorArgs) -> Result<()> {
     if args.save {
         let scan_results = rikitikitavi_models::ScanResults {
             findings,
+            kind: rikitikitavi_models::ScanKind::Monitor,
             risk_score: 0.0,
             scanned_at: chrono::Utc::now(),
             ..Default::default()

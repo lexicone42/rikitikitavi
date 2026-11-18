@@ -592,22 +592,22 @@ impl App {
             results.scanned_at.format("%Y%m%d-%H%M%S")
         );
         let generated = results.scanned_at.format("%Y-%m-%d %H:%M UTC").to_string();
-        let path = |suffix: &str| std::path::PathBuf::from(format!("{stem}{suffix}"));
-        let outcome = rikitikitavi_export::export_json(results, &path(".json"))
-            .and_then(|()| {
-                rikitikitavi_export::export_fix_plan(
-                    results,
-                    Some(&generated),
-                    &path("-fix-plan.md"),
-                )
-            })
-            .and_then(|()| {
-                rikitikitavi_export::export_segment_plan(
-                    results,
-                    Some(&generated),
-                    &path("-segment-plan.md"),
-                )
-            });
+        let write = |suffix: &str, text: &str| {
+            let path = std::path::PathBuf::from(format!("{stem}{suffix}"));
+            rikitikitavi_core::fs::write_private_replacing(&path, text.as_bytes())
+        };
+        let outcome = rikitikitavi_export::to_json_string(results).and_then(|json| {
+            write(".json", &json)?;
+            write(
+                "-fix-plan.md",
+                &rikitikitavi_export::render_fix_plan(results, Some(&generated)),
+            )?;
+            write(
+                "-segment-plan.md",
+                &rikitikitavi_export::render_segment_plan(results, Some(&generated)),
+            )?;
+            Ok(())
+        });
         match outcome {
             Ok(()) => self.set_status(format!(
                 "Wrote {stem}.json, -fix-plan.md and -segment-plan.md"

@@ -28,7 +28,7 @@ Ordered by the same rule as the original Top 12, (value x relevance to this LAN)
 7. **RE-06:** OSV.dev Debian as a runtime backport-aware oracle. Effort M.
 8. **NT-08 remainder:** HomePod and macOS currency. HomePod has no vendor fix table; skip it or mark `Inferred`.
 9. **Replace chrono:** RUSTSEC-2026-0543 marks it unmaintained (no vulnerability). It is ignored in `deny.toml`; move to `jiff` or `time` and drop the ignore. Effort M.
-10. **Found in the 0.5.0 doc review:** `monitor --save` stores a device-less result as a full scan, which then feeds `verify`, `fix-plan` and the TUI start screen. `unifi scan` takes credentials only as flags (visible in `ps`) and ignores the config's controller block. `core::fs::write_private` follows symlinks. CI never builds the `monitor` feature. `report`, `init`, `update-db`, `aws` and most `unifi` subcommands are stubs whose help does not say so. `scan --format` without `--output` is ignored. The `minimal` feature is empty.
+10. **Stub subcommands:** `report` (beyond `--latest`), `init`, `update-db`, `aws` and `unifi devices|firmware-check|audit-controller|deploy|tui|report` only print a message. Their help now says so; implement or remove them. The `minimal` feature is empty.
 
 Not planned: the NT-09 Protect AI Key check (nothing on the LAN identifies one).
 

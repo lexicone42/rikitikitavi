@@ -35,6 +35,9 @@ jobs:
       - name: Clippy (otel feature)
         run: cargo clippy -p rikitikitavi --features otel --all-targets -- -D warnings
 
+      - name: Clippy (monitor feature)
+        run: cargo clippy -p rikitikitavi --features monitor --all-targets -- -D warnings
+
   test:
     name: Test (stable)
     runs-on: ubuntu-latest

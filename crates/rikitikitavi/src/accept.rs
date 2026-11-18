@@ -38,17 +38,19 @@ pub struct Entry {
     pub compensating: Option<String>,
 }
 
-/// Quoted hex, or an all-digit fingerprint that YAML read as an integer.
+/// A quoted hex string. An unquoted value is rejected: YAML reads `0x1f`, `0017` and
+/// `12_34` as numbers, which loses the digits that were written.
 fn fingerprint<'de, D: Deserializer<'de>>(d: D) -> Result<FindingFingerprint, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Scalar {
         Text(String),
-        Unsigned(u64),
+        Other(serde::de::IgnoredAny),
     }
-    let text = match Scalar::deserialize(d)? {
-        Scalar::Text(s) => s,
-        Scalar::Unsigned(n) => n.to_string(),
+    let Scalar::Text(text) = Scalar::deserialize(d)? else {
+        return Err(serde::de::Error::custom(
+            "fingerprint must be a quoted string, e.g. fingerprint: \"9b5e72351827da2a\"",
+        ));
     };
     if text.trim().trim_start_matches("0x").len() > 16 {
         return Err(serde::de::Error::custom(format!(
@@ -190,16 +192,18 @@ mod tests {
     }
 
     #[test]
-    fn all_digit_fingerprint_read_as_integer_is_accepted() {
-        let ledger = parse(
-            "accepted:\n  - fingerprint: 1234567890123456\n    reason: r\n    \
-             accepted_on: 2026-11-01\n    expires: 2026-12-01\n",
-        )
-        .unwrap();
-        assert_eq!(
-            ledger.entries[0].fingerprint.to_string(),
-            "1234567890123456"
-        );
+    fn unquoted_numeric_fingerprint_is_rejected() {
+        for fp in ["1234567890123456", "0x00000000000000aa", "0000000000001234"] {
+            let err = parse(&format!(
+                "accepted:\n  - fingerprint: {fp}\n    reason: r\n    \
+                 accepted_on: 2026-11-01\n    expires: 2026-12-01\n"
+            ))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("quoted string"),
+                "{fp}: {err:#}"
+            );
+        }
     }
 
     #[test]

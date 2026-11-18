@@ -291,6 +291,11 @@ fn synology_hosts(findings: &[Finding], devices: &[Device]) -> HashSet<IpAddr> {
 /// rsync daemon port.
 const RSYNC_PORT: u16 = 873;
 
+/// True for a finding made by [`correlate_synology_rsync`], which no scanner run reproduces.
+pub fn is_correlated(f: &Finding) -> bool {
+    f.scanner == "http_audit" && f.affected_port == Some(RSYNC_PORT)
+}
+
 /// IPs with an rsync daemon: nuclei `rsyncd-service-detect`, or TCP 873 open.
 fn rsync_hosts(findings: &[Finding], devices: &[Device]) -> HashSet<IpAddr> {
     let by_nuclei = findings

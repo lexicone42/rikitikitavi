@@ -307,24 +307,27 @@ summarised in one finding. Devices carry `seen_by`. `unifi.mode: disabled`
 turns the import off. Without credentials, an identified UniFi gateway gets one
 Info advisory naming the SAB-069 fixed firmware versions.
 
-**`unifi scan`** audits the controller configuration. It takes the controller
-and credentials on the command line only; from the config file it reads just
-`unifi.controller.insecure`. A password given with `--password` is visible to
-other local users in the process list.
+**`unifi scan`** audits the controller configuration. It reads the URL, site
+and credentials from `unifi.controller` in the config file; flags override
+them. Secrets can also come from `RIKITIKITAVI_UNIFI_TOKEN` or
+`RIKITIKITAVI_UNIFI_PASSWORD`. Avoid `--password` and `--token` on a shared
+machine: command-line values are visible in the process list.
 
 ```bash
-# Scan a remote UniFi controller
-rikitikitavi unifi scan --controller https://192.168.1.1 \
-    --user admin --password secret
+# Controller and credentials from config.yaml
+rikitikitavi unifi scan
 
-# API token auth (UniFi OS 2.x+)
-rikitikitavi unifi scan --controller https://192.168.1.1 \
-    --token YOUR_API_TOKEN
+# API token (UniFi OS 2.x+) from the environment
+RIKITIKITAVI_UNIFI_TOKEN=... rikitikitavi unifi scan --controller https://192.168.1.1
+
+# Username and password
+RIKITIKITAVI_UNIFI_PASSWORD=... rikitikitavi unifi scan \
+    --controller https://192.168.1.1 --user admin
 
 # Self-signed controller cert? Opt out of TLS validation explicitly.
 # By default the client validates the certificate before sending credentials.
 # `unifi.controller.insecure: true` in config.yaml does the same and prints the same warning.
-rikitikitavi unifi scan --controller https://192.168.1.1 --user admin --password secret --insecure
+rikitikitavi unifi scan --insecure
 ```
 
 - WLAN encryption, PMF (802.11w), guest and default-SSID audit
@@ -571,7 +574,7 @@ History and a baseline written in the same run as `--accept-file` or
 
 `rikitikitavi` loads the file given by `--config`/`-c` (or `RIKITIKITAVI_CONFIG`); otherwise the first of `./config.yaml`, `./config.yml`, `/etc/rikitikitavi/config.yaml`; otherwise built-in defaults. An explicit path that does not exist is an error. `scan` prints `Config: <path>` unless `--quiet`.
 
-[`config.example.yaml`](config.example.yaml) documents every key with its default. Keys that parse but are not read yet (`logging.*`, `output.*`, `scan.network_mode`, `security_lake.*`, and others) are marked "reserved" there. `scan.perspective` is the default for `--perspective` on `scan` and `tui`; `scan.modules` and `scan.attack_paths` are overridden by `--modules`/`--attack-paths` or their absence. `unifi.controller` turns on the controller client import (see [UniFi Integration](#unifi-integration)); `config show` prints the loaded config with secrets redacted. Safety-relevant keys under `scan`:
+[`config.example.yaml`](config.example.yaml) documents every key with its default. Keys that parse but are not read yet (`logging.*`, `output.*`, `scan.network_mode`, `security_lake.*`, and others) are marked "reserved" there. `scan.perspective` is the default for `--perspective` on `scan` and `tui`; `scan.modules` is the default for `--modules`, and `scan.attack_paths: true` is the same as passing `--attack-paths`. `unifi.controller` turns on the controller client import (see [UniFi Integration](#unifi-integration)); `config show` prints the loaded config with secrets redacted. Safety-relevant keys under `scan`:
 
 ```yaml
 scan:

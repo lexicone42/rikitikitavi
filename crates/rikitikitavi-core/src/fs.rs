@@ -11,6 +11,27 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.flush()
 }
 
+/// Like [`write_private`], but replaces whatever is at `path` instead of writing through it:
+/// a symlink there is removed, never followed.
+pub fn write_private_replacing(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = match opts.open(path) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            opts.open(path)?
+        }
+        other => other?,
+    };
+    file.write_all(bytes)?;
+    file.flush()
+}
+
 /// Create `path` and any missing parents. Mode `0o700` on Unix; an existing leaf is re-chmodded,
 /// existing parents are left alone.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -162,5 +183,25 @@ mod tests {
     #[test]
     fn write_private_accepts_dev_null() {
         write_private(Path::new("/dev/null"), b"x").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_replacing_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let link = dir.path().join("out.json");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_private_replacing(&link, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert!(link.symlink_metadata().unwrap().is_file());
+        assert_eq!(std::fs::read(&link).unwrap(), b"new");
+        assert_eq!(mode_of(&link), 0o600);
+
+        write_private_replacing(&link, b"again").unwrap();
+        assert_eq!(std::fs::read(&link).unwrap(), b"again");
     }
 }

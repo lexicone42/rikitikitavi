@@ -225,10 +225,11 @@ only:
   controller. `scan` prints a line when it does this. Imported names and notes
   are stripped of control and format characters and length-capped. The URL must
   not embed credentials, and the whole import is bounded by a 60 s timeout.
-- **`unifi scan`** takes credentials on the command line (`--user`/`--password`
-  or `--token`). Command-line arguments are visible to other local users in the
-  process list and may land in shell history; prefer the config file on shared
-  machines.
+- **`unifi scan`** reads credentials from `unifi.controller` in the config
+  file, from `RIKITIKITAVI_UNIFI_TOKEN` / `RIKITIKITAVI_UNIFI_PASSWORD`, or
+  from `--token` / `--password`. Command-line values are visible to other
+  local users in the process list and may land in shell history; prefer the
+  config file or the environment.
 - **Secrets at rest**: controller `password`/`api_token`, `unifi.cloud.api_key`
   and the `apis.*` keys are stored in plaintext YAML if you put them in the
   config. Protect the file (`chmod 600`). `config show` redacts them, and the

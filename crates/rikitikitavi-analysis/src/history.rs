@@ -103,6 +103,7 @@ const fn file_prefix(kind: ScanKind) -> &'static str {
     match kind {
         ScanKind::Full => "scan-",
         ScanKind::Verify => "verify-",
+        ScanKind::Monitor => "monitor-",
     }
 }
 
@@ -289,6 +290,29 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         std::fs::write(dir.path().join("scan-20260105-120000.json"), json).unwrap();
         let latest = history.load_latest().unwrap().unwrap();
+        assert_eq!(latest.findings.len(), 1);
+    }
+
+    #[test]
+    fn monitor_results_never_become_the_latest_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ScanHistory::with_dir(dir.path().to_path_buf());
+        let mut full = sample_results();
+        full.scanned_at = at(1);
+        history.save(&full).unwrap();
+        let mut m = sample_results();
+        m.kind = ScanKind::Monitor;
+        m.scanned_at = at(2);
+        m.findings.clear();
+        let path = history.save(&m).unwrap();
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("monitor-")
+        );
+        let latest = history.load_latest().unwrap().unwrap();
+        assert_eq!(latest.kind, ScanKind::Full);
         assert_eq!(latest.findings.len(), 1);
     }
 

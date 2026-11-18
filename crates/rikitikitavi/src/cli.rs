@@ -51,7 +51,7 @@ pub enum Command {
     /// mDNS proxy list). Text only; configures nothing.
     SegmentPlan(SegmentPlanArgs),
 
-    /// Generate a report from the last scan.
+    /// Show the last saved scan (`--latest`). Other report generation is not yet implemented.
     Report(ReportArgs),
 
     /// UniFi-specific commands.
@@ -64,7 +64,7 @@ pub enum Command {
     /// List available scanner modules.
     Modules(ModulesArgs),
 
-    /// Interactive setup wizard.
+    /// Interactive setup wizard. Not yet implemented.
     Init,
 
     /// Validate configuration.
@@ -74,7 +74,7 @@ pub enum Command {
     #[cfg(feature = "monitor")]
     Monitor(MonitorArgs),
 
-    /// Update vulnerability databases.
+    /// Update vulnerability databases. Not yet implemented.
     UpdateDb,
 
     /// Show version and system information.
@@ -116,7 +116,7 @@ pub struct ScanArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Output format (json, html, csv, ocsf or prometheus).
+    /// Format of the `--output` file (json, html, csv, ocsf or prometheus). No effect without `--output`.
     #[arg(long, default_value = "json")]
     pub format: ReportFormatArg,
 
@@ -330,17 +330,19 @@ pub enum UniFiCommand {
         /// Use local API (on-device).
         #[arg(long)]
         local: bool,
-        /// Controller URL (remote mode).
+        /// Controller URL (remote mode). Default: `unifi.controller.url` in the config.
         #[arg(long)]
         controller: Option<String>,
-        /// Controller username.
+        /// Controller username. Default: `unifi.controller.username` in the config.
         #[arg(long)]
         user: Option<String>,
-        /// Controller password.
-        #[arg(long)]
+        /// Controller password. Prefer the config file or the environment variable:
+        /// a command-line value is visible in the process list.
+        #[arg(long, env = "RIKITIKITAVI_UNIFI_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// API token (`UniFi` OS 2.x+), alternative to username/password.
-        #[arg(long)]
+        /// API token (`UniFi` OS 2.x+), alternative to username/password. Prefer the
+        /// config file or the environment variable over the command line.
+        #[arg(long, env = "RIKITIKITAVI_UNIFI_TOKEN", hide_env_values = true)]
         token: Option<String>,
         /// Site name.
         #[arg(long, default_value = "default")]
@@ -353,13 +355,13 @@ pub enum UniFiCommand {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// List adopted devices.
+    /// List adopted devices. Not yet implemented.
     Devices,
-    /// Check firmware across all devices.
+    /// Check firmware across all devices. Not yet implemented; `unifi scan` reports firmware.
     FirmwareCheck,
-    /// Audit controller security.
+    /// Audit controller security. Not yet implemented.
     AuditController,
-    /// Deploy to a `UniFi` device.
+    /// Deploy to a `UniFi` device. Not yet implemented.
     Deploy {
         /// Device hostname or IP.
         #[arg(long)]
@@ -371,13 +373,13 @@ pub enum UniFiCommand {
         #[arg(long)]
         persistent: bool,
     },
-    /// Launch `UniFi` TUI dashboard.
+    /// Launch `UniFi` TUI dashboard. Not yet implemented.
     Tui {
         /// Watch mode.
         #[arg(long)]
         watch: bool,
     },
-    /// Generate `UniFi` security report.
+    /// Generate `UniFi` security report. Not yet implemented.
     Report {
         /// Output file.
         #[arg(short, long)]

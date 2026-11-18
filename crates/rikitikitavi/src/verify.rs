@@ -237,6 +237,9 @@ fn precheck(
     if f.scanner == "credentials" && env.config.intensity != ScanIntensity::Aggressive {
         return Some("login checks need --aggressive".to_owned());
     }
+    if rikitikitavi_scanners::http_audit::is_correlated(f) {
+        return Some("derived from other findings; run a full scan to re-check".to_owned());
+    }
     if f.scanner == "router" && env.gateway != Some(ip) {
         return Some("router checks run only against the current gateway".to_owned());
     }
@@ -247,7 +250,7 @@ fn precheck(
 pub fn classify(f: &Finding, host: &HostOutcome) -> (Verdict, Option<String>) {
     let inconclusive = |why: String| (Verdict::Inconclusive, Some(why));
     if !host.alive {
-        return inconclusive("host unreachable (no TCP answer, not in ARP table)".to_owned());
+        return inconclusive("host unreachable (no TCP answer)".to_owned());
     }
     if ARP_DRIVEN.contains(&f.scanner.as_str()) && !host.in_arp {
         return inconclusive(format!(
@@ -306,6 +309,11 @@ fn narrowed_device(ip: IpAddr, baseline: &ScanResults, findings: &[&Finding]) ->
         .find(|d| d.ip == ip)
         .cloned()
         .unwrap_or_else(|| Device::new(ip));
+    // Saved banners would be replayed instead of read from the host.
+    for port in &mut device.open_ports {
+        port.banner = None;
+        port.version = None;
+    }
     for port in findings.iter().filter_map(|f| f.affected_port) {
         if !device.open_ports.iter().any(|p| p.port == port) {
             device.open_ports.push(OpenPort {
@@ -332,7 +340,7 @@ fn narrowed_context(device: Device, env: &VerifyEnv<'_>, scanners: &[&str]) -> S
         .collect();
     ScanContext {
         target_network: format!("{}/{prefix}", device.ip).parse().ok(),
-        gateway: env.gateway,
+        gateway: env.gateway.filter(|g| *g == device.ip),
         perspective: env.config.perspective,
         network_mode: rikitikitavi_core::NetworkMode::Auto,
         config: ScanConfig {
@@ -352,7 +360,7 @@ async fn probe_host(device: Device, scanners: &[&str], env: &VerifyEnv<'_>) -> H
     let tcp = tcp_alive(ip, &ports, env.liveness_timeout).await;
     let in_arp = (env.read_arp)().contains(&ip);
     let mut outcome = HostOutcome {
-        alive: tcp || in_arp,
+        alive: tcp,
         in_arp,
         runs: HashMap::new(),
     };
@@ -797,6 +805,67 @@ mod tests {
             precheck(&creds, &e, &ExclusionSet::default(), &HashSet::new(), None)
                 .unwrap()
                 .contains("--aggressive")
+        );
+    }
+
+    #[test]
+    fn saved_banners_are_not_replayed_and_gateway_is_dropped() {
+        let mut dev = Device::new(ip("10.0.0.5"));
+        dev.open_ports.push(OpenPort {
+            port: 2222,
+            protocol: PortProtocol::Tcp,
+            service: Some("ssh".to_owned()),
+            version: Some("6.6.1".to_owned()),
+            banner: Some("SSH-2.0-OpenSSH_6.6.1p1".to_owned()),
+        });
+        let base = ScanResults {
+            devices: vec![dev],
+            ..Default::default()
+        };
+        let f = finding("services", "Vulnerable OpenSSH", "10.0.0.5", 2222);
+        let narrowed = narrowed_device(ip("10.0.0.5"), &base, &[&f]);
+        assert!(
+            narrowed
+                .open_ports
+                .iter()
+                .all(|p| p.banner.is_none() && p.version.is_none())
+        );
+
+        let lookup = |_: &str| -> Option<&dyn Scanner> { None };
+        let arp = Vec::new;
+        let mut e = env(&lookup, &arp);
+        e.gateway = Some(ip("10.0.0.1"));
+        assert_eq!(narrowed_context(narrowed, &e, &["services"]).gateway, None);
+        let gw = narrowed_context(Device::new(ip("10.0.0.1")), &e, &["router"]);
+        assert_eq!(gw.gateway, Some(ip("10.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn arp_entry_alone_does_not_make_a_host_alive() {
+        // TEST-NET-1 address: no answer.
+        let host = ip("192.0.2.1");
+        let lookup = |_: &str| -> Option<&dyn Scanner> { None };
+        let arp = move || vec![host];
+        let mut e = env(&lookup, &arp);
+        e.liveness_timeout = Duration::from_millis(50);
+        let outcome = probe_host(Device::new(host), &["ssl"], &e).await;
+        assert!(!outcome.alive);
+        assert!(outcome.in_arp);
+        let (verdict, _) = classify(&finding("ssl", "x", "192.0.2.1", 443), &outcome);
+        assert_eq!(verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn correlated_finding_is_not_replayed() {
+        let fake = FakeAudit { report_port: None };
+        let lookup = |_: &str| -> Option<&dyn Scanner> { Some(&fake as &dyn Scanner) };
+        let arp = Vec::new;
+        let e = env(&lookup, &arp);
+        let f = finding("http_audit", "Synology rsync", "10.0.0.7", 873);
+        assert!(
+            precheck(&f, &e, &ExclusionSet::default(), &HashSet::new(), None)
+                .unwrap()
+                .contains("full scan")
         );
     }
 

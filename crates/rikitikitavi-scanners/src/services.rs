@@ -2220,7 +2220,7 @@ impl Scanner for ServicesScanner {
                 probes.push(probe_device(device, role, active));
             }
             let per_device: Vec<Vec<Finding>> = futures::stream::iter(probes)
-                .buffered(DEVICE_CONCURRENCY)
+                .buffered(ctx.config.parallelism.clamp(1, DEVICE_CONCURRENCY))
                 .collect()
                 .await;
             findings.extend(per_device.into_iter().flatten());

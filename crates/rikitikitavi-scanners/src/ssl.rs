@@ -1035,7 +1035,7 @@ impl Scanner for SslScanner {
             });
         }
         let per_host: Vec<Vec<Finding>> = futures::stream::iter(probes)
-            .buffered(HOST_CONCURRENCY)
+            .buffered(ctx.config.parallelism.clamp(1, HOST_CONCURRENCY))
             .collect()
             .await;
         findings.extend(per_host.into_iter().flatten());

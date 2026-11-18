@@ -75,7 +75,7 @@ impl Default for ScanConfig {
             excluded_devices: Vec::new(),
             port_scan_range: PortRange::Common,
             modules: None,
-            attack_paths: true,
+            attack_paths: false,
         }
     }
 }
@@ -397,7 +397,7 @@ mod tests {
         let config = ScanConfig::default();
         assert_eq!(config.timeout_seconds, 0);
         assert!(config.parallelism > 0);
-        assert!(config.attack_paths);
+        assert!(!config.attack_paths);
         assert!(config.modules.is_none());
         assert!(config.excluded_networks.is_empty());
     }
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(config.timeout_seconds, 120);
         // Other fields should use defaults
         assert_eq!(config.parallelism, 256);
-        assert!(config.attack_paths);
+        assert!(!config.attack_paths);
     }
 
     #[test]

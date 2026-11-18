@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- `verify` gave wrong verdicts in three cases:
+  - A powered-off host with a stale ARP entry counted as alive, so its
+    findings could be reported resolved. A host now counts as alive only if it
+    answers TCP (accepts or refuses a connection).
+  - `services` findings were re-checked against the banner saved in the last
+    scan, so a closed port or an upgraded daemon stayed "still present".
+    Banners are now read again from the host.
+  - The Synology rsync correlation finding, which no scanner run reproduces,
+    was reported resolved. It is now inconclusive with "run a full scan".
+  Replaying a `services` finding no longer probes the gateway as well.
+- TUI: the insecure-TLS warning for the UniFi controller no longer prints over
+  the screen, and a panic inside a scan no longer restores the terminal while
+  the UI is still running.
+- Accept file: `fingerprint` must be a quoted string. Unquoted, YAML turned
+  `0x…`, leading-zero and all-digit values into numbers and the entry matched
+  nothing or the wrong fingerprint.
+- `scan.modules` in the config is honoured (the CLI flag still wins).
+  `scan.attack_paths` is honoured too, and its default is now `false` to match
+  what `scan` has always done without `--attack-paths`.
+- The services and ssl scanners respect `scan.parallelism` below their own
+  caps of 64 and 32 hosts.
+- Piping output to `head` no longer panics.
+- `monitor --save` stored its result as a full scan, so `verify`, `fix-plan`,
+  `segment-plan`, `--compare-previous` and the TUI start screen could pick up
+  a device-less result. Monitor results are now saved as `monitor-*.json` and
+  never read as the last scan.
+- `unifi scan` reads the URL, site and credentials from `unifi.controller` in
+  the config, and secrets from `RIKITIKITAVI_UNIFI_TOKEN` /
+  `RIKITIKITAVI_UNIFI_PASSWORD`. Flags still override.
+- The TUI's `e` export replaces a symlink at the output path instead of
+  writing through it.
+- Help text says which subcommands are not implemented, and that `--format`
+  applies to `--output` only.
+- CI lints the `monitor` feature.
+
 ## 0.5.0 — 2026-11-17
 
 - http_audit: fewer duplicate admin-page findings. An admin path that returns

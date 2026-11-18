@@ -78,6 +78,8 @@ pub enum ScanKind {
     Full,
     /// Replay of prior findings on their hosts only.
     Verify,
+    /// Passive `WiFi` capture; no devices.
+    Monitor,
 }
 
 /// A finding with the ledger entry that accepted it.
