@@ -37,6 +37,16 @@ pub fn sweep_targets(network: &IpNetwork) -> Vec<IpAddr> {
         .collect()
 }
 
+/// Warn once when a connect fails for lack of file descriptors (EMFILE 24, ENFILE 23).
+fn warn_if_out_of_fds(e: &std::io::Error) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if matches!(e.raw_os_error(), Some(23 | 24))
+        && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::warn!("out of file descriptors during the host sweep; hosts may be missed");
+    }
+}
+
 /// Probe a single host on every probe port at once: alive if any connects or is refused.
 async fn host_alive(ip: IpAddr, timeout: Duration) -> bool {
     let mut probes: FuturesUnordered<_> = PROBE_PORTS
@@ -46,7 +56,10 @@ async fn host_alive(ip: IpAddr, timeout: Duration) -> bool {
             match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
                 Ok(Ok(_stream)) => true,
                 // Refused: host reachable, port closed.
-                Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+                Ok(Err(e)) => {
+                    warn_if_out_of_fds(&e);
+                    e.kind() == std::io::ErrorKind::ConnectionRefused
+                }
                 Err(_) => false,
             }
         })
@@ -80,7 +93,10 @@ pub async fn tcp_sweep_hosts(
         "starting TCP-connect host sweep"
     );
 
-    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
+    let concurrency = concurrency
+        .min(crate::fd_budget() / PROBE_PORTS.len())
+        .max(1);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::with_capacity(targets.len());
 
     for ip in targets {

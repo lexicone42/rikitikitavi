@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- macOS: scans missed most hosts. macOS allows 256 open files per process and
+  the host sweep opens up to 768 sockets at once; the failed connects were
+  read as dead hosts. The process now raises its open-file limit at startup,
+  caps `parallelism` and the sweep by what the limit allows, and logs a
+  warning if a connect still fails for lack of file descriptors.
+- `scan --dry-run` says its device count is the ARP table only, and no longer
+  prints the "found 1 host" warning. That warning now mentions the macOS
+  Local Network permission.
+- `version --verbose` reports the compiler version (it said "unknown").
+
 ## 0.5.1 — 2026-11-17
 
 - `verify` gave wrong verdicts in three cases:

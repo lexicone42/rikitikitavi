@@ -18,8 +18,27 @@ mod verify;
 
 use cli::{Cli, Command};
 
+/// Headroom for stdio, the config, history files and the resolver.
+const RESERVED_FDS: u64 = 64;
+
+/// Raise the open-file limit (macOS defaults to 256) and record what scanning may use.
+fn raise_fd_limit() {
+    let limit = rlimit::increase_nofile_limit(8192).unwrap_or(256);
+    let budget = limit.saturating_sub(RESERVED_FDS).max(16);
+    rikitikitavi_network::set_fd_budget(usize::try_from(budget).unwrap_or(usize::MAX));
+}
+
+/// Configured parallelism, capped by the sockets the process may open.
+fn scan_parallelism(app_config: &rikitikitavi_models::config::AppConfig) -> usize {
+    app_config
+        .scan
+        .effective_parallelism()
+        .min(rikitikitavi_network::fd_budget())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    raise_fd_limit();
     let cli = Cli::parse();
 
     // The TUI owns the terminal; stderr logs would draw over it. `RUST_LOG` still applies.
@@ -198,7 +217,7 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         port_scan_range,
         modules: args.modules.or_else(|| app_config.scan.modules.clone()),
         attack_paths: args.attack_paths || app_config.scan.attack_paths,
-        parallelism: app_config.scan.effective_parallelism(),
+        parallelism: scan_parallelism(app_config),
         ..app_config.scan.clone()
     };
     let exclusions = scan_config.exclusions()?;
@@ -243,18 +262,21 @@ async fn cmd_scan(args: cli::ScanArgs, loaded: &config::LoadedConfig) -> Result<
         if let Some(net) = &ctx.target_network {
             println!("  Network:  {net}");
         }
-        println!(
-            "  Devices:  {} ({swept} via active sweep)",
-            ctx.discovered_devices.len()
-        );
+        let found = ctx.discovered_devices.len();
+        if args.dry_run {
+            println!(
+                "  Devices:  {found} in the ARP table (a dry run sends no probes; a scan finds more)"
+            );
+        } else {
+            println!("  Devices:  {found} ({swept} via active sweep)");
+        }
         println!();
 
-        if ctx.discovered_devices.len() <= 1 {
+        if found <= 1 && !args.dry_run {
             eprintln!(
-                "Warning: found {} host(s). If this looks too low, the ARP cache may be \
-                 cold and the sweep found little — check you are on the right interface, \
-                 run with --aggressive, or ensure the network allows TCP probing.",
-                ctx.discovered_devices.len()
+                "Warning: found {found} host(s). If this looks too low, check you are on the \
+                 right interface and that the network allows TCP probing. On macOS, allow \
+                 your terminal app under System Settings > Privacy & Security > Local Network."
             );
         }
     }
@@ -557,7 +579,7 @@ async fn cmd_verify(args: cli::VerifyArgs, loaded: &config::LoadedConfig) -> Res
         config: rikitikitavi_models::config::ScanConfig {
             intensity,
             attack_paths: false,
-            parallelism: app_config.scan.effective_parallelism(),
+            parallelism: scan_parallelism(app_config),
             ..app_config.scan.clone()
         },
         gateway: rikitikitavi_network::detect_gateway().ok().flatten(),
@@ -1410,7 +1432,7 @@ async fn cmd_tui(
             modules: None,
             attack_paths: true,
             intensity,
-            parallelism: app_config.scan.effective_parallelism(),
+            parallelism: scan_parallelism(app_config),
             ..app_config.scan.clone()
         },
         controller: app_config.unifi.scan_controller().cloned(),

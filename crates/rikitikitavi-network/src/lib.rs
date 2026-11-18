@@ -36,3 +36,15 @@ pub(crate) async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -
     }
     buf
 }
+
+static FD_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Record how many sockets the process may hold open at once.
+pub fn set_fd_budget(sockets: usize) {
+    FD_BUDGET.store(sockets.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Sockets the process may hold open at once; `usize::MAX` until [`set_fd_budget`] is called.
+pub fn fd_budget() -> usize {
+    FD_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
