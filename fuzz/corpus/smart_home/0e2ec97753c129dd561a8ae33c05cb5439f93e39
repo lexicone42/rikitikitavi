@@ -1,0 +1,15 @@
+{
+      "bssid": "",
+      "build_info": {
+        "cast_b'uild_revision": "1.56.500000",
+        "cast_control_version": 2,
+        "release_track": "stable-channel",
+        "system_build_number": "PPR1.180610.011"
+      },
+      "device_info": {
+        "capabilities": {"ble_supported": true, "multizone_supported": true},
+        "cloud_device_id"
+        "uptred": true,
+        "wpa_state": 10
+      }
+    }

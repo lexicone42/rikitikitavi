@@ -90,7 +90,8 @@ async fn main() -> Result<()> {
     result
 }
 
-/// `scan` flags that were set but are not yet wired into the scan.
+/// `tui` flags that were set but are not yet wired into the scan.
+#[cfg(feature = "tui")]
 fn unimplemented_tui_flags(args: &cli::TuiArgs) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     if !matches!(args.network, cli::NetworkArg::Auto) {
@@ -2085,6 +2086,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn unimplemented_tui_flags_reports_set_no_ops() {
         use crate::{Cli, Command, unimplemented_tui_flags};

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ProbeMatch>
+<T
+<DeviceType>DS</DeviceType>
+<DeviceDescription>NVR</DeviceDescription>
+<DeviceSN>DS-76K20260101AAWR987654321</DeviceSN>
+<HttpPort>80</HttpPort>
+<MAC>c0:56:e3:aa:bb:cc</MAC>
+<IP</SoftwareVersion>
+<Activated>false</Activated>
+</ProbeMatch>

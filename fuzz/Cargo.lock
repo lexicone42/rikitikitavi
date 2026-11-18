@@ -1545,11 +1545,9 @@ name = "rikitikitavi-export"
 version = "0.5.1"
 dependencies = [
  "anyhow",
- "chrono",
  "rikitikitavi-analysis",
  "rikitikitavi-core",
  "rikitikitavi-models",
- "serde",
  "serde_json",
  "tracing",
  "uuid",

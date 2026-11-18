@@ -1064,6 +1064,18 @@ impl Scanner for MdnsScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    use std::net::IpAddr;
+
+    pub fn ssdp(ip: IpAddr, text: &str) {
+        if let Some(service) = super::parse_ssdp_response(text) {
+            let _ = super::classify_ssdp_service(ip, &service);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

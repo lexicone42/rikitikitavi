@@ -1,0 +1,21 @@
+<?xml versoin="1ervice></spnp/control/WANCommonIFC2</controlURL>
+  
+            </   <service>
+                ><serviceType>urn:schemas-upnp-org:service:WANIPConnec <//serviceType>
+     +           <controlURL>/upnp/control/WANCommonIFC2</controlURL>
+  
+            </service>
+      @        <service>
+                ><serviceType>urn:schemas-upnp-org:serverviceListice>
+   aceConfig:1<//serviceType>
+     +           <controlURL>/upnp/control/WANCommonIFC2</controlURL>
+  
+            </service>
+      @        <service>
+                ><serviceType>urn:schemas-upnp-org:service:WANIPConnec <//serviceType>
+     +           <controlURL>/upnp/control/WANCommonIFC2</controlURL>
+  
+            </service>
+      @        <service>
+                ><serviceType>urn:schemas-upnp-org:service:WA  </device>
+</root>

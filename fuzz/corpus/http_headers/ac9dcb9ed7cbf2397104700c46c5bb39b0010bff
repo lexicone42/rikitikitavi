@@ -1,0 +1,8 @@
+;
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
+    }
+
+    #[test]
+    fn test_classify_auth_spa_shell_ambiguous() {
+        let body = 

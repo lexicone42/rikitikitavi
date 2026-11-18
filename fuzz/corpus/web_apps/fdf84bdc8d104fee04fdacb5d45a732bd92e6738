@@ -1,0 +1,5 @@
+{"result":{"klippy_connected":true,"klippy_state":"ready",
+"components":["server","file_manager","authorization","klippy_apis"],
+"failed_components":[],"registered_directories":["gcodes","config"],
+"warnings":[],"websocket_count":2,"moonraker_version":"v0.9.3-4-gf1b2c3d",
+"missing_klippy_requirements":[],"api_version":[1,5,0],"api_version_string":"1.5.0"}}

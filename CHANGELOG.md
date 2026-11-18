@@ -6,6 +6,17 @@
   `line_protocols`, `exports`), 18 in all. CI now runs each for 10 seconds
   instead of only building them, starting from seed corpora now committed
   under `fuzz/corpus/`. No crashes in the new parser targets.
+- Fuzz coverage measured (`fuzz/coverage.sh`). The older targets parsed but
+  never reached the analysis code, and their corpora held no valid
+  certificate, sysinfo document or banner. Five targets now run
+  parse-then-classify and the corpora are seeded from generated certificates
+  and the unit-test fixtures: parser and classifier line coverage 33% to 63%.
+- Unused dependencies removed (cargo-machete): `chrono` and `serde` from
+  export, `base64`, `chrono`, `thiserror` and `uuid` from unifi, `pcap` from
+  network. Empty features removed: `minimal`, `bluetooth`, `local-api`,
+  `remote-api`.
+- The build without the `tui` feature compiles again (found by cargo-hack).
+  CI checks every feature combination and runs cargo-machete.
 - Kasa: the hand-written JSON reader is replaced by `serde_json`. A
   differential fuzz run showed it accepted numbers JSON forbids (`3.`, `-.5`,
   `01`) and `\u+123` escapes. A repeated key now reads as its last value

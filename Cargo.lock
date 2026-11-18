@@ -2757,12 +2757,10 @@ name = "rikitikitavi-export"
 version = "0.5.1"
 dependencies = [
  "anyhow",
- "chrono",
  "proptest",
  "rikitikitavi-analysis",
  "rikitikitavi-core",
  "rikitikitavi-models",
- "serde",
  "serde_json",
  "tempfile",
  "tracing",
@@ -2791,7 +2789,6 @@ dependencies = [
  "futures",
  "hickory-resolver",
  "ipnetwork",
- "pcap",
  "proptest",
  "reqwest",
  "serde",
@@ -2849,8 +2846,6 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.23.1",
- "chrono",
  "proptest",
  "reqwest",
  "rikitikitavi-core",
@@ -2858,10 +2853,8 @@ dependencies = [
  "rikitikitavi-scanners",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]

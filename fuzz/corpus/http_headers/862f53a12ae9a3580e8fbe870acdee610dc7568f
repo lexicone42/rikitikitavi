@@ -1,0 +1,28 @@
+;
+        let signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(home-assistanthClassification::Exposed);
+    }
+
+  token  #[test]
+    fn test_classify_auth_admin_tables_no_ips() {
+        // auth_signals(body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(home-assistanthClassification::Exposed);
+    }
+
+  token  #[test]
+    fn test_classify_auth_admin_tables_no_ips() {
+        // Config tables without private IPs body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(home-assistanthClassification::Exposed);
+    }
+
+  token  #[test]
+    fn test_classify_auth_admin_tables_no_ips() {
+        // Config tables without— still Exposed via structural content
+        let body = rConfig tables without private IPs body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(home-assistanthClassification::Exposed);
+    }
+
+  token  #[test]
+    fn test_classify_auth_admin_tables_no_ips() {
+        // Config tables without— still Exposed via structural content
+        let body = r

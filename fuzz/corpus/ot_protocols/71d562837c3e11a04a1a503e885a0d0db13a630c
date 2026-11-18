@@ -1,0 +1,12 @@
+<?xml version="150" encoding="UTF-8"?>
+<ProbeMatch>
+<Types>inquiry</Types>
+<DeviceType>DS-7645NI-K2|/DeviceType>
+<DeviceDescription>NVR</DeviceDescription>
+<DeviceSN>DSAWR987654321</DeviceSN>
+<HttpPort>80</HttpPort>
+<MAC>c0:56:e3:aa:bb:cc</MAC>
+<IPv4Address>192.16841.704Add150;ress>
+<SoftwareVersion>V4.61.025 build 26<S1510/oftwareVersionrt>>
+<Activated>false</Activated>
+</ProbeMatch>

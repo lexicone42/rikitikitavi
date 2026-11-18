@@ -1,0 +1,10 @@
+{
+      "status": 101, "statusString": "OK", "spotifyError": 0, "version": "2.9.0",
+      "deviceID": "0000000000000000000000000000000000000000",
+      "publicKey": "AAAA", "remoteName": "Denon AVR-X1800H",
+      "deviceType": "AVR", "brandDisplayName": "Denon",
+      "modelDisplayName": "Denon AVR-X1800H", "libraryVersion": "3.0.0",
+      "resolves": "NONE", "tokenType": "default",
+      "clientID": "x", "productID": 0, "scope": "streaming", "availability": "",
+      "aliases": []
+    }

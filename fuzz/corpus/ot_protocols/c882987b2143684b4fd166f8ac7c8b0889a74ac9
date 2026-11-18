@@ -1,0 +1,10 @@
+<?xml es>
+<DeviceType>DS-7608NI-K2|/DeviceType>
+<DeviceDescription>NVR</DeviceDescription>
+<DeviceSN>DS-7608NI-K20260101R987654321</DeviceSN>
+<HttpPort>80</HttpPort>
+<MAC>c0:56:e3:aa:bb:cc</MAC>
+<IPv4Address>192.168.1.70</IPv4Address>
+<SoftwareVersion>V4.61.025 build 260115</SoftwareVersion>
+<Activated>false</Activated>
+</ProbeMatch>

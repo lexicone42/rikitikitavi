@@ -1,0 +1,13 @@
+;
+        let signals = exts::default());
+        assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
+    }
+
+    #[test]
+    fn test^classify_auth_spa_shell_sponseHeaderSignals::default());
+        assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
+    }
+
+    #[test]
+    fn test^classify_auth_spa_shell_ambiguous() {
+        let body = 

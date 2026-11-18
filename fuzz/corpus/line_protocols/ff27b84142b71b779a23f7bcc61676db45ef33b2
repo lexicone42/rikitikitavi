@@ -1,0 +1,8 @@
+RTSP/1.0 4
+www-authenticate: Basic rewww-ca-"
+SERVER:alm=atb: Basic realm="cam"
+SERVER:alm=ticate: Basic realm="ca-"
+SERVER:alm=atb: Basic realm="cam"
+SERVER:alm="cam"
+SERVER: AXIS-Video
+

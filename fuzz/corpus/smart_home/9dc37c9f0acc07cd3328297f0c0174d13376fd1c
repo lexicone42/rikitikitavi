@@ -1,0 +1,10 @@
+{"system":{"get_sysinfo":{
+        "sw_ver":"1.8.11 Build 191113 Rel.105336","hw_ver":"2.0","model":"KL130B(US)",
+        "deviceId":"801E1234567890ABCDEF1234567890ABCDEF1234","oemId":"E45F4D1A",
+        "mic_type":"IOT.SMARTBULB","mic_mac":"B0BE76445566","dev_state":"normal",
+        "is_factory":false,"alias":"Bedroom","latitude_i":377749,"longitude_i":-1224194,
+        "err_code":0,
+        "light_state":{"on_off":1,"mode":"normal","hue":0,"saturation":0,
+            "color_temp":2700,"brightness":75},
+        "preferred_state":[{"index":0,"hue":0,"saturation":0,"color_temp":2700,
+            "brightness":100}]}}}

@@ -38,6 +38,16 @@ jobs:
       - name: Clippy (monitor feature)
         run: cargo clippy -p rikitikitavi --features monitor --all-targets -- -D warnings
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack,cargo-machete
+
+      - name: Every feature combination compiles
+        run: cargo hack check --feature-powerset --exclude-features fuzzing --workspace --all-targets
+
+      - name: No unused dependencies
+        run: cargo machete
+
   test:
     name: Test (stable)
     runs-on: ubuntu-latest

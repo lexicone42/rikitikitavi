@@ -15,7 +15,6 @@
 //   tui = ["dep:rikitikitavi-tui", "dep:ratatui", "dep:crossterm"]
 //   unifi = ["dep:rikitikitavi-unifi"]
 //   monitor = ["rikitikitavi-scanners/monitor", "rikitikitavi-network/monitor"]
-//   minimal = []
 //   otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp",
 //           "dep:tracing-opentelemetry"]
 //
@@ -32,8 +31,7 @@
 //   dependencies! Enabling "monitor" on the binary also enables "monitor"
 //   on the scanners and network crates.
 //
-// - `minimal = []` — an empty feature. Enabling it changes nothing; a minimal
-//   build is `--no-default-features`.
+// - A build without the TUI and UniFi crates is `--no-default-features`.
 //
 // - `otel` — OTLP trace export, off by default.
 //

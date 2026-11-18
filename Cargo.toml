@@ -63,7 +63,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "7"
 ipnetwork = { version = "0.21", features = ["serde"] }
-base64 = "0.23"
 pcap = "2"
 
 # X.509 certificate parsing

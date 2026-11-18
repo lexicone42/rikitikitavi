@@ -1,0 +1,12 @@
+Õ¦ÿ¨;ÿ¨;ÿÿ¨;ÿ¨;ÿ¨ÿ¨;»Ûÿ¨;ÿÿÿ¨;ÿ¨;¨¨ÿ¨ÿ¨;»Ûÿ¨;ÿÿÿ¨;ÿ¨;¨¨ÿ;¨;ÿ¨;¨¨ÿ;ÿÿ¨;ÿ¨ÿ¨;ÿ¨;ÿ¨!ÿ¨4;Ûÿ¨;ÿÿÿ¨;ÿ;ÿ¨;ÿÿ¨;;ÿ¨;ÿ¼ÿ¨ÿ¨;;Ûÿ¨;ÿÿÿ¨;ÿA¨;;Ûÿ¨;ÿÿÿ¨;ÿA¨;¨¨ÿacÿe¨;ÿ¨;ÿ¨;¨¦ÿ¨;ÿ¨;ÿÿ¨;ÿ¨;ÿ¨ÿ¨;»¨;ÿÿÿ¨;ÿA¨;¨¨ÿ¨;ÿ¨;ÿ¨;¨¦ÿ¨;ÿ¨;ÿÿ¨;ÿ¨;ÿ¨ÿ¨;»Ûÿ¨;ÿÿÿ¨;ÿ¨;¨¨ÿ;¨;¨ÿ¨;ÿ¨»¨;;¨;¨ÿ¨;ÿ¨;ÿÿÛÿ¨;ÿÿï¨;ÿA¨;¨¨ÿamÿœààà¨;ÿ¨;ÿ¨;¨¦ÿ¨;ÿ¨;ÿÿ¨;ÿ¨;ÿ¨ÿ¨;»¨;ÿÿÿ¨;ÿA¨;¨¨ÿ¨;ÿ¨;ÿ¨;¨¦ÿ¨;ÿ¨;ÿÿ¨;ÿ¨;ÿ¨ÿ¨;»¨;ÿÿÛÿ¨;ÿÿÿ¨;ÿ¨;¨¨ÿ;¨;ÿ¨;¨¨;ÿÿ¨;ÿ¨nals(body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(&signals), AuthClassification::Exposed);    }
+
+    #[test]
+    fn test_classify_auth_admin_tables_no_ips() {
+        // Config tables without private IPs â€” still Exposed via structural content
+        let boÿ©;hÿÿ¨;ÿÿ¼ÿ¨ÿ¨;;Ûÿ¨;ÿÿÿ¨;ÿA¨;;et signals = extract_auth_signals(body, &ResponseHeaderSignals::default());
+        assert_eq!(classify_auth(&signals), AuthClassification::Exposed);
+    }
+
+    #[test]
+    fn tes¨ÿ;¨;¨ÿ¨;ÿ¨;ÿÿÛÿ¨;ÿÿÿ¨;ÿ¨;¨¨ÿ;¨;ÿ¨;¨¨;ÿÿ¨;ÿ¨ÿ¨;hÿÿ¨;ÿ¼ÿ¨ÿ¨;;Ûÿ

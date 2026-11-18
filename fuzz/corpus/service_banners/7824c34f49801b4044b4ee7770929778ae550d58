@@ -1,0 +1,6 @@
+220 mail.example.com ESMTP Postfix
+250-mail.example.com
+250-SIZE 52428800
+250-STARTTLS
+250-AUTH PLAIN LOGIN
+250 8BITMIME

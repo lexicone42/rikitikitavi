@@ -1,0 +1,10 @@
+<?y</Types>
+<DeviceType>DS-7608NI-K2|/eType>
+<DeviceDescription>NVR</DeviceDescription>
+<DeviceSN>DS987654321</DeviceSN>
+<HttpPort>80</HttpPort>
+<MAC>c0:56:e3:aa:bb:cc</MAC>
+<IPv4Address>192.168.1.70</IPv4Address>
+<SoftwareVersion>V5.61.oftwareVersionrt>>
+<Activated>false</Activated>
+</ProbeMatch>

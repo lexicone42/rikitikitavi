@@ -13,6 +13,9 @@ Seed corpora are committed under `fuzz/corpus/<target>/` (minimised, about 1.1 M
 A run adds new inputs there; before committing them, minimise with
 `cargo +nightly fuzz cmin <target>`.
 
+`fuzz/coverage.sh` reports which parser and classifier functions the corpora reach
+(63% of their lines as of 2026-11-17) and lists the ones never entered.
+
 Crashes land in `fuzz/artifacts/<target>/`; reproduce with `cargo +nightly fuzz run <target> <artifact>`.
 
 ## Targets

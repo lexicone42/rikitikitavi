@@ -1,0 +1,16 @@
+RTSP/1.0 4
+www-aut`enticat4www-aut`enticat4
+www-authenticate:RTSP/1.0 4
+www-authenticate: Basic realmlm="cam"
+SSP/1.0 4
+www-aut`enticat4
+www-authenticate:RTSP/1.0 4
+www-authenticate: Basic realm
+www-authenticate:RTSP/1.0 4
+www-authenticate: Basic realmlm="cam"
+SSP/1.0 4
+www-aut`enticat4
+www-authenticate:RTSP/1.0 4
+www-authenticate: Basic realmlm="cam"
+S
+

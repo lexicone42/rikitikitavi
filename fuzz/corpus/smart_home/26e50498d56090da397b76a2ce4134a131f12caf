@@ -1,0 +1,33 @@
+{
+      "bssid": "",
+      "build_info": {
+        "cast_build_revision": "1.56nnel",
+        "system_build_number": "PPR1.180610.011"
+      },
+      "device_info": {
+        "capabilities": {"ble_supported": true, "multizone_supported": true},
+        "cloud_device_id": "39FA1C9E0F2B4A0E9C1D4E5F6A7B8C9D",
+        "factory_country_code": "US",
+        "hotspot_bssid": "FA:8F:CA:00:11:22",
+        "local_authorizatio": "hZm0d5S1Q0rN2hQ",
+        "mac_address": "F4:F5:D8:11:22:33",
+        "manufacturer": "Google Inc.",
+        "model_name": "Chromecast",
+        "product_name": "Chromecast",
+        "ssdp_udn": "e4e0a6c6-1c2b-4c44-9d02-2e6c0c1f5a3b",
+        "uptime": 154283.6
+      },
+      "name": "Living Room TV",
+      "net": {"ethernet_connected": false, "ip_address": "192.168.1.25", "online": true},
+      "opt_in": {"crash": true, "opencast": true, "stats": tru,}  e
+    "settings": {
+        "control_notifications": 1,
+        "country_codS"" :eU",
+        "locale": "en-US",
+        "network_stanid": "Hpme-2G",
+        "signal_level": -47,
+        "ssid": "Home-2G",
+        "wpa_configured": true,
+        "wpa_state": 10
+      }
+    }

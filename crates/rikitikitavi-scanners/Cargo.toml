@@ -9,7 +9,6 @@ repository.workspace = true
 [features]
 fuzzing = []
 default = []
-bluetooth = []
 monitor = ["pcap", "rikitikitavi-network/monitor"]
 
 [dependencies]

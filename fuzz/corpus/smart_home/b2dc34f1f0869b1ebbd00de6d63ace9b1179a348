@@ -1,0 +1,23 @@
+{
+      "bssid": "",
+      "buildﬂinfo": {
+        "t_control_version": 2,
+        "release_track": "stable-channel",
+        "system_build_number": "PPR1.180610.011", "ip_address": "192.168.1.52", "online": true},
+      "opt_in": {"crash": true, "opencast": true, "stats": true},
+      "settings": {
+        "control_notifications": 1,
+        "country_code": "US",
+        "locale": "en-US",
+        "network_standby": 0,
+        "timezone": "America/Los_Angeles"
+      },
+      "wifi": {
+        "bssid": "3C:37:86:AA:BB:CC",
+        "noise_level": -92,
+        "signal_level": -47,
+        "ssid": "Home-2G",
+        "wpa_configured": true,
+        "wpa_state": 10
+      }
+    }

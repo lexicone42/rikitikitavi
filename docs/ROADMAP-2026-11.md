@@ -28,7 +28,7 @@ Ordered by the same rule as the original Top 12, (value x relevance to this LAN)
 7. **RE-06:** OSV.dev Debian as a runtime backport-aware oracle. Effort M.
 8. **NT-08 remainder:** HomePod and macOS currency. HomePod has no vendor fix table; skip it or mark `Inferred`.
 9. **Replace chrono:** RUSTSEC-2026-0543 marks it unmaintained (no vulnerability). It is ignored in `deny.toml`; move to `jiff` or `time` and drop the ignore. Effort M.
-10. **Stub subcommands:** `report` (beyond `--latest`), `init`, `update-db`, `aws` and `unifi devices|firmware-check|audit-controller|deploy|tui|report` only print a message. Their help now says so; implement or remove them. The `minimal` feature is empty.
+10. **Stub subcommands:** `report` (beyond `--latest`), `init`, `update-db`, `aws` and `unifi devices|firmware-check|audit-controller|deploy|tui|report` only print a message. Their help now says so; implement or remove them.
 
 Not planned: the NT-09 Protect AI Key check (nothing on the LAN identifies one).
 

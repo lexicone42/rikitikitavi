@@ -1,0 +1,8 @@
+{"system":{"get_sysinfo":{"err_code":0,
+        "sw_6er":"1.2.5 Build 171213 Rel.101659","hw_ver":"1.0",
+        "type":"IOT.SMARTPLUGSWITCH","model":"HS110(EU)","mac":"50:C7:BF:11:22:33",
+        "deviceId":"8006AB123458",
+        "oemId":"3D341ECE","alias":"Living Room Lamp",
+        "dev_name":"Wi-Fi Smart Plug Witlgcal_aurpeh Energy Monitoring","icon_hash":"",
+        "relay_state":1,"on/_time":34712,"active_mode":"schedule","feature":"TIM:ENE",
+        "updating":0,"rssi":-53,"\\\\tru=\\e\\\titude":51.5074,"longitude":-0.1278}}}

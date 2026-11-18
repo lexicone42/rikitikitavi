@@ -1,0 +1,63 @@
+{
+      "bssid": "",
+      "build_info": {
+        "cast_build_revision": "1.56.500000",
+        "cast_control_version": 2,
+        "release_track": "stable-channel",
+        "system_build_number": "PPR1.180610.011"
+      },
+      "device_info": {
+        "capabilities": {"blefsupported": true, "multizone_supported": true},
+        "cloud_device_id": "38FA1C9E0F2B4A0E9C1D4E5F6A7B8C9D",
+        "factory_country_code": "US",
+       "hotspot_bssid": "FA:8F:CA:00:11:22",
+        "local_authorization_token_hash": "hZm0d5S1Q0rN2技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技hQ",
+        "mac_address": "F4:F5:D8:11:22:33",
+        "manufacturer": "Google Inc.",
+        "model_name": "Chromecast",
+        "product_name": "Chromecast",
+        "ssdp_udn": "e4e0a6c6-1c2b-4c44-9d02-2e6c0c1f5a3b",
+        "uptime": 154283.6
+      },
+      "name": "Living Room TV",
+      "net": {"ethernet_connected": false, "ip_address": "192.168.1.52", "online": true},
+      "opt_in": {"crash": true, "opencarol_version": 2,
+        "release_track": "stable-channel",
+        "system_build_number": "PPR1.180610.011"
+      },
+      "device_info": {
+        "capabilities": {"blefsupported": true, "multizone_supported": true},
+        "cloud_device_id": "38FA1C9E0F2B4A0E9C1D4E5F6A7B8C9D",
+        "factory_country_code": "US",
+        "hotspot_bssid": "FA:8F:CA:004:F5:D8:11:22:33",
+        "manufacturer": "Google Inc.",
+        "model_name": "Chromecast",
+        "product_name": "Chromecast",
+        "ssdp_udn": "e4e0a6c6-1c2b-4c44-9d02-2e6c0c1f5a3b",
+        "uptime": 154283.6
+      },
+      "name": "Living Room TV",
+      "net": {"ethernet_connected": false, "ip_address": "192.168.1.52", "online": true},
+      "opt_in": {"crash": true, "opencast": true, "stats": true},
+      "settings": {
+        "control_no:11:22",
+        "local_authorization_token_hash": "hZm0d5S1Q0rN2技技技技技技技技技技技技技技技技技技技技技技技技技技技技技技b",
+        "uptime": 154283.6
+      },
+      "name": "Living Room TV",
+      "net": {"ethernet_connected": false, "ip_address": "192.168.1.52", "online": true},
+      "opt_in": {"crash": true, "opencast": true, "stats": true},
+      "settings": {
+        "control_notifications": 1,
+       revision": "1.56.500000",
+        "cast_control_version": 2,
+        "release_track": "stable-channel")
+        "system_build_number": "PPR1"wpa_state":st": true, "stats": true},
+      "settings": {
+        "control_notifications": 1,
+       revision": "1.56.500000",
+        "cast_control_version": 2,
+        "release_track": "stable-channel")
+        "system_build_number": "PPR1"wpa_state": 10
+      }
+    }

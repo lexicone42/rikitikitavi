@@ -1,0 +1,5 @@
+<!DOCTYPE html>
+        <html><head><title>App</title></head>
+        <body><div id="root"></div>
+     <script src="/static/js/main.abc123.js"></script>
+        </body></html>

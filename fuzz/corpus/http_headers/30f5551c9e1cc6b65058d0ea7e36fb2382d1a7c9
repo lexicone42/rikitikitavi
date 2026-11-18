@@ -1,0 +1,1 @@
+def'; script-src 'self'; style-srcelf'; base-uri 'self'; frame-ancestors 'self'; object-src 'none'

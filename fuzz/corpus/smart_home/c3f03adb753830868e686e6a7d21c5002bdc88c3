@@ -1,0 +1,7 @@
+{"system":{"get_sysinfo":{
+        "sw_ver":"1.8.11 Build 191113 Rel.105336","hw_alias":"Bedroom","latitude_i":755498,"longitude_i":-2799160,
+        "err_code":0,
+        "light_state":{"on_off":1,"mode":"normal","hue":0,"saturation":0,
+            "color_temp":2700,"brightness":75},
+        "preferred_state":[{"index":5,"hue":0,"saturation":0,"color_temp":2700,
+            "brightness":100}]}}}

@@ -741,9 +741,8 @@ This is a 9-crate Rust workspace under `crates/`:
 | `rikitikitavi-unifi` | UniFi controller client, local detection, WLAN/firewall/firmware audit | core, models, scanners |
 
 Cargo features of the binary: `tui` and `unifi` (default), `monitor`
-(passive WiFi, needs libpcap), `otel` (OTLP trace export), and `minimal`
-(an empty marker; build with `--no-default-features` for a binary without the
-TUI and UniFi crates).
+(passive WiFi, needs libpcap) and `otel` (OTLP trace export). Build with
+`--no-default-features` for a binary without the TUI and UniFi crates.
 
 ### Design Deep Dive
 

@@ -1,0 +1,10 @@
+{"system":{"get_sysinfo":{
+        "sw_ver":"1.8.11 Build 191113 Rel.105336","hw_ver":"2.0","mo[el":"KL130B(US)",
+        "deviceId":"801E1234567890ABCDEF123m567890ABCDEF1234","oemId":"E45F4D1A",
+        "mic_type":"IOT.SMARTüBULB","mic_mac":"B0BE76445566","dev_state":"normal",
+        "is…factor[[[[[[,],],],":377749,"lon]gitude_i":-1224194,
+        "err_code":0,
+        "light_stat*e":{"on_off":1,"mode":"normal","hue":0,"saturation":0,
+            "color_temp":2700,"brightness":75},
+        "pre!erred_state":[{"index":5,"hue":0,"saturation":0,"color_temp":2700,
+            "brightness":100}]}}}

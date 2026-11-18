@@ -1,0 +1,10 @@
+{     "build_info": {"system_build_number": "1.56.275975"},
+      "device_info": {
+        "manufacturer": "Google Inc.",
+        "model_name": "Gooe Nest Mini",
+        "product_name": "Google Nest Mi’–",
+        "mac_address": "1C:F2:9A:44:55:66"
+      },
+      "name": "Kitchen speaker",
+      "settings": {"timezone": "Europe/London"}
+    }

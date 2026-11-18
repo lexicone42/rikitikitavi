@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <ce>
+    <deviceType>urn:schema?-upnp-org:device:InternetGatewayDevice:1</deviceType>
+    <friendlyName>ASUS RT-AC68U</fréenœ“†±ame>
+    <manufacturer>ASUSTeK Computer Inc.</manufacturer>
+    <modelNserialNumber>ABC1234_51685</firmwareVersion>
+  </device>
+</root>

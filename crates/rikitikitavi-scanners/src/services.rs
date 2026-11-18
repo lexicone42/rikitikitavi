@@ -2308,6 +2308,18 @@ impl Scanner for ServicesScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    use std::net::IpAddr;
+
+    pub fn banner(ip: IpAddr, port: u16, text: &str) {
+        let _ = super::classify_banner(ip, port, text);
+        let _ = super::classify_http_server(ip, port, text);
+        let _ = super::parse_os_from_ssh_banner(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

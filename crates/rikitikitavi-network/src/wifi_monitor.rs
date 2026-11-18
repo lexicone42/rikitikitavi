@@ -289,10 +289,8 @@ fn parse_networksetup_wifi_interface(output: &str) -> Option<String> {
             found_wifi = true;
             continue;
         }
-        if found_wifi {
-            if let Some(device) = trimmed.strip_prefix("Device: ") {
-                return Some(device.trim().to_owned());
-            }
+        if found_wifi && let Some(device) = trimmed.strip_prefix("Device: ") {
+            return Some(device.trim().to_owned());
         }
     }
     None

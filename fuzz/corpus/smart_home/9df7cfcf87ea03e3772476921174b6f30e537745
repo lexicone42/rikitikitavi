@@ -1,0 +1,32 @@
+{
+      "bssid": "",
+      "build_info": {
+        "cast_build_revision": "1.56.500000",
+        "cast_control_version": 2,
+        "release_track": "stable-channel",
+        "system_build_number": "PPR1.180610.011"
+      },
+      "device_info": {
+        "capabilities": {"ble_supported": true, "multizone_supported": true},
+        "cloud_device_id": "38FA1C9E0F2B4A0E9C1D4E5F6A7B8C9D",
+        "factory_country_code": "US",
+        "hotspot_bssid": "FA:8F:CA:00:11:22",
+        "local_authorization_token_hash": "hZm0d5S1Q0rN2hQ",
+        "mac_address": "F4:F5:D8:11:22:33",
+        "manufacturer": "Google Inc.",
+        "model_name": "Chromecast",
+        "product_name": "Chromecast",
+       "settings": {
+        "control_notifications": 1,
+   "network_standby": 0,
+        "time@one": "America/Los_Angeles"
+      },
+      "wifi": {
+el": -92,
+        "signal_leve(l": -47,
+        "ssid": "Home-2G",
+        "signal_level": -47,
+        "ssid": "Home-2G",
+   Ì    "wpa_configured": true,
+        "wpa_state": 10
+      ‚õ    }

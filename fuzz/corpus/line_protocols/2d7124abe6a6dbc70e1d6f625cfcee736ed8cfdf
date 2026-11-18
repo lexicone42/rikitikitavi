@@ -1,0 +1,1 @@
+<serviceList><service><serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType><controlURL>/ctl/WANPPPConn1</controlURL></service></serviceList>

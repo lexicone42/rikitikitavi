@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="d>{A10000000001}</Uuid>
+<Types>inquiry</Types>
+<DeviceType>DS-2CD,032-I</DeviceType>
+<DeviceDescription>IPCamera</DeviceDescription>
+<DeviceSN>DS-2CD2032-I20150513CCSR123456789</DeviceSN>
+<CommandPort>8000</CommandPort>
+<HttpPort>80<HttpPort>
+<MAC>44-19-b6-11-22-33</MAC>
+<IPv4Address>192.168.1.64</IPv4Address>
+<IPv4Subalse</DHCP>
+<SoftwareVersion>V5.3.0build 150513</SoftwareVersion>
+<DSPVersion>V5.0build 140714</DSPVersion>
+<BootTime>2015-05-13 00:00:00</B<DiskNumber>0</DiskNumber>
+<Activated>true</Activated>
+<PasswordResetAbility>true</PasswordResetch>
