@@ -71,7 +71,7 @@ consume network-sourced bytes: `dns_packet`, `wifi_frame`, `ssh_kex`,
 `smart_home`, `ot_protocols`, `web_apps`, `recog`, `tables`, `snmp_ber`,
 `smb_nbns`, `databases`, `line_protocols`. `exports` checks that device text
 cannot break out of the HTML, Markdown, Prometheus or JSON output. CI builds
-every target on nightly and runs each for 10 seconds from an empty corpus
+every target on nightly and runs each for 10 seconds from its committed seed corpus
 (`fuzz-build` job); that is a smoke test, so run them longer locally per
 `fuzz/README.md`. The workspace also carries about 270 `proptest` properties (no
 panic on arbitrary input, counting invariants, serialization and fingerprint

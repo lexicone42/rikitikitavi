@@ -9,6 +9,10 @@ cargo +nightly fuzz run dns_packet -- -max_total_time=60
 cargo +nightly fuzz build            # compile every target without running
 ```
 
+Seed corpora are committed under `fuzz/corpus/<target>/` (minimised, about 1.1 MB in all).
+A run adds new inputs there; before committing them, minimise with
+`cargo +nightly fuzz cmin <target>`.
+
 Crashes land in `fuzz/artifacts/<target>/`; reproduce with `cargo +nightly fuzz run <target> <artifact>`.
 
 ## Targets

@@ -4,7 +4,8 @@
 
 - Fuzzing: five new targets (`snmp_ber`, `smb_nbns`, `databases`,
   `line_protocols`, `exports`), 18 in all. CI now runs each for 10 seconds
-  instead of only building them. No crashes in the new parser targets.
+  instead of only building them, starting from seed corpora now committed
+  under `fuzz/corpus/`. No crashes in the new parser targets.
 - Kasa: the hand-written JSON reader is replaced by `serde_json`. A
   differential fuzz run showed it accepted numbers JSON forbids (`3.`, `-.5`,
   `01`) and `\u+123` escapes. A repeated key now reads as its last value
