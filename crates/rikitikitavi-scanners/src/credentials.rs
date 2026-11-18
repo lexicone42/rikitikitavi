@@ -1722,6 +1722,17 @@ impl Scanner for CredentialScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn responses(text: &str) {
+        let _ = super::parse_ftp_response(text);
+        let _ = super::parse_pasv_response(text);
+        let _ = super::classify_telnet_response(text);
+        let _ = super::extract_html_title(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

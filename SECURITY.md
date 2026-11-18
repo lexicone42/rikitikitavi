@@ -65,11 +65,14 @@ check:
 
 ### Fuzzing and Property Tests
 
-Thirteen libFuzzer harnesses under `fuzz/fuzz_targets/` cover the parsers that
+Eighteen libFuzzer harnesses under `fuzz/fuzz_targets/` cover the parsers that
 consume network-sourced bytes: `dns_packet`, `wifi_frame`, `ssh_kex`,
 `service_banners`, `http_headers`, `ssdp_upnp`, `x509_der`, `identifiers`,
-`smart_home`, `ot_protocols`, `web_apps`, `recog`, `tables`. CI builds every
-target on nightly (`fuzz-build` job) but does not run them; run them locally per
+`smart_home`, `ot_protocols`, `web_apps`, `recog`, `tables`, `snmp_ber`,
+`smb_nbns`, `databases`, `line_protocols`. `exports` checks that device text
+cannot break out of the HTML, Markdown, Prometheus or JSON output. CI builds
+every target on nightly and runs each for 10 seconds from an empty corpus
+(`fuzz-build` job); that is a smoke test, so run them longer locally per
 `fuzz/README.md`. The workspace also carries about 270 `proptest` properties (no
 panic on arbitrary input, counting invariants, serialization and fingerprint
 round-trips). A cargo-mutants configuration (`.cargo/mutants.toml`) is provided

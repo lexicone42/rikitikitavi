@@ -86,253 +86,13 @@ fn build_request(command: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// ── Minimal JSON reader ─────────────────────────────────────────────────────
+// ── JSON ────────────────────────────────────────────────────────────────────
 
-/// JSON value. Numbers keep their source text, so no float round-trip happens
-/// for values that are only ever compared or rendered.
-#[derive(Debug, Clone, PartialEq)]
-enum Json {
-    Null,
-    Bool(bool),
-    Num(String),
-    Str(String),
-    Arr(Vec<Self>),
-    Obj(Vec<(String, Self)>),
-}
+type Json = serde_json::Value;
 
-impl Json {
-    /// Field of an object, or `None` for any other value / missing key.
-    fn get(&self, key: &str) -> Option<&Self> {
-        match self {
-            Self::Obj(fields) => fields
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Str(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            Self::Num(text) => text.parse().ok(),
-            _ => None,
-        }
-    }
-}
-
-/// Maximum nesting accepted; bounds recursion on hostile input.
-const MAX_DEPTH: u32 = 32;
-
-struct JsonReader<'a> {
-    bytes: &'a [u8],
-    src: &'a str,
-    pos: usize,
-    depth: u32,
-}
-
-impl<'a> JsonReader<'a> {
-    const fn new(src: &'a str) -> Self {
-        Self {
-            bytes: src.as_bytes(),
-            src,
-            pos: 0,
-            depth: 0,
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.pos).copied()
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.pos += 1;
-        }
-    }
-
-    fn eat(&mut self, byte: u8) -> Option<()> {
-        (self.peek() == Some(byte)).then(|| self.pos += 1)
-    }
-
-    fn literal(&mut self, word: &str, value: Json) -> Option<Json> {
-        if self.src[self.pos..].starts_with(word) {
-            self.pos += word.len();
-            return Some(value);
-        }
-        None
-    }
-
-    fn value(&mut self) -> Option<Json> {
-        if self.depth >= MAX_DEPTH {
-            return None;
-        }
-        self.skip_ws();
-        match self.peek()? {
-            b'{' => self.object(),
-            b'[' => self.array(),
-            b'"' => self.string().map(Json::Str),
-            b't' => self.literal("true", Json::Bool(true)),
-            b'f' => self.literal("false", Json::Bool(false)),
-            b'n' => self.literal("null", Json::Null),
-            b'-' | b'0'..=b'9' => self.number(),
-            _ => None,
-        }
-    }
-
-    fn object(&mut self) -> Option<Json> {
-        self.eat(b'{')?;
-        self.depth += 1;
-        let mut fields = Vec::new();
-        self.skip_ws();
-        if self.eat(b'}').is_some() {
-            self.depth -= 1;
-            return Some(Json::Obj(fields));
-        }
-        loop {
-            self.skip_ws();
-            let key = self.string()?;
-            self.skip_ws();
-            self.eat(b':')?;
-            let value = self.value()?;
-            fields.push((key, value));
-            self.skip_ws();
-            if self.eat(b',').is_some() {
-                continue;
-            }
-            self.eat(b'}')?;
-            self.depth -= 1;
-            return Some(Json::Obj(fields));
-        }
-    }
-
-    fn array(&mut self) -> Option<Json> {
-        self.eat(b'[')?;
-        self.depth += 1;
-        let mut items = Vec::new();
-        self.skip_ws();
-        if self.eat(b']').is_some() {
-            self.depth -= 1;
-            return Some(Json::Arr(items));
-        }
-        loop {
-            items.push(self.value()?);
-            self.skip_ws();
-            if self.eat(b',').is_some() {
-                continue;
-            }
-            self.eat(b']')?;
-            self.depth -= 1;
-            return Some(Json::Arr(items));
-        }
-    }
-
-    /// Parse a string literal. `"` and `\` are ASCII, so every slice taken here
-    /// lands on a char boundary.
-    fn string(&mut self) -> Option<String> {
-        self.eat(b'"')?;
-        let mut out = String::new();
-        let mut chunk_start = self.pos;
-        loop {
-            match self.peek()? {
-                b'"' => {
-                    out.push_str(self.src.get(chunk_start..self.pos)?);
-                    self.pos += 1;
-                    return Some(out);
-                }
-                b'\\' => {
-                    out.push_str(self.src.get(chunk_start..self.pos)?);
-                    self.pos += 1;
-                    self.escape(&mut out)?;
-                    chunk_start = self.pos;
-                }
-                byte if byte < 0x20 => return None,
-                _ => self.pos += 1,
-            }
-        }
-    }
-
-    /// Decode one escape sequence, already past the backslash.
-    fn escape(&mut self, out: &mut String) -> Option<()> {
-        let byte = self.peek()?;
-        self.pos += 1;
-        let simple = match byte {
-            b'"' => '"',
-            b'\\' => '\\',
-            b'/' => '/',
-            b'b' => '\u{8}',
-            b'f' => '\u{c}',
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            b'u' => return self.unicode_escape(out),
-            _ => return None,
-        };
-        out.push(simple);
-        Some(())
-    }
-
-    /// Decode `\uXXXX`, joining a surrogate pair when a low surrogate follows.
-    fn unicode_escape(&mut self, out: &mut String) -> Option<()> {
-        let high = self.hex4()?;
-        // Not a surrogate: a lone code point.
-        if !(0xD800..0xE000).contains(&high) {
-            out.push(char::from_u32(high)?);
-            return Some(());
-        }
-        // Low surrogate without a preceding high one is invalid.
-        if high >= 0xDC00 {
-            return None;
-        }
-        if self.eat(b'\\').is_none() || self.eat(b'u').is_none() {
-            return None;
-        }
-        let low = self.hex4()?;
-        if !(0xDC00..0xE000).contains(&low) {
-            return None;
-        }
-        let combined = 0x1_0000 + ((high - 0xD800) << 10) + (low - 0xDC00);
-        out.push(char::from_u32(combined)?);
-        Some(())
-    }
-
-    fn hex4(&mut self) -> Option<u32> {
-        let digits = self.src.get(self.pos..self.pos + 4)?;
-        let value = u32::from_str_radix(digits, 16).ok()?;
-        self.pos += 4;
-        Some(value)
-    }
-
-    fn number(&mut self) -> Option<Json> {
-        let start = self.pos;
-        while matches!(
-            self.peek(),
-            Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
-        ) {
-            self.pos += 1;
-        }
-        let text = self.src.get(start..self.pos)?;
-        // Reject anything Rust would not read back as a finite number.
-        if !text.parse::<f64>().is_ok_and(f64::is_finite) {
-            return None;
-        }
-        Some(Json::Num(text.to_owned()))
-    }
-}
-
-/// Parse a complete JSON document. Trailing content (other than whitespace)
-/// makes the document invalid.
+/// Parse a complete JSON document.
 fn parse_json(text: &str) -> Option<Json> {
-    let mut reader = JsonReader::new(text);
-    let value = reader.value()?;
-    reader.skip_ws();
-    (reader.pos == reader.bytes.len()).then_some(value)
+    serde_json::from_str(text).ok()
 }
 
 // ── get_sysinfo interpretation ──────────────────────────────────────────────
@@ -393,7 +153,7 @@ fn read_location(info: &Json) -> Option<(f64, f64)> {
 /// `system.get_sysinfo` reply with a zero (or absent) `err_code`.
 fn parse_sysinfo(text: &str) -> Option<Sysinfo> {
     let info = parse_json(text)?.get("system")?.get("get_sysinfo")?.clone();
-    if !matches!(&info, Json::Obj(fields) if !fields.is_empty()) {
+    if info.as_object().is_none_or(serde_json::Map::is_empty) {
         return None;
     }
     if info.get("err_code").and_then(Json::as_f64).unwrap_or(0.0) != 0.0 {
@@ -1138,30 +898,6 @@ mod tests {
     // ── JSON reader ─────────────────────────────────────────────────
 
     #[test]
-    fn parse_json_reads_scalars_and_containers() {
-        assert_eq!(parse_json("null"), Some(Json::Null));
-        assert_eq!(parse_json(" true "), Some(Json::Bool(true)));
-        assert_eq!(parse_json("false"), Some(Json::Bool(false)));
-        assert_eq!(parse_json("-12.5e3"), Some(Json::Num("-12.5e3".to_owned())));
-        assert_eq!(parse_json(r#""hi""#), Some(Json::Str("hi".to_owned())));
-        assert_eq!(parse_json("[]"), Some(Json::Arr(vec![])));
-        assert_eq!(parse_json("{}"), Some(Json::Obj(vec![])));
-        assert_eq!(
-            parse_json(r#"{"a":[1,{"b":null}]}"#).and_then(|v| v.get("a").cloned()),
-            Some(Json::Arr(vec![
-                Json::Num("1".to_owned()),
-                Json::Obj(vec![("b".to_owned(), Json::Null)]),
-            ]))
-        );
-    }
-
-    #[test]
-    fn parse_json_decodes_escapes() {
-        let value = parse_json(r#""a\"b\\c\/d\n\té😀""#).unwrap();
-        assert_eq!(value.as_str(), Some("a\"b\\c/d\n\té😀"));
-    }
-
-    #[test]
     fn parse_json_rejects_malformed_documents() {
         for bad in [
             "",
@@ -1173,6 +909,10 @@ mod tests {
             "{} trailing",
             "tru",
             "01x",
+            "3.",               // digits required after the point
+            "-.5",              // digits required before the point
+            "01",               // leading zero
+            r#""\u+123""#,      // sign inside a \u escape
             "1e999",            // overflows to infinity
             r#""\ud800""#,      // lone high surrogate
             r#""\udc00""#,      // lone low surrogate
@@ -1185,7 +925,7 @@ mod tests {
 
     #[test]
     fn parse_json_rejects_documents_deeper_than_the_limit() {
-        let deep = "[".repeat(64) + &"]".repeat(64);
+        let deep = "[".repeat(200) + &"]".repeat(200);
         assert!(parse_json(&deep).is_none());
         let shallow = "[".repeat(8) + &"]".repeat(8);
         assert!(parse_json(&shallow).is_some());
@@ -1200,6 +940,9 @@ mod tests {
         assert_eq!(value.get("s").and_then(Json::as_f64), None);
         assert_eq!(value.get("missing"), None);
         assert_eq!(Json::Null.get("any"), None);
+        // A repeated key reads as its last value.
+        let dup = parse_json(r#"{"k":1,"k":2}"#).unwrap();
+        assert_eq!(dup.get("k").and_then(Json::as_f64), Some(2.0));
     }
 
     // ── get_sysinfo interpretation ──────────────────────────────────

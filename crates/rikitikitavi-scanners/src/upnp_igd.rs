@@ -129,16 +129,7 @@ async fn discover_igd_locations() -> Vec<String> {
 
 /// Extract the text content of `<tag>content</tag>` (non-recursive).
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    let content = xml[start..end].trim();
-    if content.is_empty() {
-        None
-    } else {
-        Some(content.to_owned())
-    }
+    crate::xml::tag_text(xml, tag)
 }
 
 /// Find the `WANIPConnection`/`WANPPPConnection` service in a `UPnP` device
@@ -529,6 +520,16 @@ impl Scanner for UpnpIgdScanner {
 
     fn estimated_duration_secs(&self) -> u64 {
         20
+    }
+}
+
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn responses(text: &str) {
+        let _ = super::parse_msearch_location(text);
+        let _ = super::parse_port_mapping_response(text);
+        let _ = super::find_wan_connection_service(text);
     }
 }
 

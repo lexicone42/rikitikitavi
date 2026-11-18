@@ -58,5 +58,6 @@ pub mod tr069;
 pub mod tuya;
 pub mod upnp_igd;
 pub mod wifi;
+mod xml;
 
 pub use traits::{Scanner, ScannerRegistry};

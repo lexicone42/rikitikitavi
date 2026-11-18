@@ -634,6 +634,15 @@ impl Scanner for SmbScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn response(data: &[u8]) {
+        let _ = super::classify_smb_response(data);
+        let _ = super::parse_smbv1_negotiate_details(data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

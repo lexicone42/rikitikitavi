@@ -125,17 +125,7 @@ fn decode_entities(s: &str) -> String {
 /// Text content of the first `<tag>...</tag>`, trimmed and entity-decoded.
 /// Returns `None` when absent or empty.
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let rest = xml.get(start..)?;
-    let end = rest.find(&close)?;
-    let content = rest.get(..end)?.trim();
-    if content.is_empty() {
-        None
-    } else {
-        Some(decode_entities(content))
-    }
+    crate::xml::tag_text(xml, tag).map(|content| decode_entities(&content))
 }
 
 /// Parse a SADP boolean (`true`/`false`, some firmware uses `1`/`0`).

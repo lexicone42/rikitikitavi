@@ -9,7 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+rikitikitavi-core = { path = "../crates/rikitikitavi-core" }
+rikitikitavi-export = { path = "../crates/rikitikitavi-export" }
 rikitikitavi-models = { path = "../crates/rikitikitavi-models" }
+serde_json = "1"
 rikitikitavi-network = { path = "../crates/rikitikitavi-network" }
 rikitikitavi-scanners = { path = "../crates/rikitikitavi-scanners", features = ["fuzzing"] }
 
@@ -105,6 +108,41 @@ bench = false
 [[bin]]
 name = "tables"
 path = "fuzz_targets/tables.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snmp_ber"
+path = "fuzz_targets/snmp_ber.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_nbns"
+path = "fuzz_targets/smb_nbns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "databases"
+path = "fuzz_targets/databases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "line_protocols"
+path = "fuzz_targets/line_protocols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exports"
+path = "fuzz_targets/exports.rs"
 test = false
 doc = false
 bench = false

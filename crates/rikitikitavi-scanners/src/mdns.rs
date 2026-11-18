@@ -35,16 +35,7 @@ pub struct UpnpDeviceInfo {
 
 /// Text between the first `<tag>` and following `</tag>` (non-recursive).
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    let content = xml[start..end].trim();
-    if content.is_empty() {
-        None
-    } else {
-        Some(content.to_owned())
-    }
+    crate::xml::tag_text(xml, tag)
 }
 
 /// Parse a `UPnP` device description XML into structured fields.

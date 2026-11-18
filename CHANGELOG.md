@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fuzzing: five new targets (`snmp_ber`, `smb_nbns`, `databases`,
+  `line_protocols`, `exports`), 18 in all. CI now runs each for 10 seconds
+  instead of only building them. No crashes in the new parser targets.
+- Kasa: the hand-written JSON reader is replaced by `serde_json`. A
+  differential fuzz run showed it accepted numbers JSON forbids (`3.`, `-.5`,
+  `01`) and `\u+123` escapes. A repeated key now reads as its last value
+  (it was the first).
+- The three copies of the XML tag extractor (mdns, upnp_igd, sadp) are one
+  function.
 - macOS: scans missed most hosts. macOS allows 256 open files per process and
   the host sweep opens up to 768 sockets at once; the failed connects were
   read as dead hosts. The process now raises its open-file limit at startup,

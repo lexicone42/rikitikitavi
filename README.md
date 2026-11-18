@@ -1036,7 +1036,7 @@ CI (`.github/workflows/ci.yml`) runs six jobs on every push to `main` and
 every PR: `check` (fmt, clippy, and clippy with `--features otel`), `test`
 (Linux), `test-macos`, `msrv`
 (`cargo check` on Rust 1.89), `deny`, and `fuzz-build` (nightly `cargo fuzz
-build`; the fuzzers are built, not run). Release-profile builds are not part
+build`, then a 10-second smoke run of each target). Release-profile builds are not part
 of CI.
 
 ## License

@@ -578,6 +578,16 @@ impl Scanner for SnmpScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn response(data: &[u8]) {
+        let _ = super::read_ber_tlv(data);
+        let _ = super::parse_snmp_response(data);
+        let _ = super::extract_sys_descr(data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

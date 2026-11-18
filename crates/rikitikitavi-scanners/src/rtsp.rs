@@ -466,6 +466,14 @@ async fn probe_and_report(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn response(text: &str) {
+        let _ = super::parse_rtsp_response(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

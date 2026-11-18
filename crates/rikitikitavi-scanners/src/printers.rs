@@ -430,6 +430,14 @@ impl Scanner for PrinterScanner {
     }
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn pjl(text: &str) {
+        let _ = super::parse_pjl_id(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

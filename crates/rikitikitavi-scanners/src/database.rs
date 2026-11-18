@@ -945,6 +945,22 @@ fn classify_mysql_version(version: &str) -> Severity {
     Severity::Low
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub fn binary(data: &[u8]) {
+        let _ = super::parse_resp_value(data);
+        let _ = super::classify_mongodb_reply(data);
+        let _ = super::parse_mysql_greeting(data);
+    }
+    pub fn text(text: &str) {
+        let _ = super::parse_redis_info(text);
+        let _ = super::classify_redis_response(text);
+        let _ = super::classify_elasticsearch_response(text);
+        let _ = super::classify_memcached_response(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

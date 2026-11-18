@@ -347,6 +347,14 @@ fn check_mqtt_tls_advisory(ip: &IpAddr, port: u16, findings: &mut Vec<Finding>) 
     );
 }
 
+/// Parser entry points for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    pub const fn connack(data: &[u8]) {
+        let _ = super::classify_connack(data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
