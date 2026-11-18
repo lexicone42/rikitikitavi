@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 — 2026-11-18
 
 - Fuzzing: five new targets (`snmp_ber`, `smb_nbns`, `databases`,
   `line_protocols`, `exports`), 18 in all. CI now runs each for 10 seconds
