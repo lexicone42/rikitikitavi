@@ -150,7 +150,7 @@ Related change not on this roadmap: dedup now drops only restatements (it used t
 
 ## Observations
 
-- **Possible false positive on the NAS:** `Vulnerable OpenSSH 8.2` on a Synology NAS may be the same backport problem as NT-04/NT-06. Synology patches packages without changing upstream version strings, as it does for PHP in SA-26:14. Not verified for OpenSSH; check against the DSM 7.2/7.4 release notes before trusting it. RE-06 would not help here (DSM is not Debian).
+- **Backported OpenSSH on the NAS (addressed after 0.5.2):** the NAS reports `OpenSSH_8.2` and offers strict key exchange, the Terrapin fix upstream shipped in 9.6, so Synology does backport into it. Terrapin is now decided from the key-exchange offer, and the remaining version-only CVEs on such a build are `Inferred`. Whether CVE-2023-38408 and CVE-2021-41617 are patched in DSM is still not verified. Open question: CVE-2023-38408 is an `ssh-agent` flaw rated High here against a listening `sshd`; it may deserve Medium, which would change the finding title for 8.x hosts.
 - **Soft-404 artefact (fixed in 0.5.0):** the 12 "possibly exposed admin page" findings on a UniFi camera came from a catch-all page. `http_audit.rs` now probes a non-existent path first and skips admin paths that return the same page.
-- **Hue "web admin panel without auth":** this likely flags the bridge's documented unauthenticated `/api/config` and needs a vendor exception. Not addressed.
+- **Hue "web admin panel without auth" (fixed):** it flagged the bridge's documented unauthenticated `/api/config`. `hue::suppress_bridge_admin_no_auth` drops it on hosts identified as a Hue bridge.
 - **Confidence mapping:** the research used a "Possible" tier that the code does not have. Map it to `Inferred`, or `exploit_intel.rs` will raise KEV-tagged backport-uncertain findings to High.

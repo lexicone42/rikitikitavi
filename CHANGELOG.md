@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- OpenSSH: Terrapin (CVE-2023-48795) is decided from the server's key-exchange
+  offer, not from the banner version, at standard intensity and above. A server
+  that offers strict key exchange, or no affected cipher mode, is no longer
+  reported for it. When the offer is not read (`--quick`, SSH on a port outside
+  the banner list, or a failed read) the version match stays.
+- OpenSSH CVE findings matched on the version alone are marked inferred when
+  the build is known to carry backports: a pre-9.6 server that offers strict key
+  exchange (seen on Synology DSM), or a banner naming a distribution release
+  that is still supported. Inferred findings are not raised by KEV or SSVC.
+  Titles and fingerprints are unchanged.
+- The SSH key-exchange read collects the whole packet, and keeps one sent in
+  the same segment as the identification line.
+
 ## 0.5.2 — 2026-11-18
 
 - Fuzzing: five new targets (`snmp_ber`, `smb_nbns`, `databases`,

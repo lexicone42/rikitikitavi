@@ -116,6 +116,50 @@ pub fn parse_ssh_kex_init(data: &[u8]) -> Option<SshKexInfo> {
     })
 }
 
+/// Kex pseudo-algorithm a server lists once it has the CVE-2023-48795 fix.
+const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
+
+const TERRAPIN_CVE: &str = "CVE-2023-48795";
+
+/// What a server's `kex_init` shows about Terrapin (CVE-2023-48795).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terrapin {
+    /// Strict key exchange is offered: the fix is present.
+    Fixed,
+    /// No strict key exchange, and an affected cipher mode is offered.
+    Exposed,
+    /// No strict key exchange, and no affected cipher mode is offered.
+    NotOffered,
+}
+
+/// Terrapin status from the algorithm lists. `None` when the lists needed to
+/// rule the attack out are missing, as in a truncated packet.
+#[must_use]
+pub fn terrapin_status(info: &SshKexInfo) -> Option<Terrapin> {
+    if info.kex_algorithms.iter().any(|a| a == KEX_STRICT_SERVER) {
+        return Some(Terrapin::Fixed);
+    }
+    if info.ciphers_client.is_empty() {
+        return None;
+    }
+    let chacha = info
+        .ciphers_client
+        .iter()
+        .any(|c| c == "chacha20-poly1305@openssh.com");
+    let cbc = info.ciphers_client.iter().any(|c| c.ends_with("-cbc"));
+    let etm = info
+        .macs_client
+        .iter()
+        .any(|m| m.ends_with("-etm@openssh.com"));
+    if chacha || (cbc && etm) {
+        return Some(Terrapin::Exposed);
+    }
+    if info.macs_client.is_empty() {
+        return None;
+    }
+    Some(Terrapin::NotOffered)
+}
+
 /// Classify weak SSH algorithms from a `kex_init` exchange.
 pub fn classify_ssh_kex(ip: IpAddr, port: u16, info: &SshKexInfo) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -238,16 +282,46 @@ async fn probe_ssh_kex(ip: IpAddr, port: u16) -> Option<SshKexInfo> {
         .ok()?
         .ok()?;
 
-    let mut kex_buf = vec![0u8; 8192];
-    let kn = tokio::time::timeout(BANNER_TIMEOUT, stream.read(&mut kex_buf))
-        .await
-        .ok()?
-        .ok()?;
-    if kn == 0 {
-        return None;
+    // Some servers send `kex_init` in the same segment as their identification.
+    let early = after_ssh_ident(&buf[..n]);
+    let mut kex_buf = vec![0u8; MAX_KEX_BYTES];
+    let mut len = early.len().min(MAX_KEX_BYTES);
+    kex_buf[..len].copy_from_slice(&early[..len]);
+
+    let deadline = tokio::time::Instant::now() + BANNER_TIMEOUT;
+    while len < ssh_packet_end(&kex_buf[..len]) {
+        match tokio::time::timeout_at(deadline, stream.read(&mut kex_buf[len..])).await {
+            Ok(Ok(read)) if read > 0 => len += read,
+            _ => break,
+        }
     }
 
-    parse_ssh_kex_init(&kex_buf[..kn])
+    parse_ssh_kex_init(&kex_buf[..len])
+}
+
+/// Bytes read for one `kex_init` packet.
+const MAX_KEX_BYTES: usize = 8192;
+
+/// Bytes after the `SSH-` identification line, or empty.
+fn after_ssh_ident(data: &[u8]) -> &[u8] {
+    let Some(start) = data.windows(4).position(|w| w == b"SSH-") else {
+        return &[];
+    };
+    data[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(&[], |nl| &data[start + nl + 1..])
+}
+
+/// Offset at which the first binary packet in `buf` ends, capped at `MAX_KEX_BYTES`.
+fn ssh_packet_end(buf: &[u8]) -> usize {
+    let Some(len) = buf.first_chunk::<4>() else {
+        return 4;
+    };
+    usize::try_from(u32::from_be_bytes(*len))
+        .unwrap_or(MAX_KEX_BYTES)
+        .saturating_add(4)
+        .min(MAX_KEX_BYTES)
 }
 
 // ── SMTP EHLO probe ─────────────────────────────────────────────────
@@ -1301,8 +1375,40 @@ fn select_banner_targets(
 }
 
 /// Classify a banner finding based on the service and version info.
-#[allow(clippy::too_many_lines)]
 fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
+    classify_banner_kex(ip, port, banner, None)
+}
+
+/// Note for an OpenSSH CVE list that rests on the version number while the
+/// build is known to carry backported patches. `None` when nothing says so.
+fn openssh_backport_note(
+    banner: &str,
+    version: (u32, u32),
+    terrapin: Option<Terrapin>,
+) -> Option<&'static str> {
+    if terrapin == Some(Terrapin::Fixed) && version < (9, 6) {
+        return Some(
+            "\nThe server offers strict key exchange, the CVE-2023-48795 fix that upstream \
+             shipped in 9.6, so this build carries backported patches. The CVEs above are \
+             matched on the version number alone and may be patched too; check the vendor's \
+             security advisories for this firmware.",
+        );
+    }
+    live_distro_marker(banner).then_some(
+        "\nThe banner names a distribution package. Distributions patch without changing \
+         the upstream version, so the CVEs above are matched on the version number alone; \
+         check the installed package version against the distribution's security tracker.",
+    )
+}
+
+/// `classify_banner` with the Terrapin status read from the server's `kex_init`.
+#[allow(clippy::too_many_lines)]
+fn classify_banner_kex(
+    ip: IpAddr,
+    port: u16,
+    banner: &str,
+    terrapin: Option<Terrapin>,
+) -> Option<Finding> {
     let banner_lower = banner.to_lowercase();
 
     if port == 6379
@@ -1401,7 +1507,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
         }
 
         if let Some((major, minor)) = extract_ssh_version(banner) {
-            let cves = check_openssh_cves(major, minor);
+            let mut cves = check_openssh_cves(major, minor);
+            if matches!(terrapin, Some(Terrapin::Fixed | Terrapin::NotOffered)) {
+                cves.retain(|(id, _, _)| *id != TERRAPIN_CVE);
+            }
             if !cves.is_empty() {
                 let max_severity = cves.iter().map(|c| c.2).max().unwrap_or(Severity::Low);
 
@@ -1423,14 +1532,25 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
                     format!("OpenSSH with known CVEs on {ip}:{port}")
                 };
 
+                let observed = if terrapin == Some(Terrapin::Exposed)
+                    && cves.iter().any(|(id, _, _)| *id == TERRAPIN_CVE)
+                {
+                    "\nCVE-2023-48795 is observed, not inferred from the version: the server \
+                     offers an affected cipher mode without strict key exchange."
+                } else {
+                    ""
+                };
+                let backport_note = openssh_backport_note(banner, (major, minor), terrapin);
+
                 let mut finding = Finding::new(
                     "services",
                     &title,
                     &format!(
                         "OpenSSH {major}.{minor} at {ip}:{port} is affected by {} known \
-                         vulnerabilities:\n{}",
+                         vulnerabilities:\n{}{observed}{}",
                         cves.len(),
-                        cve_list.join("\n")
+                        cve_list.join("\n"),
+                        backport_note.unwrap_or_default()
                     ),
                     max_severity,
                 )
@@ -1452,6 +1572,10 @@ fn classify_banner(ip: IpAddr, port: u16, banner: &str) -> Option<Finding> {
                         "rikitikitavi.services.outdated-ssh",
                         &[],
                     ));
+                }
+
+                if backport_note.is_some() {
+                    finding = finding.with_confidence(Confidence::Inferred);
                 }
 
                 if let Some(os) = parse_os_from_ssh_banner(banner) {
@@ -1587,7 +1711,7 @@ pub fn check_openssh_cves(major: u32, minor: u32) -> Vec<(&'static str, &'static
     // CVE-2023-48795 Terrapin: < 9.6
     if major < 9 || (major == 9 && minor < 6) {
         cves.push((
-            "CVE-2023-48795",
+            TERRAPIN_CVE,
             "Terrapin attack: prefix truncation on chacha20-poly1305 and \
              CBC-mode with encrypt-then-MAC allows message manipulation",
             Severity::Medium,
@@ -1970,12 +2094,17 @@ fn dead_distro_marker(lower: &str) -> bool {
 /// drops the claim to `Low` — unless the marker names a distribution generation
 /// that is itself dead, where nothing is backporting.
 pub(crate) fn eol_severity(context: &str) -> Severity {
-    let lower = context.to_ascii_lowercase();
-    if DISTRO_MARKERS.iter().any(|m| lower.contains(m)) && !dead_distro_marker(&lower) {
+    if live_distro_marker(context) {
         Severity::Low
     } else {
         Severity::Medium
     }
+}
+
+/// True when `context` names a distribution generation that is still patched.
+fn live_distro_marker(context: &str) -> bool {
+    let lower = context.to_ascii_lowercase();
+    DISTRO_MARKERS.iter().any(|m| lower.contains(m)) && !dead_distro_marker(&lower)
 }
 
 /// EOL findings for secondary `name/version` tokens in a `Server` header.
@@ -2093,13 +2222,7 @@ const fn is_likely_http_port(port: u16) -> bool {
 
 /// Run deep protocol-specific probes on a port based on its well-known service.
 #[tracing::instrument(level = "debug", skip_all, fields(%ip, port = port))]
-async fn deep_probe(ip: IpAddr, port: u16, banner: Option<&str>) -> Vec<Finding> {
-    if port == 22 || banner.is_some_and(is_ssh_banner) {
-        return probe_ssh_kex(ip, port)
-            .await
-            .map_or_else(Vec::new, |kex| classify_ssh_kex(ip, port, &kex));
-    }
-
+async fn deep_probe(ip: IpAddr, port: u16) -> Vec<Finding> {
     match port {
         25 | 587 => probe_smtp_ehlo(ip, port)
             .await
@@ -2129,14 +2252,23 @@ async fn probe_device(device: &Device, role: HostRole, active: bool) -> Vec<Find
         let port = open_port.port;
         if BANNER_PORTS.contains(&port) {
             let banner = grab_banner(ip, port).await;
+            let ssh = port == 22 || banner.as_deref().is_some_and(is_ssh_banner);
+            let kex = if active && ssh {
+                probe_ssh_kex(ip, port).await
+            } else {
+                None
+            };
             if let Some(banner) = banner.as_deref() {
-                findings.extend(classify_banner(ip, port, banner));
+                let terrapin = kex.as_ref().and_then(terrapin_status);
+                findings.extend(classify_banner_kex(ip, port, banner, terrapin));
                 findings.extend(check_os_eol(ip, port, banner));
                 findings.extend(classify_backdoor_ssh(ip, port, banner, role));
                 findings.extend(recog_banner(ip, port, banner));
             }
-            if active {
-                findings.extend(deep_probe(ip, port, banner.as_deref()).await);
+            if let Some(kex) = &kex {
+                findings.extend(classify_ssh_kex(ip, port, kex));
+            } else if active && !ssh {
+                findings.extend(deep_probe(ip, port).await);
             }
         } else if HTTP_PORTS.contains(&port) || is_likely_http_port(port) {
             if let Some(server) = grab_http_server(ip, port).await {
@@ -2315,6 +2447,13 @@ pub mod fuzz {
 
     pub fn banner(ip: IpAddr, port: u16, text: &str) {
         let _ = super::classify_banner(ip, port, text);
+        for status in [
+            super::Terrapin::Fixed,
+            super::Terrapin::Exposed,
+            super::Terrapin::NotOffered,
+        ] {
+            let _ = super::classify_banner_kex(ip, port, text, Some(status));
+        }
         let _ = super::classify_http_server(ip, port, text);
         let _ = super::parse_os_from_ssh_banner(text);
     }
@@ -2854,6 +2993,150 @@ mod tests {
         };
         let findings = classify_ssh_kex(ip, 22, &info);
         assert_eq!(findings.len(), 2); // weak ciphers + weak MACs
+    }
+
+    fn kex_info(kex: &str, ciphers: &str, macs: &str) -> SshKexInfo {
+        let pkt = build_kex_init_packet(kex, "ssh-ed25519", ciphers, ciphers, macs);
+        parse_ssh_kex_init(&pkt).unwrap()
+    }
+
+    #[test]
+    fn terrapin_status_reads_strict_kex_and_cipher_modes() {
+        let strict = kex_info(
+            "curve25519-sha256,kex-strict-s-v00@openssh.com",
+            "chacha20-poly1305@openssh.com",
+            "hmac-sha2-256",
+        );
+        assert_eq!(terrapin_status(&strict), Some(Terrapin::Fixed));
+
+        let chacha = kex_info(
+            "curve25519-sha256",
+            "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
+            "hmac-sha2-256",
+        );
+        assert_eq!(terrapin_status(&chacha), Some(Terrapin::Exposed));
+
+        let cbc_etm = kex_info(
+            "curve25519-sha256",
+            "aes256-cbc",
+            "hmac-sha2-256-etm@openssh.com",
+        );
+        assert_eq!(terrapin_status(&cbc_etm), Some(Terrapin::Exposed));
+
+        let cbc_plain_mac = kex_info("curve25519-sha256", "aes256-cbc", "hmac-sha2-256");
+        assert_eq!(terrapin_status(&cbc_plain_mac), Some(Terrapin::NotOffered));
+
+        let ctr_etm = kex_info(
+            "curve25519-sha256",
+            "aes256-ctr,aes256-gcm@openssh.com",
+            "hmac-sha2-256-etm@openssh.com",
+        );
+        assert_eq!(terrapin_status(&ctr_etm), Some(Terrapin::NotOffered));
+
+        // The client-side strict marker is not the server's.
+        let client_marker = kex_info(
+            "curve25519-sha256,kex-strict-c-v00@openssh.com",
+            "chacha20-poly1305@openssh.com",
+            "hmac-sha2-256",
+        );
+        assert_eq!(terrapin_status(&client_marker), Some(Terrapin::Exposed));
+    }
+
+    /// A packet cut before the cipher or MAC list cannot rule the attack out.
+    #[test]
+    fn terrapin_status_is_unknown_on_truncated_lists() {
+        let no_ciphers = SshKexInfo {
+            kex_algorithms: vec!["curve25519-sha256".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(terrapin_status(&no_ciphers), None);
+
+        let no_macs = SshKexInfo {
+            kex_algorithms: vec!["curve25519-sha256".to_owned()],
+            ciphers_client: vec!["aes256-cbc".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(terrapin_status(&no_macs), None);
+    }
+
+    #[test]
+    fn after_ssh_ident_returns_bytes_past_the_line() {
+        assert_eq!(
+            after_ssh_ident(b"SSH-2.0-dropbear\r\n\x00\x00\x01"),
+            b"\x00\x00\x01"
+        );
+        assert_eq!(after_ssh_ident(b"notice\r\nSSH-2.0-x\r\nAB"), b"AB");
+        assert!(after_ssh_ident(b"SSH-2.0-OpenSSH_9.9\r\n").is_empty());
+        assert!(after_ssh_ident(b"SSH-2.0-OpenSSH_9.9").is_empty());
+        assert!(after_ssh_ident(b"220 ftp\r\n").is_empty());
+    }
+
+    #[test]
+    fn ssh_packet_end_is_bounded() {
+        assert_eq!(ssh_packet_end(&[]), 4);
+        assert_eq!(ssh_packet_end(&[0, 0, 1]), 4);
+        assert_eq!(ssh_packet_end(&[0, 0, 4, 0xd4]), 4 + 1236);
+        assert_eq!(ssh_packet_end(&[0xff; 4]), MAX_KEX_BYTES);
+    }
+
+    fn cve_ids(f: &Finding) -> Vec<&str> {
+        f.cve_ids.iter().map(String::as_str).collect()
+    }
+
+    /// A pre-9.6 version that offers strict key exchange carries backports: the
+    /// Terrapin CVE goes and the rest become a hypothesis. The title is unchanged.
+    #[test]
+    fn openssh_cves_with_backported_terrapin_fix_are_inferred() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        let plain = classify_banner(ip, 22, "SSH-2.0-OpenSSH_8.2").unwrap();
+        assert!(cve_ids(&plain).contains(&TERRAPIN_CVE));
+        assert_eq!(plain.confidence, Confidence::Probable);
+
+        let fixed =
+            classify_banner_kex(ip, 22, "SSH-2.0-OpenSSH_8.2", Some(Terrapin::Fixed)).unwrap();
+        assert_eq!(fixed.title, plain.title);
+        assert_eq!(fixed.severity, plain.severity);
+        assert!(!cve_ids(&fixed).contains(&TERRAPIN_CVE));
+        assert!(cve_ids(&fixed).contains(&"CVE-2023-38408"));
+        assert_eq!(fixed.confidence, Confidence::Inferred);
+        assert!(fixed.description.contains("backported patches"));
+        assert!(!fixed.description.contains("CVE-2023-48795 ("));
+    }
+
+    #[test]
+    fn openssh_terrapin_exposed_is_stated_as_observed() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        let f =
+            classify_banner_kex(ip, 22, "SSH-2.0-OpenSSH_8.2", Some(Terrapin::Exposed)).unwrap();
+        assert!(cve_ids(&f).contains(&TERRAPIN_CVE));
+        assert_eq!(f.confidence, Confidence::Probable);
+        assert!(f.description.contains("observed, not inferred"));
+    }
+
+    #[test]
+    fn openssh_terrapin_not_offered_drops_only_that_cve() {
+        let ip: IpAddr = "192.168.1.220".parse().unwrap();
+        let f =
+            classify_banner_kex(ip, 22, "SSH-2.0-OpenSSH_8.2", Some(Terrapin::NotOffered)).unwrap();
+        assert!(!cve_ids(&f).contains(&TERRAPIN_CVE));
+        assert!(cve_ids(&f).contains(&"CVE-2023-38408"));
+        assert_eq!(f.confidence, Confidence::Probable);
+    }
+
+    /// A live distribution's package is patched in place; a dead one is not.
+    #[test]
+    fn openssh_cves_on_a_distribution_package_follow_its_support() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let live = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3").unwrap();
+        assert_eq!(live.confidence, Confidence::Inferred);
+        assert!(live.description.contains("distribution package"));
+
+        let dead = classify_banner(ip, 22, "SSH-2.0-OpenSSH_7.9p1 Debian-10+deb10u2").unwrap();
+        assert_eq!(dead.confidence, Confidence::Probable);
+        assert!(!dead.description.contains("distribution package"));
+
+        let bare = classify_banner(ip, 22, "SSH-2.0-OpenSSH_9.2").unwrap();
+        assert_eq!(bare.confidence, Confidence::Probable);
     }
 
     #[test]
@@ -4305,6 +4588,23 @@ mod backdoor_ssh_tests {
     }
 
     proptest! {
+        /// A server shown to have the fix, or to offer no affected mode, is never
+        /// reported for Terrapin, whatever its banner says.
+        #[test]
+        fn prop_terrapin_cve_absent_when_ruled_out(
+            major in 1u32..12,
+            minor in 0u32..10,
+            suffix in "(p[0-9])?( [A-Za-z0-9+.-]{0,20})?",
+            fixed in any::<bool>(),
+        ) {
+            let ip: IpAddr = "10.0.0.5".parse().unwrap();
+            let banner = format!("SSH-2.0-OpenSSH_{major}.{minor}{suffix}");
+            let status = if fixed { Terrapin::Fixed } else { Terrapin::NotOffered };
+            if let Some(f) = classify_banner_kex(ip, 22, &banner, Some(status)) {
+                prop_assert!(!f.cve_ids.iter().any(|c| c == TERRAPIN_CVE));
+            }
+        }
+
         /// `is_ssh_banner` never panics on arbitrary text.
         #[test]
         fn prop_is_ssh_banner_no_panic(s in ".*") {
